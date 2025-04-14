@@ -1,8 +1,4 @@
-# Guidance Title (required)
-
-The Guidance title should be consistent with the title established first in Alchemy.
-
-**Example:** *Guidance for Product Substitutions on AWS*
+# Guidance for Open Source 3D Reconstruction Toolbox for Gaussian Splats on AWS
 
 This title correlates exactly to the Guidance it’s linked to, including its corresponding sample code repository. 
 
@@ -204,12 +200,12 @@ Consider formatting this section based on Keep a Changelog, and adhering to Sema
 
 ## Notices (optional)
 
-Include a legal disclaimer
-
-**Example:**
 *Customers are responsible for making their own independent assessment of the information in this Guidance. This Guidance: (a) is for informational purposes only, (b) represents AWS current product offerings and practices, which are subject to change without notice, and (c) does not create any commitments or assurances from AWS and its affiliates, suppliers or licensors. AWS products or services are provided “as is” without warranties, representations, or conditions of any kind, whether express or implied. AWS responsibilities and liabilities to its customers are controlled by AWS agreements, and this Guidance is not part of, nor does it modify, any agreement between AWS and its customers.*
 
 
 ## Authors (optional)
 
-Name of code contributors
+Standford Lee, Technical Account Manager (ANZ)
+Eric Cornwell, Sr. Spatial Compute SA
+Dario Macangano, Sr. WordlWide Visual Compute SA
+Daniel Zilberman, Sr. SA AWS Technical Solutions
