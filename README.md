@@ -227,7 +227,7 @@ The following table provides a sample cost breakdown for deploying this Guidance
 
 
 ## Deployment Steps (required)
-
+<!--
 Deployment steps must be numbered, comprehensive, and usable to customers at any level of AWS expertise. The steps must include the precise commands to run, and describe the action it performs.
 
 * All steps must be numbered.
@@ -245,8 +245,11 @@ Deployment steps must be numbered, comprehensive, and usable to customers at any
 4. Edit content of **file-name** and replace **s3-bucket** with the bucket name in your account.
 5. Run this command to deploy the stack ```cdk deploy``` 
 6. Capture the domain name created by running this CLI command ```aws apigateway ............```
+-->
 
+For detailed guidance deployment steps please see the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
 
+**TO DO: update with a live implementation guide link when available** 
 
 ## Deployment Validation  (required)
 
