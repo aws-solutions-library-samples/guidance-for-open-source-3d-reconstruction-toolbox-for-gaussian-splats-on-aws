@@ -3,7 +3,7 @@
 This title correlates exactly to the Guidance it’s linked to, including its corresponding sample code repository. 
 
 
-## Table of Contents (required)
+## Table of Contents
 
 List the top-level sections of the README template, along with a hyperlink to the specific section.
 
