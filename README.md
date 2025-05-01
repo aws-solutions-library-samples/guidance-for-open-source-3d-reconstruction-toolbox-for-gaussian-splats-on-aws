@@ -28,13 +28,13 @@ List the top-level sections of the README template, along with a hyperlink to th
 
 <!-- copied from the GitLab README -->
 # Open Source 3D Reconstruction Toolbox for Gaussian Splats
-This solution provides the infrastructure and open source code to reconstruct 3D scenes or objects (splats) from images or video. Under the hood, there is a 3D gaussian splatting workflow with various processing pipelines such as image processing/filtering (background removal), structure-from-motion (images-to-point-cloud), and gaussian splat training which uses traditional AI/ML approaches on a GPU. Both a Cloud Development Kit (CDK) and a Terraform infrastructure as code deployments are available and deploy a full backend system to 1/ enable a user to upload the media and json configuration file to S3 and 2/ output an email notification on completion of splat and assets.
+This guidance provides the infrastructure and open source code to reconstruct 3D scenes or objects (splats) from images or video. Under the hood, there is a 3D gaussian splatting workflow with various processing pipelines such as image processing/filtering (background removal), structure-from-motion (images-to-point-cloud), and gaussian splat training which uses traditional AI/ML approaches on a GPU. Both a Cloud Development Kit (CDK) and a Terraform infrastructure as code deployments are available and deploy a full backend system to 1/ enable a user to upload the media and json configuration file to S3 and 2/ output an email notification on completion of splat and assets.
 
 ## I. Summary
 
-The Open Source 3D Reconstruction Toolbox for Gaussian Splats provides an end-to-end, pipeline-based solution on AWS to reconstruct 3D scenes or objects from images or video inputs. The infrastructure can be deployed via AWS Cloud Development Kit (CDK) or Terraform leveraging infrastructure-as-code. 
+The Open Source 3D Reconstruction Toolbox for Gaussian Splats provides an end-to-end, pipeline-based guidance on AWS to reconstruct 3D scenes or objects from images or video inputs. The infrastructure can be deployed via AWS Cloud Development Kit (CDK) or Terraform leveraging infrastructure-as-code. 
 
-Once deployed, the solution features a full 3D reconstruction back-end system with the following customizable components or pipelines:
+Once deployed, the guidance features a full 3D reconstruction back-end system with the following customizable components or pipelines:
 
 1. **Media Ingestion**: Process videos or collections of images as input
 2. **Image Processing**: Automatic filtering, enhancement, and preparation of source imagery (e.g. background removal)
@@ -42,13 +42,22 @@ Once deployed, the solution features a full 3D reconstruction back-end system wi
 4. **Gaussian Splat Training**: Optimization of 3D Gaussian primitives to represent the scene using AI/ML
 5. **Export & Delivery**: Generation of the final 3D asset in standard formats for easy viewing and notification via email
 
-By deploying this solution, users gain access to a flexible infrastructure that handles the entire 3D reconstruction process programatically, from media upload to final 3D model delivery, while being highly modular through its componentized pipeline-based approach. This solution addresses the significant challenges organizations face when trying to create photorealistic 3D content - traditionally a time-consuming, expensive, and technically complex process requiring specialized skills and equipment.
+By deploying this guidance, users gain access to a flexible infrastructure that handles the entire 3D reconstruction process programatically, from media upload to final 3D model delivery, while being highly modular through its componentized pipeline-based approach. This guidance addresses the significant challenges organizations face when trying to create photorealistic 3D content - traditionally a time-consuming, expensive, and technically complex process requiring specialized skills and equipment.
 
 <!-- ![](docs/media/gs-workflow-arch.png "Architecture Diagram") -->
+### Architecture Diagram
 
-1.	System administrator deploys solution to AWS account and region using AWS Cloud Development Kit or Terraform.
-2.	Once solution is deployed in a specific AWS account and region, an authenticated user uploads the necessary configuration and input media into a dedicated Amazon Simple Storage Service (S3) bucket location. This can be done using a Gradio interface and AWS Software Development Kit (SDK).
-3.	Optionally, the solution supports external job submission by uploading a ‘.json’ job configuration file and media into a designated S3 bucket location. This upload process could be manual through the AWS Management Console or could also be an external process depending on the use-case.
+<div align="center">
+<img src="assets/gs-workflow-arch.png" width=70%> 
+<br/>
+<i>Figure 1: 3D Reconstruction Toolbox for Gaussian Splats on AWS Reference Architecture  </i>
+</div>
+
+### Architecture Steps
+
+1.	System administrator deploys guidance to AWS account and region using AWS Cloud Development Kit or Terraform.
+2.	Once guidance is deployed in a specific AWS account and region, an authenticated user uploads the necessary configuration and input media into a dedicated Amazon Simple Storage Service (S3) bucket location. This can be done using a Gradio interface and AWS Software Development Kit (SDK).
+3.	Optionally, the guidance supports external job submission by uploading a ‘.json’ job configuration file and media into a designated S3 bucket location. This upload process could be manual through the AWS Management Console or could also be an external process depending on the use-case.
 4.	The job json file upload to the bucket location will trigger an Amazon Simple Notification Service (SNS) message that will invoke an initialization AWS Lambda function.
 5.	The initialization Lambda function will perform input validation and set appropriate variables for the state machine.
 6.	The workflow job record will be created in Amazon DynamoDB job table.
@@ -57,7 +66,7 @@ By deploying this solution, users gain access to a flexible infrastructure that 
 9.	The Amazon Elastic Container Registry (ECR) container image and S3 model artifacts will be used to spin up a new graphics processing unit (GPU) container. The instance type is determined by the job json configuration.
 10.	The GPU container will run the entire pipeline.
 11.	Upon job completion or error, a completion Lambda function will complete the workflow job by updating the job in DynamoDB and notifying the user via email upon completion using SNS.
-12.	Internal workflow parameters are stored in Parameter Store during solution deployment to decouple services.
+12.	Internal workflow parameters are stored in Parameter Store during guidance deployment to decouple services.
 13.	Amazon CloudWatch is used to monitor the training logs, surfacing errors to th
 
 
@@ -117,8 +126,8 @@ The following table provides a sample cost breakdown for deploying this Guidance
 
 ## Prerequisites 
 
-- Local computer with appropriate AWS credentials to deploy the CDK or Terraform solution
-- **(Optional, but recommended)** Use an EC2 workstation to build and deploy the CDK or Terraform solution
+- Local computer with appropriate AWS credentials to deploy the CDK or Terraform guidance
+- **(Optional, but recommended)** Use an EC2 workstation to build and deploy the CDK or Terraform guidance
     - Ensure your local computer has an SSH client (For Windows, [Putty](https://www.putty.org/) was tested)
     - Ensure your local computer has the NICE DCV client installed ([Windows](https://docs.aws.amazon.com/dcv/latest/userguide/client-windows.html), [MacOS](https://docs.aws.amazon.com/dcv/latest/userguide/client-mac.html), or [Linux](https://docs.aws.amazon.com/dcv/latest/userguide/client-linux.html))
     - A CloudFormation template is given [here](https://github.com/aws-samples/aws-deep-learning-ami-ubuntu-dcv-desktop) to spin up a fresh, full-featured Ubuntu desktop
@@ -314,4 +323,4 @@ Consider formatting this section based on Keep a Changelog, and adhering to Sema
 Standford Lee, Technical Account Manager (ANZ)
 Eric Cornwell, Sr. Spatial Compute SA
 Dario Macangano, Sr. WordlWide Visual Compute SA
-Daniel Zilberman, Sr. SA AWS Technical Solutions
+Daniel Zilberman, Sr. SA AWS Technical guidances
