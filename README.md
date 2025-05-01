@@ -48,7 +48,7 @@ By deploying this guidance, users gain access to a flexible infrastructure that 
 ### Architecture Diagram
 
 <div align="center">
-<img src="assets/gs-workflow-arch.png" width=70%> 
+<img src="assets/gs-workflow-arch-new.jpg" width=70%> 
 <br/>
 <i>Figure 1: 3D Reconstruction Toolbox for Gaussian Splats on AWS Reference Architecture  </i>
 </div>
