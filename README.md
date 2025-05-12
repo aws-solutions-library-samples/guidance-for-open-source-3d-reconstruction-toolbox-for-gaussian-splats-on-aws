@@ -26,10 +26,16 @@ Once deployed, the guidance features a full 3D reconstruction back-end system wi
 
 By deploying this guidance, users gain access to a flexible infrastructure that handles the entire 3D reconstruction process programatically, from media upload to final 3D model delivery, while being highly modular through its componentized pipeline-based approach. This guidance addresses the significant challenges organizations face when trying to create photorealistic 3D content - traditionally a time-consuming, expensive, and technically complex process requiring specialized skills and equipment.
 
-<!-- ![](docs/media/gs-workflow-arch.png "Architecture Diagram") -->
-
 ## Architecture
 
+This guidance will:
+- create the infrastructure required to create a gaussian splat from a video or set of images
+- create the mechanism to run the code and perform 3D reconstruction
+- enable a user to create a 3D gaussian splat from the backend (no UI) using open source tools and AWS by uploading a video (.mp4 or .mov) or images (.png or .jpg) and metadata (.json) into S3
+
+### Architecture Diagram
+
+<!-- ![](docs/media/gs-workflow-arch.png "Architecture Diagram") -->
 <div align="center">
 <img src="assets/gs-workflow-arch-new.jpg" width=70%> 
 <br/>
@@ -51,12 +57,6 @@ By deploying this guidance, users gain access to a flexible infrastructure that 
 11. Upon job completion or error, a completion Lambda function will complete the workflow job by updating the job in DynamoDB and notifying the user via email upon completion using SNS.
 12. Internal workflow parameters are stored in Parameter Store during guidance deployment to decouple services.
 13. Amazon CloudWatch is used to monitor the training logs, surfacing errors to the user.
-
-This simple backend will:
-
-- create the infrastructure required to create a gaussian splat from a video or set of images
-- create the mechanism to run the code and perform 3D reconstruction
-- enable a user to create a 3D gaussian splat from the backend (no UI) using open source tools and AWS by uploading a video (.mp4 or .mov) or images (.png or .jpg) and metadata (.json) into S3
 
 ### Custom GS Pipeline Container
 
