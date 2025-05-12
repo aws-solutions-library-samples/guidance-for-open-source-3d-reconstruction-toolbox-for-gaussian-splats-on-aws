@@ -1,37 +1,18 @@
 # Guidance for Open Source 3D Reconstruction Toolbox for Gaussian Splats on AWS
 
-This title correlates exactly to the Guidance it’s linked to, including its corresponding sample code repository.
+This guidance provides the infrastructure and open source code to reconstruct 3D scenes or objects (splats) from images or video. Under the hood, there is a 3D gaussian splatting workflow with various processing pipelines such as image processing/filtering (background removal), structure-from-motion (images-to-point-cloud), and gaussian splat training which uses traditional AI/ML approaches on a GPU. Both a Cloud Development Kit (CDK) and a Terraform infrastructure as code deployments are available and deploy a full backend system to 1/ enable a user to upload the media and json configuration file to S3 and 2/ output an email notification on completion of splat and assets.
 
 ## Table of Contents
 
-List the top-level sections of the README template, along with a hyperlink to the specific section.
-
-### Required
-
 1. [Overview](#overview)
-   - [Cost](#cost)
-2. [Prerequisites](#prerequisites)
-   - [Operating System](#operating-system)
-3. [Deployment Steps](#deployment-steps)
-4. [Deployment Validation](#deployment-validation)
-5. [Running the Guidance](#running-the-guidance)
+2. [Architecture](#architecture)
+3. [Prerequisites](#prerequisites)
+4. [Deployment and User Guide](#deployment-and-user-guide)
+5. [Cost](#cost)
 6. [Next Steps](#next-steps)
-7. [Cleanup](#cleanup)
+7. [Authors](#authors)
 
-**_Optional_**
-
-8. [FAQ, known issues, additional considerations, and limitations](#faq-known-issues-additional-considerations-and-limitations-optional)
-9. [Revisions](#revisions-optional)
-10. [Notices](#notices-optional)
-11. [Authors](#authors-optional)
-
-<!-- copied from the GitLab README -->
-
-# Open Source 3D Reconstruction Toolbox for Gaussian Splats
-
-This guidance provides the infrastructure and open source code to reconstruct 3D scenes or objects (splats) from images or video. Under the hood, there is a 3D gaussian splatting workflow with various processing pipelines such as image processing/filtering (background removal), structure-from-motion (images-to-point-cloud), and gaussian splat training which uses traditional AI/ML approaches on a GPU. Both a Cloud Development Kit (CDK) and a Terraform infrastructure as code deployments are available and deploy a full backend system to 1/ enable a user to upload the media and json configuration file to S3 and 2/ output an email notification on completion of splat and assets.
-
-## I. Summary
+## Overview
 
 The Open Source 3D Reconstruction Toolbox for Gaussian Splats provides an end-to-end, pipeline-based guidance on AWS to reconstruct 3D scenes or objects from images or video inputs. The infrastructure can be deployed via AWS Cloud Development Kit (CDK) or Terraform leveraging infrastructure-as-code.
 
@@ -47,7 +28,7 @@ By deploying this guidance, users gain access to a flexible infrastructure that 
 
 <!-- ![](docs/media/gs-workflow-arch.png "Architecture Diagram") -->
 
-### Architecture Diagram
+## Architecture
 
 <div align="center">
 <img src="assets/gs-workflow-arch-new.jpg" width=70%> 
@@ -69,7 +50,7 @@ By deploying this guidance, users gain access to a flexible infrastructure that 
 10. The GPU container will run the entire pipeline.
 11. Upon job completion or error, a completion Lambda function will complete the workflow job by updating the job in DynamoDB and notifying the user via email upon completion using SNS.
 12. Internal workflow parameters are stored in Parameter Store during guidance deployment to decouple services.
-13. Amazon CloudWatch is used to monitor the training logs, surfacing errors to th
+13. Amazon CloudWatch is used to monitor the training logs, surfacing errors to the user.
 
 This simple backend will:
 
@@ -89,120 +70,7 @@ In this project, there is only one Docker container that contains all of the 3D 
 - [backgroundremover](https://github.com/nadermx/backgroundremover) [(MIT)](https://github.com/nadermx/backgroundremover?tab=MIT-1-ov-file#readme)
 - [splatfacto-w](https://github.com/KevinXu02/splatfacto-w) [(Apache-2.0)](https://github.com/KevinXu02/splatfacto-w?tab=Apache-2.0-1-ov-file#readme)
 
-## II. Requirements
-
-<!-- end of copy from GitLab FREADME -->
-
-## Overview
-
-1. Provide a brief overview explaining the what, why, or how of your Guidance. You can answer any one of the following to help you write this:
-
-   - **Why did you build this Guidance?**
-   - **What problem does this Guidance solve?**
-
-2. Include the architecture diagram image, as well as the steps explaining the high-level overview and flow of the architecture.
-   - To add a screenshot, create an ‘assets/images’ folder in your repository and upload your screenshot to it. Then, using the relative file path, add it to your README.
-
-### Cost
-
-This section is for a high-level cost estimate. Think of a likely straightforward scenario with reasonable assumptions based on the problem the Guidance is trying to solve. Provide an in-depth cost breakdown table in this section below ( you should use AWS Pricing Calculator to generate cost breakdown ).
-
-Start this section with the following boilerplate text:
-
-_You are responsible for the cost of the AWS services used while running this Guidance. As of <month> <year>, the cost for running this Guidance with the default settings in the <Default AWS Region (Most likely will be US East (N. Virginia)) > is approximately $<n.nn> per month for processing ( <nnnnn> records )._
-
-Replace this amount with the approximate cost for running your Guidance in the default Region. This estimate should be per month and for processing/serving resonable number of requests/entities.
-
-Suggest you keep this boilerplate text:
-_We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to help manage costs. Prices are subject to change. For full details, refer to the pricing webpage for each AWS service used in this Guidance._
-
-### Sample Cost Table
-
-**Note : Once you have created a sample cost table using AWS Pricing Calculator, copy the cost breakdown to below table and upload a PDF of the cost estimation on BuilderSpace. Do not add the link to the pricing calculator in the ReadMe.**
-
-The following table provides a sample cost breakdown for deploying this Guidance with the default parameters in the US East (N. Virginia) Region for one month.
-
-| AWS service                         | Dimensions                                                     | Cost [USD]              |
-| ----------------------------------- | -------------------------------------------------------------- | ----------------------- |
-| Amazon API Gateway                  | 1,000,000 REST API calls per month                             | $ 3.50month             |
-| Amazon Cognito                      | 1,000 active users per month without advanced security feature | $ 0.00                  |
-| Amazon Simple Storage Service (S3)  | 100 GB storage, 100,000 PUT, 1,000,000 GET requests per month  | ~$3.20/month            |
-| AWS Lambda                          | 1,000,000 requests, 400,000 GB-seconds compute (free tier)     | $0.00                   |
-| AWS Step Functions                  | 100,000 state transitions per month                            | ~$2.40/month            |
-| Amazon DynamoDB                     | 1 million write, 1 million read requests (on-demand)           | ~$0.75/month            |
-| Amazon SageMaker Training Job       | 1 hour m4.xlarge instance                                      | $0.65/hour              |
-| Amazon Elastic Container Registry   | 1 GB storage per month                                         | $0.10/month             |
-| Amazon Simple Notification Service  | 1,000,000 publish & delivery requests (Standard)               | $1.00/month             |
-| Amazon Elastic Compute Cloud (EC2)  | g5.4xlarge                                                     | $1.624/Hour (On Demand) |
-| Amazon Elastic Compute Cloud (EC2)  | ml.g5.4xlarge                                                  | $3.364/Hour (On Demand) |
-| AWS Identity and Access Management  | 1,000 users                                                    | $0.00                   |
-| Amazon CloudWatch                   | 10 custom metrics, 5 GB logs, 10 alarms per month              | ~$3.50/month            |
-| AWS Systems Manager Parameter Store | 100 standard parameters, 10,000 API interactions               | $0.00                   |
-
 ## Prerequisites
-
-- Local computer with appropriate AWS credentials to deploy the CDK or Terraform guidance
-- **(Optional, but recommended)** Use an EC2 workstation to build and deploy the CDK or Terraform guidance
-  - Ensure your local computer has an SSH client (For Windows, [Putty](https://www.putty.org/) was tested)
-  - Ensure your local computer has the NICE DCV client installed ([Windows](https://docs.aws.amazon.com/dcv/latest/userguide/client-windows.html), [MacOS](https://docs.aws.amazon.com/dcv/latest/userguide/client-mac.html), or [Linux](https://docs.aws.amazon.com/dcv/latest/userguide/client-linux.html))
-  - A CloudFormation template is given [here](https://github.com/aws-samples/aws-deep-learning-ami-ubuntu-dcv-desktop) to spin up a fresh, full-featured Ubuntu desktop
-    1. Prerequisites: Before you build the EC2 workstation stack, ensure the following resources are created in your AWS account and region of choice:
-       - VPC
-         - Follow [these instructions](https://docs.aws.amazon.com/vpc/latest/userguide/create-vpc.htm) if you do not have one. This will be where your EC2 will live. Ensure there is a public subnet available with internet access in order to pull the GitHub repositories.
-       - Keypair
-         - Follow [these instructions](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/create-key-pairs.html) if you do not have one. This is used to remote into the EC2 desktop.
-       - Security Group
-         - Follow [these instructions](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/creating-security-group.html) to create a security group. Enable inbound NiceDCV using TCP/UDP port 8443 and SSH using port 22. Ensure your source IP address is the resource for all entries.
-         - For Inbound rules, add:
-           - Custom TCP, Port range=8443, source="My IP"
-           - Custom UDP, Port range=8443, source="My IP"
-           - SSH, Port range=22, source="My IP"
-         - Record the security group Id for later
-    2. Download the `deep-learning-ubuntu-desktop.yaml` file locally from the repo linked above
-    3. Open the AWS Console and navigate to the CloudFormation console
-    4. Select `Create stack` -> `With new resources`
-    5. On `Create Stack` page, select:
-       - Choose `an existing template`
-       - Choose `Upload a template file`
-       - Select the `deep-learning-ubuntu-desktop.yaml` file downloaded earlier
-    6. On `Specify stack details` page, leave default values except for the following:
-       - Stack Name: `YOUR-CHOICE`
-       - AWSUbuntuAMIType: `UbuntuPro2204LTS`
-       - DesktopAccessCIDR: `YOUR-PUBLIC-IP-ADDRESS/32`
-       - DesktopInstanceType: `g4dn.2xlarge`
-       - DesktopSecurityGroupId: `SG-ID-FROM-ABOVE`
-       - DesktopVpcId: `VPC-ID-FROM-ABOVE`
-       - DesktopVpcSubnetId: `PUBLIC-SUBNET-ID`
-       - KeyName: `KEYNAME-FROM-ABOVE`
-       - S3Bucket: `S3-BUCKET-WITH-MODELS`
-    7. Submit and monitor the stack creation in the CloudFormation console
-    8. On successful building of the stack, navigate to the EC2 console in the account and region the deployed stack is in
-    9. Locate the instance just created using the `Stack Name` entered above, select the instance, and select `Actions->Security->Modify IAM Role`
-    10. Record the current IAM role name
-    11. Navigate to the IAM Console in a separate browser tab or window
-    12. Under `Roles`, search for the role using the IAM role name identified above
-    13. Select the role by clicking on its name
-    14. In the permissions policies table, select `Add permissions->Attach policies`:
-        - Attach the following AWS managed policies to the role
-          - AmazonEC2ContainerRegistryFullAccess
-          - AmazonS3FullAccess
-          - AmazonSSMManagedInstanceCore
-          - AWSCloudFormationFullAccess
-          - IAMFullAccess
-    15. SSH into the workstation using the EC2 public IP (found in the EC2 console), security group, and SSH terminal
-    16. Once connected to the EC2 workstation, perform the following commands to update the OS and password
-        ```bash
-        sudo apt update
-        sudo passwd ubuntu
-        ```
-    17. The EC2 will reboot automatically while updating is being performed in the background
-    18. The EC2 setup is complete once the message `echo 'NICE DCV server is enabled!'` is shown when performing the following command
-        ```bash
-        tail /var/log/cloud-init-output.log
-        ```
-    19. Once the EC2 has the enabled NICE DCV message, use the NICE DCV client, EC2 public IP address, username `ubuntu` and Ubuntu password set earlier to remotely connect to the EC2 instance.
-    20. Be sure to **not upgrade the OS** (even when prompted) as it will break critical packages. Only choose to enable security updates.
-    21. Open the Visual Code program in the EC2 instance by locating it in the Application library
 
 ### Third-party tools (If applicable)
 
@@ -237,95 +105,53 @@ _List out pre-requisites required on the AWS account if applicable, this include
 
 <If the Guidance is built for specific AWS Regions, or if the services used in the Guidance do not support all Regions, please specify the Region this Guidance is best suited for>
 
-## Deployment Steps (required)
+## Deployment and User Guide
 
-<!--
-Deployment steps must be numbered, comprehensive, and usable to customers at any level of AWS expertise. The steps must include the precise commands to run, and describe the action it performs.
+For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
 
-* All steps must be numbered.
-* If the step requires manual actions from the AWS console, include a screenshot if possible.
-* The steps must start with the following command to clone the repo. ```git clone xxxxxxx```
-* If applicable, provide instructions to create the Python virtual environment, and installing the packages using ```requirement.txt```.
-* If applicable, provide instructions to capture the deployed resource ARN or ID using the CLI command (recommended), or console action.
+## Cost
 
+This section is for a high-level cost estimate. Think of a likely straightforward scenario with reasonable assumptions based on the problem the Guidance is trying to solve. Provide an in-depth cost breakdown table in this section below ( you should use AWS Pricing Calculator to generate cost breakdown ).
 
-**Example:**
+Start this section with the following boilerplate text:
 
-1. Clone the repo using command ```git clone xxxxxxxxxx```
-2. cd to the repo folder ```cd <repo-name>```
-3. Install packages in requirements using command ```pip install requirement.txt```
-4. Edit content of **file-name** and replace **s3-bucket** with the bucket name in your account.
-5. Run this command to deploy the stack ```cdk deploy```
-6. Capture the domain name created by running this CLI command ```aws apigateway ............```
--->
+_You are responsible for the cost of the AWS services used while running this Guidance. As of <month> <year>, the cost for running this Guidance with the default settings in the <Default AWS Region (Most likely will be US East (N. Virginia)) > is approximately $<n.nn> per month for processing ( <nnnnn> records )._
 
-For detailed guidance deployment steps please see the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
+Replace this amount with the approximate cost for running your Guidance in the default Region. This estimate should be per month and for processing/serving resonable number of requests/entities.
 
-**TO DO: update with a live implementation guide link when available**
+Suggest you keep this boilerplate text:
+_We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to help manage costs. Prices are subject to change. For full details, refer to the pricing webpage for each AWS service used in this Guidance._
 
-## Deployment Validation (required)
+### Cost Table
 
-<Provide steps to validate a successful deployment, such as terminal output, verifying that the resource is created, status of the CloudFormation template, etc.>
+**Note : Once you have created a sample cost table using AWS Pricing Calculator, copy the cost breakdown to below table and upload a PDF of the cost estimation on BuilderSpace. Do not add the link to the pricing calculator in the ReadMe.**
 
-**Examples:**
+The following table provides a sample cost breakdown for deploying this Guidance with the default parameters in the US East (N. Virginia) Region for one month.
 
-- Open CloudFormation console and verify the status of the template with the name starting with xxxxxx.
-- If deployment is successful, you should see an active database instance with the name starting with <xxxxx> in the RDS console.
-- Run the following CLI command to validate the deployment: `aws cloudformation describe xxxxxxxxxxxxx`
+| AWS service                         | Dimensions                                                     | Cost [USD]              |
+| ----------------------------------- | -------------------------------------------------------------- | ----------------------- |
+| Amazon API Gateway                  | 1,000,000 REST API calls per month                             | $ 3.50month             |
+| Amazon Cognito                      | 1,000 active users per month without advanced security feature | $ 0.00                  |
+| Amazon Simple Storage Service (S3)  | 100 GB storage, 100,000 PUT, 1,000,000 GET requests per month  | ~$3.20/month            |
+| AWS Lambda                          | 1,000,000 requests, 400,000 GB-seconds compute (free tier)     | $0.00                   |
+| AWS Step Functions                  | 100,000 state transitions per month                            | ~$2.40/month            |
+| Amazon DynamoDB                     | 1 million write, 1 million read requests (on-demand)           | ~$0.75/month            |
+| Amazon SageMaker Training Job       | 1 hour m4.xlarge instance                                      | $0.65/hour              |
+| Amazon Elastic Container Registry   | 1 GB storage per month                                         | $0.10/month             |
+| Amazon Simple Notification Service  | 1,000,000 publish & delivery requests (Standard)               | $1.00/month             |
+| Amazon Elastic Compute Cloud (EC2)  | g5.4xlarge                                                     | $1.624/Hour (On Demand) |
+| Amazon Elastic Compute Cloud (EC2)  | ml.g5.4xlarge                                                  | $3.364/Hour (On Demand) |
+| AWS Identity and Access Management  | 1,000 users                                                    | $0.00                   |
+| Amazon CloudWatch                   | 10 custom metrics, 5 GB logs, 10 alarms per month              | ~$3.50/month            |
+| AWS Systems Manager Parameter Store | 100 standard parameters, 10,000 API interactions               | $0.00                   |
 
-## Running the Guidance (required)
-
-<Provide instructions to run the Guidance with the sample data or input provided, and interpret the output received.>
-
-This section should include:
-
-- Guidance inputs
-- Commands to run
-- Expected output (provide screenshot if possible)
-- Output description
-
-## Next Steps (required)
+## Next Steps
 
 Provide suggestions and recommendations about how customers can modify the parameters and the components of the Guidance to further enhance it according to their requirements.
 
-## Cleanup (required)
+## Authors
 
-- Include detailed instructions, commands, and console actions to delete the deployed Guidance.
-- If the Guidance requires manual deletion of resources, such as the content of an S3 bucket, please specify.
-
-## FAQ, known issues, additional considerations, and limitations (optional)
-
-**Known issues (optional)**
-
-<If there are common known issues, or errors that can occur during the Guidance deployment, describe the issue and resolution steps here>
-
-**Additional considerations (if applicable)**
-
-<Include considerations the customer must know while using the Guidance, such as anti-patterns, or billing considerations.>
-
-**Examples:**
-
-- “This Guidance creates a public AWS bucket required for the use-case.”
-- “This Guidance created an Amazon SageMaker notebook that is billed per hour irrespective of usage.”
-- “This Guidance creates unauthenticated public API endpoints.”
-
-Provide a link to the _GitHub issues page_ for users to provide feedback.
-
-**Example:** _“For any feedback, questions, or suggestions, please use the issues tab under this repo.”_
-
-## Revisions (optional)
-
-Document all notable changes to this project.
-
-Consider formatting this section based on Keep a Changelog, and adhering to Semantic Versioning.
-
-## Notices (optional)
-
-_Customers are responsible for making their own independent assessment of the information in this Guidance. This Guidance: (a) is for informational purposes only, (b) represents AWS current product offerings and practices, which are subject to change without notice, and (c) does not create any commitments or assurances from AWS and its affiliates, suppliers or licensors. AWS products or services are provided “as is” without warranties, representations, or conditions of any kind, whether express or implied. AWS responsibilities and liabilities to its customers are controlled by AWS agreements, and this Guidance is not part of, nor does it modify, any agreement between AWS and its customers._
-
-## Authors (optional)
-
-Standford Lee, Technical Account Manager (ANZ)
-Eric Cornwell, Sr. Spatial Compute SA
-Dario Macangano, Sr. WordlWide Visual Compute SA
-Daniel Zilberman, Sr. SA AWS Technical guidances
+- Eric Cornwell, Sr. Spatial Compute SA
+- Dario Macangano, Sr. Worldwide Visual Compute SA
+- Stanford Lee, Technical Account Manager
+- Daniel Zilberman, Sr. SA AWS Technical Guidances
