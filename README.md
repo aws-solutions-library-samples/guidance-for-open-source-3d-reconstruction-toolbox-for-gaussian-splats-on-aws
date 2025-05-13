@@ -56,6 +56,24 @@ This guidance will:
 12. Internal workflow parameters are stored in Parameter Store during guidance deployment to decouple services.
 13. Amazon CloudWatch is used to monitor the training logs, surfacing errors to the user.
 
+### AWS Services in this Guidance
+
+**TO DO: Update list of services to the actually used in the guidance**
+
+| **AWS Service**                                                          | Role |                                                              |
+|--------------------------------------------------------------------------|------|--------------------------------------------------------------|
+| [Amazon Transcribe](https://aws.amazon.com/transcribe/)                  | Core | Convert user speech to text.                                 |
+| [Amazon Bedrock](https://aws.amazon.com/bedrock/)                        | Core | Invoke foundation model to translate natural language to ASL. |
+| [Amazon API Gateway](https://aws.amazon.com/api-gateway/)                | Core | Create API to invoke lambda functions from user interface.   |
+| [AWS Lambda](https://aws.amazon.com/lambda/)                             | Core | Run custom code to generate ASL for simplified text.         |
+| [Amazon Cognito](https://aws.amazon.com/pm/cognito/)                     | Core | Authenticate user to access ASL translator                   |
+| [Amazon Comprehend](https://aws.amazon.com/comprehend/)                  | Core | Run moderation to detect toxicity on generated text           |
+| [Amazon Rekognition](https://aws.amazon.com/rekognition/)                | Core | Run moderation to detect toxicity on generated image          |
+| [Amazon CloudFront](https://aws.amazon.com/cloudfront/)                  | Core | Fast and secure web-hosted user experience                   |
+| [Amazon Simple Storage Service (S3)](https://aws.amazon.com/pm/serv-s3/) | Core | Host user interface code, store generated images             |
+| [Amazon Simple Notification Service (SNS)](https://aws.amazon.com/sns/)  | Core | Send the notification to Unreal Engine                       |
+| [Amazon Simple Queue Service (SQS)](https://aws.amazon.com/sqs/)         | Core | Queue notifications for Unreal Engine to consume             |
+
 ### Custom GS Pipeline Container
 
 In this project, there is only one Docker container that contains all of the 3D reconstruction tools for Gaussian Splatting. This container has a `Dockerfile`, `main.py`, and helper script files and open source libraries under the `backend/container` directory. The main script processes each request from the SageMaker Training Job invoke message and saves the result to S3 upon successful completion. The list of open source libraries that make this project possible include:
