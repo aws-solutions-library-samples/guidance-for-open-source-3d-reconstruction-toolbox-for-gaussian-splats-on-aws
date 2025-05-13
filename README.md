@@ -1,7 +1,5 @@
 # Guidance for Open Source 3D Reconstruction Toolbox for Gaussian Splats on AWS
 
-This guidance provides the infrastructure and open source code to reconstruct 3D scenes or objects (splats) from images or video. Under the hood, there is a 3D gaussian splatting workflow with various processing pipelines such as image processing/filtering (background removal), structure-from-motion (images-to-point-cloud), and gaussian splat training which uses traditional AI/ML approaches on a GPU. Both a Cloud Development Kit (CDK) and a Terraform infrastructure as code deployments are available and deploy a full backend system to 1/ enable a user to upload the media and json configuration file to S3 and 2/ output an email notification on completion of splat and assets.
-
 ## Table of Contents
 
 1. [Overview](#overview)
