@@ -121,9 +121,6 @@ _List out pre-requisites required on the AWS account if applicable, this include
 
 <If the Guidance is built for specific AWS Regions, or if the services used in the Guidance do not support all Regions, please specify the Region this Guidance is best suited for>
 
-## Deployment and User Guide
-
-For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
 
 ## Cost
 
@@ -160,6 +157,10 @@ The following table provides a sample cost breakdown for deploying this Guidance
 | AWS Identity and Access Management  | 1,000 users                                                    | $0.00                   |
 | Amazon CloudWatch                   | 10 custom metrics, 5 GB logs, 10 alarms per month              | ~$3.50/month            |
 | AWS Systems Manager Parameter Store | 100 standard parameters, 10,000 API interactions               | $0.00                   |
+
+## Deployment and User Guide
+**TO DO: update with Live link when published**
+For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
 
 ## Next Steps
 
