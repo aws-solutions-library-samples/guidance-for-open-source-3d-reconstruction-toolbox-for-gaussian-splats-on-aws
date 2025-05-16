@@ -27,6 +27,7 @@ By deploying this guidance, users gain access to a flexible infrastructure that 
 ## Architecture
 
 This guidance will:
+
 - create the infrastructure required to create a gaussian splat from a video or set of images
 - create the mechanism to run the code and perform 3D reconstruction
 - enable a user to create a 3D gaussian splat from the backend (no UI) using open source tools and AWS by uploading a video (.mp4 or .mov) or images (.png or .jpg) and metadata (.json) into S3
@@ -60,19 +61,19 @@ This guidance will:
 
 **TO DO: Update list of services to the actually used in the guidance**
 
-| **AWS Service**                                                          | Role |                                                              |
-|--------------------------------------------------------------------------|------|--------------------------------------------------------------|
-| [Amazon Transcribe](https://aws.amazon.com/transcribe/)                  | Core | Convert user speech to text.                                 |
+| **AWS Service**                                                          | Role |                                                               |
+| ------------------------------------------------------------------------ | ---- | ------------------------------------------------------------- |
+| [Amazon Transcribe](https://aws.amazon.com/transcribe/)                  | Core | Convert user speech to text.                                  |
 | [Amazon Bedrock](https://aws.amazon.com/bedrock/)                        | Core | Invoke foundation model to translate natural language to ASL. |
-| [Amazon API Gateway](https://aws.amazon.com/api-gateway/)                | Core | Create API to invoke lambda functions from user interface.   |
-| [AWS Lambda](https://aws.amazon.com/lambda/)                             | Core | Run custom code to generate ASL for simplified text.         |
-| [Amazon Cognito](https://aws.amazon.com/pm/cognito/)                     | Core | Authenticate user to access ASL translator                   |
+| [Amazon API Gateway](https://aws.amazon.com/api-gateway/)                | Core | Create API to invoke lambda functions from user interface.    |
+| [AWS Lambda](https://aws.amazon.com/lambda/)                             | Core | Run custom code to generate ASL for simplified text.          |
+| [Amazon Cognito](https://aws.amazon.com/pm/cognito/)                     | Core | Authenticate user to access ASL translator                    |
 | [Amazon Comprehend](https://aws.amazon.com/comprehend/)                  | Core | Run moderation to detect toxicity on generated text           |
 | [Amazon Rekognition](https://aws.amazon.com/rekognition/)                | Core | Run moderation to detect toxicity on generated image          |
-| [Amazon CloudFront](https://aws.amazon.com/cloudfront/)                  | Core | Fast and secure web-hosted user experience                   |
-| [Amazon Simple Storage Service (S3)](https://aws.amazon.com/pm/serv-s3/) | Core | Host user interface code, store generated images             |
-| [Amazon Simple Notification Service (SNS)](https://aws.amazon.com/sns/)  | Core | Send the notification to Unreal Engine                       |
-| [Amazon Simple Queue Service (SQS)](https://aws.amazon.com/sqs/)         | Core | Queue notifications for Unreal Engine to consume             |
+| [Amazon CloudFront](https://aws.amazon.com/cloudfront/)                  | Core | Fast and secure web-hosted user experience                    |
+| [Amazon Simple Storage Service (S3)](https://aws.amazon.com/pm/serv-s3/) | Core | Host user interface code, store generated images              |
+| [Amazon Simple Notification Service (SNS)](https://aws.amazon.com/sns/)  | Core | Send the notification to Unreal Engine                        |
+| [Amazon Simple Queue Service (SQS)](https://aws.amazon.com/sqs/)         | Core | Queue notifications for Unreal Engine to consume              |
 
 ### Custom GS Pipeline Container
 
@@ -88,39 +89,44 @@ In this project, there is only one Docker container that contains all of the 3D 
 
 ## Prerequisites
 
-### Third-party tools (If applicable)
+### Third-party tools
 
-_List any installable third-party tools required for deployment._
+- Docker
 
-### AWS account requirements (If applicable)
+### AWS account requirements
 
-_List out pre-requisites required on the AWS account if applicable, this includes enabling AWS regions, requiring ACM certificate._
+An active AWS Account with IAM user or role with elevated permissions to deploy resources is required to deploy this guidance, along with either a local computer with appropriate AWS credentials to deploy the CDK or Terraform solution, or utilize an AWS EC2 workstation to build and deploy the CDK or Terraform solution. Instructions for doing this will be in the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
 
-**Example:** “This deployment requires you have public ACM certificate available in your AWS account”
+Resources included in this deployment:
 
-**Example resources:**
-
-- ACM certificate
-- DNS record
-- S3 bucket
+- EC2
 - VPC
-- IAM role with specific permissions
-- Enabling a Region or service etc.
+- IAM roles with permissions
+- CloudFormation
+- ECR
+- S3
+- SageMakerTraining Jobs
+- Stepfunctions
+- CDK (bootstrap instructions will be included in the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html))
 
-### aws cdk bootstrap (if sample code has aws-cdk)
+### Service limits
 
-<If using aws-cdk, include steps for account bootstrap for new cdk users.>
+- [Service quotas](https://docs.aws.amazon.com/servicequotas/latest/userguide/intro.html) - increases can be requested via the AWS Management Console, AWS CLI, or AWS SDKs (see [Accessing Service Quotas](https://docs.aws.amazon.com/servicequotas/latest/userguide/intro.html#access))
 
-**Example blurb:** “This Guidance uses aws-cdk. If you are using aws-cdk for first time, please perform the below bootstrapping....”
+- (Optional) SageMaker Training Jobs uses a Docker container to run the training. This deployment guide has a `Deploy backend container` section that walks through building a custom container image for SageMaker. You can optionally build and test this container locally (not running on SageMaker) on a GPU-enabled EC2 instance. If you plan to do this, increase the EC2 quota named "Running On-Demand G and VT instances" and/or "Running On-Demand P instances", depending on the instance family you plan to use, to a desired maximum number of vCPUs for running instances of the target family. Note, this is vCPUs NOT number of instances like the SageMaker Batch Transform quota.
 
-### Service limits (if applicable)
+- Install and configure the AWS CLI (if not using the recommended EC2 deployment below)
 
-<Talk about any critical service limits that affect the regular functioning of the Guidance. If the Guidance requires service limit increase, include the service name, limit name and link to the service quotas page.>
+  - [Install or update the latest version of the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
 
-### Supported Regions (if applicable)
+  - [Set up the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-quickstart.html) - create configuration and set up credentials
 
-<If the Guidance is built for specific AWS Regions, or if the services used in the Guidance do not support all Regions, please specify the Region this Guidance is best suited for>
+- Install [Git](https://git-scm.com/) (if not using the recommended EC2 deployment below)
 
+- [Docker](https://docs.docker.com/get-docker/) installed (if not using the recommended EC2 deployment below)
+  - N.B. [`buildx`](https://github.com/docker/buildx) is also required. For Windows and macOS `buildx` [is included](https://github.com/docker/buildx#windows-and-macos) in [Docker Desktop](https://docs.docker.com/desktop/)
+  - Docker is required to build the container image that is used for training the splat. This will require at least 20GB of empty disk space on your deployment machine.
+    > _Note: If building on Windows or MacOS and receive the below error, set the number of logical processors to 1. Also, it is recommended to use the EC2 Ubuntu deployment method below to mitigate this error._
 
 ## Cost
 
@@ -141,30 +147,30 @@ _We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/l
 
 The following table provides a sample cost breakdown for deploying this Guidance with the default parameters in the US East (N. Virginia) Region for one month.
 
-| AWS service                         | Dimensions                                                     | Cost [USD]              |
-| ----------------------------------- | -------------------------------------------------------------- | ----------------------- |
-| Amazon API Gateway                  | 1,000,000 REST API calls per month                             | $ 3.50month             |
-| Amazon Cognito                      | 1,000 active users per month without advanced security feature | $ 0.00                  |
-| Amazon Simple Storage Service (S3)  | 100 GB storage, 100,000 PUT, 1,000,000 GET requests per month  | ~$3.20/month            |
-| AWS Lambda                          | 1,000,000 requests, 400,000 GB-seconds compute (free tier)     | $0.00                   |
-| AWS Step Functions                  | 100,000 state transitions per month                            | ~$2.40/month            |
-| Amazon DynamoDB                     | 1 million write, 1 million read requests (on-demand)           | ~$0.75/month            |
-| Amazon SageMaker Training Job       | 1 hour m4.xlarge instance                                      | $0.65/hour              |
-| Amazon Elastic Container Registry   | 1 GB storage per month                                         | $0.10/month             |
-| Amazon Simple Notification Service  | 1,000,000 publish & delivery requests (Standard)               | $1.00/month             |
-| Amazon Elastic Compute Cloud (EC2)  | g5.4xlarge                                                     | $1.624/Hour (On Demand) |
-| Amazon Elastic Compute Cloud (EC2)  | ml.g5.4xlarge                                                  | $3.364/Hour (On Demand) |
-| AWS Identity and Access Management  | 1,000 users                                                    | $0.00                   |
-| Amazon CloudWatch                   | 10 custom metrics, 5 GB logs, 10 alarms per month              | ~$3.50/month            |
-| AWS Systems Manager Parameter Store | 100 standard parameters, 10,000 API interactions               | $0.00                   |
+| AWS Service        | Dimensions                                                                       | Cost [USD]        |
+| ------------------ | -------------------------------------------------------------------------------- | ----------------- |
+| Amazon S3          | Standard feature storage (input=200MB, output=2.5GB)                             | $1.61/month       |
+| Amazon S3          | Data transfer feature                                                            | $0.90/month       |
+| Amazon DynamoDB    | Job table storage, 0.5MB per month, 1GB total, avg item size=825bytes            | $0.81/month       |
+| AWS Lambda         | 2 invocations per job, 1.25s, 7.1s = 8.5s                                        | $0.01/month       |
+| AWS Step Functions | State transitions per workflow = 5                                               | $0.01/month       |
+| Amazon SageMaker   | num_instance=1, num_hours_per_job=1, ml.g5.4xlarge, Volume_size_in_GB_per_job=15 | $273.00/month     |
+| Amazon ECR         | Data storage, 15GB                                                               | $1.47/month       |
+| Amazon SNS         | Email notifications, 1 per request                                               | $0.01/month       |
+| Parameter Store    | Store 1 param                                                                    | $0.01/month       |
+| Amazon CloudWatch  | Metrics, 1GB                                                                     | $0.50/month       |
+| **TOTAL**          | (est. 100 requests)                                                              | **$278.33/month** |
 
 ## Deployment and User Guide
+
 **TO DO: update with Live link when published**
 For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
 
 ## Next Steps
 
-Provide suggestions and recommendations about how customers can modify the parameters and the components of the Guidance to further enhance it according to their requirements.
+This robust framework for 3D reconstruction serves as a fundamental building block for scalable construction of 3D environments and content workflows. You can extend this solution in multiple ways: embed it into your web applications, integrate it with game engines for interactive experiences, or implement it in virtual production environments - these are just a few possibilities to support your requirements.
+
+By leveraging other AWS services, you can further enhance your workflow to scale, share, and optimize your 3D reconstruction needs, whatever they might be.
 
 ## Authors
 
