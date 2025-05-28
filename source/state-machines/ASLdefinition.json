@@ -1,0 +1,150 @@
+{
+  "StartAt": "HandleConfigError",
+  "States": {
+    "HandleConfigError": {
+      "Type": "Choice",
+      "InputPath": "$",
+      "Choices": [
+        {
+          "Variable": "$.stateMachine.statusCode",
+          "NumericEquals": 200,
+          "Next": "InvokeGSWorkflow"
+        }
+      ],
+      "Default": "FailState"
+    },
+    "InvokeGSWorkflow": {
+      "Type": "Task",
+      "InputPath": "$",
+      "ResultPath": "$.invokeWorkflow",
+      "Resource": "arn:aws:states:::sagemaker:createTrainingJob.sync",
+      "Parameters": {
+        "TrainingJobName.$": "$.envVars.UUID",
+        "ResourceConfig": {
+          "InstanceCount.$": "$.stateMachine.instanceCount",
+          "InstanceType.$": "$.envVars.INSTANCE_TYPE",
+          "VolumeSizeInGB.$": "$.stateMachine.volumeSizeInGB"
+        },
+        "AlgorithmSpecification": {
+          "TrainingImage.$": "$.stateMachine.ecrImageArn",
+          "TrainingInputMode": "File",
+          "ContainerEntrypoint.$": "$.stateMachine.containerEntryPoint",
+          "ContainerArguments.$": "$.stateMachine.containerArgs"
+        },
+        "OutputDataConfig": {
+          "S3OutputPath.$": "$.envVars.S3_OUTPUT"
+        },
+        "StoppingCondition": {
+          "MaxRuntimeInSeconds.$": "$.stateMachine.timeout"
+        },
+        "RoleArn.$": "$.stateMachine.containerRoleArn",
+        "InputDataConfig": [
+          {
+            "ChannelName.$": "$.envVars.DATA_CHANNEL",
+            "DataSource": {
+              "S3DataSource": {
+                "S3DataType": "S3Prefix",
+                "S3Uri.$": "$.envVars.S3_INPUT",
+                "S3DataDistributionType": "FullyReplicated"
+              }
+            }
+          },
+          {
+            "ChannelName": "model",
+            "DataSource": {
+              "S3DataSource": {
+                "S3DataType": "S3Prefix",
+                "S3Uri.$": "$.envVars.MODEL_INPUT",
+                "S3DataDistributionType": "FullyReplicated"
+              }
+            }
+          }
+        ],
+        "Environment.$": "$.envVars"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "SageMaker.JobFailed"
+          ],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        },
+        {
+          "ErrorEquals": [
+            "SageMaker.ResourceLimitExceededException"
+          ],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 5,
+          "BackoffRate": 1
+        },
+        {
+          "ErrorEquals": [
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 5,
+          "BackoffRate": 1
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "ErrorHandler"
+        }
+      ],
+      "Next": "SuccessHandler"
+    },
+    "ErrorHandler": {
+      "Type": "Pass",
+      "Parameters": {
+        "stateMachine.$": "$.stateMachine",
+        "envVars.$": "$.envVars",
+        "sns.$": "$.sns",
+        "error.$": "$.error",
+        "status": "FAILED"
+      },
+      "Next": "Complete"
+    },
+    "SuccessHandler": {
+      "Type": "Pass",
+      "Parameters": {
+        "stateMachine.$": "$.stateMachine",
+        "envVars.$": "$.envVars",
+        "sns.$": "$.sns",
+        "status": "SUCCESS",
+        "result.$": "$.invokeWorkflow"
+      },
+      "Next": "Complete"
+    },
+    "FailState": {
+      "Type": "Pass",
+      "Parameters": {
+        "stateMachine.$": "$.stateMachine",
+        "envVars.$": "$.envVars",
+        "sns.$": "$.sns",
+        "status": "FAILED",
+        "error": {
+          "Error": "ConfigurationError",
+          "Cause": "Invalid status code in configuration"
+        }
+      },
+      "Next": "Complete"
+    },
+    "Complete": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "InputPath": "$",
+      "ResultPath": "$.complete",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName.$": "$.stateMachine.completeLambdaName"
+      },
+      "End": true
+    }
+  }
+}

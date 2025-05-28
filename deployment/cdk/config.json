@@ -1,0 +1,9 @@
+{                        
+    "comment": "NOTE: BEFORE DEPLOYING STACK, UPDATE THE ACCOUNT ID AND REGION BELOW",
+    "accountId": "",
+    "region": "us-east-1",
+    "constructNamePrefix": "3dgs",
+    "s3TriggerKey": "workflow-input",
+    "adminEmail": "",
+    "maintainS3ObjectsOnStackDeletion": "true"
+}
