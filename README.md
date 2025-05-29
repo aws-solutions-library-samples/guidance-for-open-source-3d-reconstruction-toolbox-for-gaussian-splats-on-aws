@@ -22,7 +22,7 @@ Once deployed, the guidance features a full 3D reconstruction back-end system wi
 4. **Gaussian Splat Training**: Optimization of 3D Gaussian primitives to represent the scene using AI/ML
 5. **Export & Delivery**: Generation of the final 3D asset in standard formats for easy viewing and notification via email
 
-By deploying this guidance, users gain access to a flexible infrastructure that handles the entire 3D reconstruction process programatically, from media upload to final 3D model delivery, while being highly modular through its componentized pipeline-based approach. This guidance addresses the significant challenges organizations face when trying to create photorealistic 3D content - traditionally a time-consuming, expensive, and technically complex process requiring specialized skills and equipment.
+By deploying this guidance, users gain access to a flexible infrastructure that handles the entire 3D reconstruction process programmatically, from media upload to final 3D model delivery, while being highly modular through its componentized pipeline-based approach. This guidance addresses the significant challenges organizations face when trying to create photorealistic 3D content - traditionally a time-consuming, expensive, and technically complex process requiring specialized skills and equipment.
 
 ## Architecture
 
@@ -30,14 +30,15 @@ This guidance will:
 
 - create the infrastructure required to create a gaussian splat from a video or set of images
 - create the mechanism to run the code and perform 3D reconstruction
-- enable a user to create a 3D gaussian splat from the backend (no UI) using open source tools and AWS by uploading a video (.mp4 or .mov) or images (.png or .jpg) and metadata (.json) into S3
+- enable a user to create a 3D gaussian splat using open source tools and AWS by uploading a video (.mp4 or .mov) or images (.png or .jpg) and metadata (.json) into S3
+- provide a 3D viewer for viewing the photo-realistic effects and performant nature of gaussian splats
 
 ### Architecture Diagram
 
 <div align="center">
 <img src="assets/images/gs-workflow-arch.PNG" width=70%> 
 <br/>
-<i>Figure 1: 3D Reconstruction Toolbox for Gaussian Splats on AWS Reference Architecture  </i>
+<i>Figure 1: 3D Reconstruction Toolbox for Gaussian Splats on AWS Reference Architecture</i>
 </div>
 
 ### Architecture Steps
@@ -73,7 +74,7 @@ Amazon CloudWatch is used to monitor the training logs, surfacing errors to the 
 
 ### Custom GS Pipeline Container
 
-In this project, there is only one Docker container that contains all of the 3D reconstruction tools for Gaussian Splatting. This container has a `Dockerfile`, `main.py`, and helper script files and open source libraries under the `backend/container` directory. The main script processes each request from the SageMaker Training Job invoke message and saves the result to S3 upon successful completion. The list of open source libraries that make this project possible include:
+In this project, there is only one Docker container that contains all of the 3D reconstruction tools for Gaussian Splatting. This container has a `Dockerfile`, `main.py`, and helper script files and open source libraries under the `source/container` directory. The main script processes each request from the SageMaker Training Job invoke message and saves the result to S3 upon successful completion. The list of open source libraries that make this project possible include:
 
 - [NerfStudio](https://github.com/nerfstudio-project/nerfstudio) [(Apache-2.0)](https://github.com/nerfstudio-project/nerfstudio/tree/main?tab=Apache-2.0-1-ov-file#readme)
 - [Glomap](https://github.com/colmap/glomap) [(BSD-3-Clause)](https://github.com/colmap/glomap?tab=BSD-3-Clause-1-ov-file#readme)
@@ -91,7 +92,7 @@ In this project, there is only one Docker container that contains all of the 3D 
 
 - Git
 - Docker
-- Terraform (if chosing not to deploy infrastructure using CDK)
+- Terraform (if choosing not to deploy infrastructure using CDK)
 
 ### AWS account requirements
 
@@ -99,7 +100,7 @@ An active AWS Account with IAM user or role with elevated permissions to deploy 
 
 Resources included in this deployment:
 
-- EC2 (if chosing not to deploy infrastructure from your local computer)
+- EC2 (if choosing not to deploy infrastructure from your local computer)
 - IAM roles with permissions
 - CloudFormation
 - ECR Image
@@ -107,14 +108,14 @@ Resources included in this deployment:
 - DynamoDB Table
 - Lambda Functions
 - SageMaker Training Jobs
-- Stepfunctions State Machine
+- Step Functions State Machine
 - CDK (bootstrap instructions will be included in the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html))
 
 ### Service limits
 
 - [Service quotas](https://docs.aws.amazon.com/servicequotas/latest/userguide/intro.html) - increases can be requested via the AWS Management Console, AWS CLI, or AWS SDKs (see [Accessing Service Quotas](https://docs.aws.amazon.com/servicequotas/latest/userguide/intro.html#access))
 
-- (Optional) SageMaker Training Jobs uses a Docker container to run the training. This deployment guide has a `Deploy backend container` section that walks through building a custom container image for SageMaker. You can optionally build and test this container locally (not running on SageMaker) on a GPU-enabled EC2 instance. If you plan to do this, increase the EC2 quota named "Running On-Demand G and VT instances" and/or "Running On-Demand P instances", depending on the instance family you plan to use, to a desired maximum number of vCPUs for running instances of the target family. Note, this is vCPUs NOT number of instances like the SageMaker Batch Transform quota.
+- (Optional) SageMaker Training Jobs uses a Docker container to run the training. This deployment guide walks through building a custom container image for SageMaker. You can optionally build and test this container locally (not running on SageMaker) on a GPU-enabled EC2 instance. If you plan to do this, increase the EC2 quota named "Running On-Demand G and VT instances" and/or "Running On-Demand P instances", depending on the instance family you plan to use, to a desired maximum number of vCPUs for running instances of the target family. Note, this is vCPUs NOT number of instances like the SageMaker Training Jobs quota.
 
 - Install and configure the AWS CLI (if not using the recommended EC2 deployment below)
 
