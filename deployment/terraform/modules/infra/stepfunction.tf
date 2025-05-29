@@ -12,7 +12,7 @@ resource "aws_cloudwatch_log_group" "step_functions_log_group" {
 resource "aws_sfn_state_machine" "sfn_state_machine" {
   name = "${var.project_prefix}-state-machine-${var.tf_random_suffix}"
   role_arn = aws_iam_role.step_functions_role.arn
-  definition = templatefile("${path.module}/../../../../backend/state-machines/ASLdefinition.json", {})
+  definition = templatefile("${path.module}/../../../../source/state-machines/ASLdefinition.json", {})
   logging_configuration {
     include_execution_data = true
     level                  = "ALL"

@@ -53,7 +53,7 @@ resource "null_resource" "docker_packaging" {
   }
 
   provisioner "local-exec" {
-    command = "docker build -t ${local.repo_name}:latest -f ${path.root}/../../backend/container/Dockerfile ${path.root}/../../backend/container/"
+    command = "docker build -t ${local.repo_name}:latest -f ${path.root}/../../source/container/Dockerfile ${path.root}/../../source/container/"
   }
 
   provisioner "local-exec" {
@@ -115,8 +115,8 @@ resource "aws_iam_role_policy" "lambda_s3_access" {
 # Zip the Lambda code
 data "archive_file" "lambda_zip" {
   type        = "zip"
-  source_dir = "${path.module}/../../../../backend/lambda/model_deployment/"
-  output_path = "${path.module}/../../../../backend/lambda/model_deployment/model_deployment.zip"
+  source_dir = "${path.module}/../../../../source/lambda/model_deployment/"
+  output_path = "${path.module}/../../../../source/lambda/model_deployment/model_deployment.zip"
 }
 
 # Create Lambda function for model deployment

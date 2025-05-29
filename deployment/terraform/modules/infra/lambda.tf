@@ -5,14 +5,14 @@
 # Generate Archive Files for Lambda Code
 data "archive_file" "archive_lambda_job_trigger" {
  type = "zip"
- source_dir = "${path.module}/../../../../backend/lambda/workflow_trigger"
- output_path = "${path.module}/../../../../backend/lambda/workflow_trigger/workflow_trigger.zip"
+ source_dir = "${path.module}/../../../../source/lambda/workflow_trigger"
+ output_path = "${path.module}/../../../../source/lambda/workflow_trigger/workflow_trigger.zip"
 }
 
 data "archive_file" "archive_lambda_job_complete" {
  type = "zip"
- source_dir = "${path.module}/../../../../backend/lambda/workflow_complete"
- output_path = "${path.module}/../../../../backend/lambda/workflow_complete/workflow_complete.zip"
+ source_dir = "${path.module}/../../../../source/lambda/workflow_complete"
+ output_path = "${path.module}/../../../../source/lambda/workflow_complete/workflow_complete.zip"
 }
 
 # "workflowTrigger" Lambda Function
@@ -22,7 +22,7 @@ resource "aws_lambda_function" "lambda_workflow_trigger" {
  timeout = 300
  role = aws_iam_role.lambda_role.arn
  handler = "workflow_trigger.lambda_handler"
- filename = "${path.module}/../../../../backend/lambda/workflow_trigger/workflow_trigger.zip"
+ filename = "${path.module}/../../../../source/lambda/workflow_trigger/workflow_trigger.zip"
  reserved_concurrent_executions = 100
 
  # Enable X-Ray tracing
@@ -50,7 +50,7 @@ resource "aws_lambda_function" "lambda_workflow_complete" {
  timeout = 300
  role = aws_iam_role.lambda_role.arn
  handler = "workflow_complete.lambda_handler"
- filename = "${path.module}/../../../../backend/lambda/workflow_complete/workflow_complete.zip"
+ filename = "${path.module}/../../../../source/lambda/workflow_complete/workflow_complete.zip"
  reserved_concurrent_executions = 100
 
  # Enable X-Ray tracing
