@@ -34,28 +34,26 @@ This guidance will:
 
 ### Architecture Diagram
 
-<!-- ![](docs/media/gs-workflow-arch.png "Architecture Diagram") -->
 <div align="center">
-<img src="assets/gs-workflow-arch-new.jpg" width=70%> 
+<img src="assets/images/gs-workflow-arch.PNG" width=70%> 
 <br/>
 <i>Figure 1: 3D Reconstruction Toolbox for Gaussian Splats on AWS Reference Architecture  </i>
 </div>
 
 ### Architecture Steps
-
-1. System administrator deploys guidance to AWS account and region using AWS Cloud Development Kit or Terraform.
-2. Once guidance is deployed in a specific AWS account and region, an authenticated user uploads the necessary configuration and input media into a dedicated Amazon Simple Storage Service (S3) bucket location. This can be done using a Gradio interface and AWS Software Development Kit (SDK).
-3. Optionally, the guidance supports external job submission by uploading a ‘.json’ job configuration file and media into a designated S3 bucket location. This upload process could be manual through the AWS Management Console or could also be an external process depending on the use-case.
-4. The job json file upload to the bucket location will trigger an Amazon Simple Notification Service (SNS) message that will invoke an initialization AWS Lambda function.
+1. User authenticates to AWS Identity and Access Management (IAM) via AWS Tools and SDKs.
+2. The configuration and input media is uploaded to a dedicated Amazon Simple Storage Service (S3) bucket location. This can be done using a Gradio interface and AWS Software Development Kit (SDK).
+3. Optionally, the solution supports external job submission by uploading a ‘.json’ job configuration file and media into a designated S3 bucket location. 
+4. The job json file uploaded to the bucket will trigger an Amazon Simple Notification Service (SNS) message that will invoke an initialization AWS Lambda function.
 5. The initialization Lambda function will perform input validation and set appropriate variables for the state machine.
 6. The workflow job record will be created in Amazon DynamoDB job table.
 7. The initialization Lambda function will invoke an AWS Step Functions State Machine to handle the entire workflow job.
-8. If the configuration is successful, an Amazon SageMaker Training Job will be submitted synchronously using the state machine built-in wait until completion mechanism. Otherwise (jump to step 11), the completion Lambda function will handle the error, update the database and notify the user via an SNS email.
-9. The Amazon Elastic Container Registry (ECR) container image and S3 model artifacts will be used to spin up a new graphics processing unit (GPU) container. The instance type is determined by the job json configuration.
-10. The GPU container will run the entire pipeline.
-11. Upon job completion or error, a completion Lambda function will complete the workflow job by updating the job in DynamoDB and notifying the user via email upon completion using SNS.
-12. Internal workflow parameters are stored in Parameter Store during guidance deployment to decouple services.
-13. Amazon CloudWatch is used to monitor the training logs, surfacing errors to the user.
+8. An Amazon SageMaker Training Job will be submitted synchronously using the state machine built-in wait until completion mechanism. 
+10. The Amazon Elastic Container Registry (ECR) container image and S3 model artifacts will be used to spin up a new graphics processing unit (GPU) container. The instance type is determined by the job json configuration.
+11. The GPU container will run the entire pipeline.
+12. Upon job completion, a final Lambda function will complete the workflow job by updating the job metadata in DynamoDB and notifying the user via email upon completion using SNS.
+13. Internal workflow parameters are stored in Parameter Store during solution deployment to decouple services.
+Amazon CloudWatch is used to monitor the training logs, surfacing errors to the user.
 
 ### AWS Services in this Guidance
 
