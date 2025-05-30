@@ -169,5 +169,5 @@ By leveraging other AWS services, you can further enhance your workflow to scale
 
 - Eric Cornwell, Sr. Spatial Compute SA
 - Dario Macangano, Sr. Worldwide Visual Compute SA
-- Stanford Lee, Technical Account Manager
+- Stanford Lee, Technical Account Manager (Spatial Computing TFC)
 - Daniel Zilberman, Sr. SA AWS Technical Guidances
