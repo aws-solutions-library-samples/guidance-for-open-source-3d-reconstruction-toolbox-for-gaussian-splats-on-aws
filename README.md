@@ -42,19 +42,19 @@ This guidance will:
 </div>
 
 ### Architecture Steps
-1. User authenticates to AWS Identity and Access Management (IAM) via AWS Tools and SDKs.
-2. The configuration and input media is uploaded to a dedicated Amazon Simple Storage Service (S3) bucket location. This can be done using a Gradio interface and AWS Software Development Kit (SDK).
-3. Optionally, the solution supports external job submission by uploading a ‘.json’ job configuration file and media into a designated S3 bucket location. 
-4. The job json file uploaded to the bucket will trigger an Amazon Simple Notification Service (SNS) message that will invoke an initialization AWS Lambda function.
-5. The initialization Lambda function will perform input validation and set appropriate variables for the state machine.
-6. The workflow job record will be created in Amazon DynamoDB job table.
-7. The initialization Lambda function will invoke an AWS Step Functions State Machine to handle the entire workflow job.
-8. An Amazon SageMaker Training Job will be submitted synchronously using the state machine built-in wait until completion mechanism. 
-10. The Amazon Elastic Container Registry (ECR) container image and S3 model artifacts will be used to spin up a new graphics processing unit (GPU) container. The instance type is determined by the job json configuration.
-11. The GPU container will run the entire pipeline.
-12. Upon job completion, a final Lambda function will complete the workflow job by updating the job metadata in DynamoDB and notifying the user via email upon completion using SNS.
-13. Internal workflow parameters are stored in Parameter Store during solution deployment to decouple services.
-Amazon CloudWatch is used to monitor the training logs, surfacing errors to the user.
+1. User authenticates to [AWS Identity and Access Management (IAM)](https://aws.amazon.com/iam/) via AWS Tools and SDKs.
+2. The input is uploaded to a dedicated [Amazon Simple Storage Service (S3)](https://aws.amazon.com/s3/)  job bucket location. This can be done using a Gradio interface and AWS Software Development Kit (SDK).
+3. Optionally, the solution supports external job submission by uploading a ‘.JSON’ job configuration file and media into a designated S3 job bucket location. 
+4. The job JSON file uploaded to the S3 job bucket will trigger an [Amazon Simple Notification Service (SNS)](https://aws.amazon.com/sns/) message that will invoke an initialization [AWS Lambda](https://aws.amazon.com/lambda/) function.
+5. The job trigger **AWS Lambda** function will perform input validation and set appropriate variables for the [AWS Step Function State Machine](https://aws.amazon.com/step-functions/).
+6. The workflow job record will be created in [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) job table.
+7. The job trigger **AWS Lambda** function will invoke an **AWS Step Functions State Machine** to handle the entire workflow job.
+8. An [Amazon SageMaker](https://aws.amazon.com/sagemaker/) Training Job will be submitted synchronously using the state machine built-in wait until completion mechanism. 
+9. The [Amazon Elastic Container Registry (ECR)](https://aws.amazon.com/ecr/) container image and S3 job bucket model artifacts will be used to spin up a new Graphics Processing Unit (GPU) container. The compute node instance type is determined by the job JSON configuration.
+10. The GPU container will run the entire pipeline as an **Amazon SageMaker** training job.
+11. The job completion **AWS Lambda** function will complete the workflow job by updating the job metadata in **Amazon DynamoDB** and notifying the user via email upon completion using **Amazon SNS**.
+12. Internal workflow parameters are stored in [AWS System Manager Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html) during guidance deployment to decouple the job trigger **AWS Lambda** function and the **AWS Step Function State Machine**.
+13. [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/) is used to monitor the training logs, surfacing errors to the user.
 
 ### AWS Services in this Guidance
 
