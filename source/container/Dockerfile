@@ -70,11 +70,22 @@ ENV PATH="/usr/local/bin:${PATH}"
 # Disable conda by default - using system Python
 ENV CONDA_AUTO_ACTIVATE_BASE=false
 
+# Prepare the container environment and directories
+RUN mkdir -p ${CODE_PATH}
+WORKDIR ${CODE_PATH}
+
 # Install pre-dependencies
-RUN apt-get update -y && apt upgrade -y && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+RUN apt-get update -y
+RUN apt-get install wget -y
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/libxnvctrl0_575.57.08-0ubuntu1_amd64.deb
+RUN chmod +x ${CODE_PATH}/libxnvctrl0_575.57.08-0ubuntu1_amd64.deb
+RUN apt install ./libxnvctrl0_575.57.08-0ubuntu1_amd64.deb -y
+RUN rm -rf ${CODE_PATH}/libxnvctrl0_575.57.08-0ubuntu1_amd64.deb
+
+RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     git \
     unzip \
-# Building from source for specific ver    cmake \ 
+# Building from source for specific version    cmake \ 
     make \
     ninja-build \
     build-essential \
@@ -82,7 +93,7 @@ RUN apt-get update -y && apt upgrade -y && DEBIAN_FRONTEND=noninteractive apt-ge
     libboost-filesystem-dev \
     libboost-graph-dev \
     libboost-system-dev \
-# Building from source for specific ver    libeigen3-dev \
+# Building from source for specific version    libeigen3-dev \
     libflann-dev \
     libfreeimage-dev \
     libmetis-dev \
@@ -93,9 +104,8 @@ RUN apt-get update -y && apt upgrade -y && DEBIAN_FRONTEND=noninteractive apt-ge
     qtbase5-dev \
     libqt5opengl5-dev \
     libcgal-dev \
-# Building from source for specific ver    libceres-dev \
+# Building from source for specific version    libceres-dev \
     libffi-dev \
-    wget \
     libgflags-dev \
     libatlas-base-dev \
     libsuitesparse-dev \
@@ -112,10 +122,6 @@ RUN apt-get update -y && apt upgrade -y && DEBIAN_FRONTEND=noninteractive apt-ge
 
 # Install and upgrade pip and dependencies
 RUN pip install --upgrade pip
-
-# Prepare the container environment and directories
-RUN mkdir -p ${CODE_PATH}
-WORKDIR ${CODE_PATH}
 
 # Install Python v3.11 and make it the default
 RUN cd /usr/src \
