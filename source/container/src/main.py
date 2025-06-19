@@ -41,7 +41,9 @@ ERROR CODES
 767, "Trainer specified does not match proper configuration"
 770, "Issue running the training session, stage 1"
 780, "Issue exporting splat from NerfStudio"
-781, "Issue creating compressed spz splat"
+781, "Issue rotating splat before SPZ conversion"
+783, "Issue creating compressed spz splat"
+784, "Issue rotating splat after SPZ conversion"
 785, "Issue uploading asset to S3"
 790, "The archive doesn't contain supported image files .jpg, .jpeg, or .png"
 795, "General error running the pipeline"
@@ -218,218 +220,6 @@ def obj_to_glb(obj_path: str, glb_path: str)->None:
         file_type='obj'
     ).export(glb_path, file_type='glb')
 
-def rotate_gaussian_splat(input_path, angle_x=0, angle_y=0, angle_z=0):
-    """
-    Rotate a Gaussian splat PLY file.
-    
-    Args:
-        input_path (str): Path to input PLY file
-        angle_x (float): Rotation angle around x-axis in degrees
-        angle_y (float): Rotation angle around y-axis in degrees
-        angle_z (float): Rotation angle around z-axis in degrees
-    """
-    print(f"Processing file: {input_path}")
-    print(f"File size: {os.path.getsize(input_path)} bytes")
-    print(f"Rotating: X={angle_x}°, Y={angle_y}°, Z={angle_z}°")
-    
-    # Read entire file first
-    with open(input_path, 'rb') as f:
-        file_content = f.read()
-    
-    # Find the header end position
-    header_end = file_content.find(b'end_header\n') + len(b'end_header\n')
-    
-    # Extract header and data portions
-    header_bytes = file_content[:header_end]
-    vertex_data = file_content[header_end:]
-    
-    # Parse header
-    header = header_bytes.decode('ascii')
-    header_lines = header.split('\n')
-    
-    # Initialize variables
-    vertex_count = 0
-    property_indices = {'x': -1, 'y': -1, 'z': -1}
-    num_properties = 0
-    
-    # Parse header information
-    for line in header_lines:
-        if 'element vertex' in line:
-            vertex_count = int(line.split()[-1])
-        elif 'property float' in line:
-            prop_name = line.split()[-1]
-            if prop_name == 'x':
-                property_indices['x'] = num_properties
-            elif prop_name == 'y':
-                property_indices['y'] = num_properties
-            elif prop_name == 'z':
-                property_indices['z'] = num_properties
-            num_properties += 1
-    
-    print(f"Vertex count: {vertex_count}")
-    print(f"Properties per vertex: {num_properties}")
-    
-    # Check if we found x, y, z properties
-    if -1 in property_indices.values():
-        print("Error: Could not find x, y, z properties in PLY header")
-        return
-        
-    # Convert rotation angles from degrees to radians
-    angle_x_rad = np.radians(angle_x)
-    angle_y_rad = np.radians(angle_y)
-    angle_z_rad = np.radians(angle_z)
-    
-    # Create rotation matrices
-    # Rotation around X axis
-    rx = np.array([
-        [1, 0, 0],
-        [0, np.cos(angle_x_rad), -np.sin(angle_x_rad)],
-        [0, np.sin(angle_x_rad), np.cos(angle_x_rad)]
-    ])
-    
-    # Rotation around Y axis
-    ry = np.array([
-        [np.cos(angle_y_rad), 0, np.sin(angle_y_rad)],
-        [0, 1, 0],
-        [-np.sin(angle_y_rad), 0, np.cos(angle_y_rad)]
-    ])
-    
-    # Rotation around Z axis
-    rz = np.array([
-        [np.cos(angle_z_rad), -np.sin(angle_z_rad), 0],
-        [np.sin(angle_z_rad), np.cos(angle_z_rad), 0],
-        [0, 0, 1]
-    ])
-    
-    # Combined rotation matrix
-    rotation_matrix = rx @ ry @ rz
-    
-    # Parse vertex data
-    float_size = 4  # Size of float32 in bytes
-    bytes_per_vertex = num_properties * float_size
-    
-    # Create a new vertex data buffer
-    new_vertex_data = bytearray(len(vertex_data))
-    
-    # Process each vertex
-    for i in range(vertex_count):
-        # Calculate offset for this vertex in the binary data
-        offset = i * bytes_per_vertex
-        
-        # Extract all properties for this vertex
-        vertex_props = []
-        for j in range(num_properties):
-            prop_offset = offset + j * float_size
-            prop_value = np.frombuffer(vertex_data[prop_offset:prop_offset+float_size], dtype=np.float32)[0]
-            vertex_props.append(prop_value)
-        
-        # Extract x, y, z coordinates
-        x = vertex_props[property_indices['x']]
-        y = vertex_props[property_indices['y']]
-        z = vertex_props[property_indices['z']]
-        
-        # Apply rotation
-        pos = np.array([x, y, z])
-        rotated_pos = rotation_matrix @ pos
-        
-        # Update coordinates
-        vertex_props[property_indices['x']] = rotated_pos[0]
-        vertex_props[property_indices['y']] = rotated_pos[1]
-        vertex_props[property_indices['z']] = rotated_pos[2]
-        
-        # Write back all properties
-        for j in range(num_properties):
-            prop_offset = offset + j * float_size
-            prop_bytes = np.array([vertex_props[j]], dtype=np.float32).tobytes()
-            new_vertex_data[prop_offset:prop_offset+float_size] = prop_bytes
-    
-    # Write the modified PLY file
-    with open(input_path, 'wb') as f:
-        f.write(header_bytes)
-        f.write(new_vertex_data)
-    
-    print(f"Rotation complete: {input_path}")
-
-def transform_coordinates(input_path, target_system, source_system="opengl", output_path=None):
-    """
-    Transform a 3D model from source coordinate system to target coordinate system.
-    
-    Args:
-        input_path: Path to input 3D file
-        target_system: Target coordinate system
-        source_system: Source coordinate system (default: "opengl")
-        output_path: Path to save transformed file (defaults to input_path)
-    """
-    if output_path is None:
-        output_path = input_path
-    
-    # Default values (no transformation)
-    angle_x = 0
-    angle_y = 0
-    angle_z = 0
-    
-    # Handle the case where we're using the original working rotation
-    if target_system.lower() == "true":
-        angle_x = 90
-        print(f"Using original rotation: X={angle_x}°, Y={angle_y}°, Z={angle_z}°")
-        rotate_gaussian_splat(input_path, angle_x=angle_x, angle_y=angle_y, angle_z=angle_z)
-        return output_path
-    
-    # Define coordinate system properties
-    # Format: [handedness, up-axis]
-    # handedness: "right" or "left"
-    # up-axis: "y" or "z"
-    systems = {
-        "opengl": ["right", "y"],
-        "babylon": ["left", "y"],
-        "threejs": ["right", "y"],
-        "blender": ["right", "z"],
-        "unity": ["left", "y"],
-        "unreal": ["left", "z"],
-        "godot": ["right", "y"],
-        # ARKit is left-handed, Y-up
-        "arkit": ["left", "y"],
-        # ARCore is right-handed, Y-up
-        "arcore": ["right", "y"]
-    }
-    
-    # Get source and target system properties
-    if source_system.lower() not in systems:
-        print(f"Unknown source system: {source_system}, assuming OpenGL")
-        source_system = "opengl"
-    
-    if target_system.lower() not in systems:
-        print(f"Unknown target system: {target_system}, no rotation applied")
-        return output_path
-    
-    source_props = systems[source_system.lower()]
-    target_props = systems[target_system.lower()]
-    
-    # Step 1: Handle up-axis difference
-    if source_props[1] != target_props[1]:
-        if source_props[1] == "y" and target_props[1] == "z":
-            # Y-up to Z-up: rotate -90 degrees around X
-            angle_x = -90
-        elif source_props[1] == "z" and target_props[1] == "y":
-            # Z-up to Y-up: rotate 90 degrees around X
-            angle_x = 90
-    
-    # Step 2: Handle handedness difference
-    if source_props[0] != target_props[0]:
-        # To switch handedness, flip the Z-axis
-        # If we've already rotated around X, we need to flip a different axis
-        if angle_x != 0:
-            # If we've rotated to/from Z-up, we need to flip Y instead of Z
-            angle_z = 180
-        else:
-            angle_y = 180
-    
-    print(f"Transforming from {source_system} to {target_system}")
-    print(f"Applying rotation: X={angle_x}°, Y={angle_y}°, Z={angle_z}°")
-    rotate_gaussian_splat(input_path, angle_x=angle_x, angle_y=angle_y, angle_z=angle_z)
-    
-    return output_path
-
 def count_up_to(n):
     """
         Convert an integer to a list of numbers as string
@@ -537,7 +327,6 @@ if __name__ == "__main__":
             raise RuntimeError(error_message)
         
         # Unpack the sam2 models
-        #untar_gz("/opt/ml/input/data/model/models.tar.gz", "/opt/ml/input/data/model")
         untar_gz(os.path.join(os.environ["MODEL_PATH"], "models.tar.gz"), os.environ["MODEL_PATH"])
 
         # Instantiate Pipeline Session
@@ -653,11 +442,6 @@ if __name__ == "__main__":
     ##################################
     try:
         if VIDEO is True:
-            #if str(config['FILTER_BLURRY_IMAGES']).lower() == "true":
-            #    # Pad the number of images by 10% to allow for blurry image removal
-            #    padded_num_images = str(int(float(config['MAX_NUM_IMAGES'])+float(config['MAX_NUM_IMAGES'])*0.1))
-            #else:
-            #    padded_num_images = config['MAX_NUM_IMAGES']
             if str(config['REMOVE_BACKGROUND']).lower() == "true" and \
                 str(config['BACKGROUND_REMOVAL_MODEL']).lower() == "sam2":
                 # SAM2 BACKGROUND REMOVAL COMPONENT
@@ -913,8 +697,7 @@ if __name__ == "__main__":
                         "--database_path",  colmap_db_path,
                         "--SiftMatching.num_threads", pipeline.config.num_threads,
                         "--SequentialMatching.quadratic_overlap", "1",
-                        "--SiftMatching.guided_matching", "0"#,
-                        #"--SiftMatching.use_gpu", "0"
+                        "--SiftMatching.guided_matching", "0"
                     ]
                     if config['SPHERICAL_CAMERA'].lower() == "true":
                         args.extend([
@@ -1318,6 +1101,31 @@ if __name__ == "__main__":
         pipeline.report_error(780, error_message)
 
     ##################################
+    # TRANSFORM:
+    # ROTATE SPLAT - PRE SPZ (SPZ MODULE HAS BUILT IN ROTATION around X-Y)
+    ##################################
+    try:
+        # Apply pre-rotation if configured
+        if str(config['ROTATE_SPLAT']).lower() == "true":
+            # Apply the original pre-rotation values to work with the SPZ converter
+            args = [
+                "-i", os.path.join(output_path, "splat.ply"),
+                "--rotations", "x:270,y:180,z:0"
+            ]
+            pipeline.create_component(
+                name="Rotation-Pre-SPZ",
+                comp_type=ComponentType.transform,
+                comp_environ=ComponentEnvironment.python,
+                command="training/rotate_splat_simple.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue rotating splat before SPZ conversion: {e}"
+        pipeline.report_error(781, error_message)
+
+    ##################################
     # EXPORT:
     # CREATE SPZ EXPORT COMPONENT
     ##################################
@@ -1337,7 +1145,32 @@ if __name__ == "__main__":
             )
     except Exception as e:
         error_message = f"Issue creating compressed spz splat: {e}"
-        pipeline.report_error(781, error_message)
+        pipeline.report_error(783, error_message)
+
+    ##################################
+    # TRANSFORM:
+    # ROTATE SPLAT POST SPZ
+    ##################################
+    try:
+        # Apply pre-rotation if configured
+        if str(config['ROTATE_SPLAT']).lower() == "true":
+            # Apply the original pre-rotation values to work with the SPZ converter
+            args = [
+                "-i", os.path.join(output_path, "splat.ply"),
+                "--rotations", "x:180,y:180,z:0"
+            ]
+            pipeline.create_component(
+                name="Rotation-Post-SPZ",
+                comp_type=ComponentType.transform,
+                comp_environ=ComponentEnvironment.python,
+                command="training/rotate_splat_simple.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue rotating splat after SPZ conversion: {e}"
+        pipeline.report_error(784, error_message)
 
     ##################################
     # EXPORT:
@@ -1558,13 +1391,7 @@ if __name__ == "__main__":
                         root_exp_dir = os.path.join(config['DATASET_PATH'], "3dgrut", "runs", str(config['UUID']))
                         exp_dir = os.listdir(root_exp_dir)[0]
                         shutil.move(os.path.join(root_exp_dir, exp_dir, "export_last.ply"), os.path.join(output_path, "splat.ply"))
-                    if str(config['ROTATE_SPLAT']).lower() == "true":
-                        # the SPZ converter will rotate axes 180
-                        rotate_gaussian_splat(os.path.join(output_path, "splat.ply"), 90, 180, 0)
                     pipeline.run_component(i)
-                    if str(config['ROTATE_SPLAT']).lower() == "true":
-                        # Rotate the splat back to 90 to correct for spz rotation
-                        rotate_gaussian_splat(os.path.join(output_path, "splat.ply"), 180, 180, 0)
                 case "S3-Export2":
                     # S3 UPLOAD CONDITIONAL COMPONENT
                     log.info("Uploading asset to S3")

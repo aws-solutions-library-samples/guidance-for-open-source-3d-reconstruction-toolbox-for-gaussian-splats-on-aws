@@ -107,9 +107,7 @@ class ContainerDeployment(Construct):
                 directory=dockerfile_path,
                 build_args=build_args,
                 platform=ecr_assets.Platform.LINUX_AMD64,
-                #build_options={
-                #    "platform": "linux/amd64"
-                #}
+                #cache_disabled=True
             )
 
             # Copy image from cdk docker image asset to ECR

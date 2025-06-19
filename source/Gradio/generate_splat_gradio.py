@@ -165,7 +165,8 @@ def parse_aws_credentials(creds_string):
 def refresh_s3_contents():
     """Refresh S3 contents and return sorted data for .ply and .spz files"""
     try:
-        print("\n=== Refreshing S3 Contents ===")
+        refresh_id = time.time()  # Generate unique ID for this refresh operation
+        print(f"\n=== Refreshing S3 Contents (ID: {refresh_id}) ===")
         s3_client = boto3.client('s3')
         bucket_name = shared_state.s3_bucket
         output_prefix = shared_state.s3_output or "workflow-output"
@@ -216,7 +217,9 @@ def refresh_s3_contents():
         files_data.sort(key=lambda x: x[3], reverse=True)
         
         print(f"Found {len(files_data)} .ply and .spz files")
-        print("=== End Refresh ===\n")
+        for i, file_data in enumerate(files_data):
+            print(f"  [{i}]: {file_data[0]} - {file_data[1]}")
+        print(f"=== End Refresh (ID: {refresh_id}) ===\n")
         
         return files_data
         
@@ -715,7 +718,7 @@ def create_upload_aws_tab():
             with gr.Column():
                 video_file = gr.File(
                     label="Upload Media File",
-                    file_types=[".mp4", ".mov", ".zip"]
+                    file_types=[".mp4", ".MP4", ".mov", ".MOV", ".zip", ".ZIP"]
                 )
                 output = gr.Textbox(label="Output", lines=20)
                 upload_button = gr.Button("Upload to AWS", variant="primary", elem_classes=["orange-button"])
@@ -1071,269 +1074,6 @@ def create_advanced_settings_tab():
                         outputs=[gr.Textbox(label="Status", visible=False)]
                     )
 
-def view_splat(ply_url):
-    """View a PLY file using WebGL Gaussian Splatting"""
-    try:
-        html_content = f"""
-        <iframe
-            srcdoc='
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="utf-8">
-                <style>
-                    html, body {{
-                        width: 100%;
-                        height: 100%;
-                        margin: 0;
-                        padding: 0;
-                        overflow: hidden;
-                    }}
-                    #renderCanvas {{
-                        width: 100%;
-                        height: 100%;
-                        touch-action: none;
-                        outline: none;
-                    }}
-                    #debugInfo {{
-                        position: fixed;
-                        top: 10px;
-                        left: 10px;
-                        color: white;
-                        background: rgba(0,0,0,0.7);
-                        padding: 10px;
-                        font-family: monospace;
-                        z-index: 100;
-                    }}
-                </style>
-            </head>
-            <body>
-                <div id="debugInfo">Starting initialization...</div>
-                <canvas id="renderCanvas"></canvas>
-                <script>
-                    const debugInfo = document.getElementById("debugInfo");
-                    const canvas = document.getElementById("renderCanvas");
-                    
-                    // Initialize WebGL
-                    const gl = canvas.getContext("webgl2");
-                    if (!gl) {{
-                        debugInfo.textContent = "WebGL2 not available";
-                        throw new Error("WebGL2 not available");
-                    }}
-
-                    // Vertex shader for Gaussian splats
-                    const vsSource = `#version 300 es
-                        in vec3 position;
-                        in vec3 scale;
-                        in vec4 rotation;
-                        in vec3 color;
-                        
-                        uniform mat4 modelViewMatrix;
-                        uniform mat4 projectionMatrix;
-                        uniform float splatSize;
-                        
-                        out vec3 vColor;
-                        out vec2 vPosition;
-                        
-                        void main() {{
-                            // Convert quaternion to rotation matrix
-                            float x = rotation.x;
-                            float y = rotation.y;
-                            float z = rotation.z;
-                            float w = rotation.w;
-                            
-                            mat3 rotMat = mat3(
-                                1.0 - 2.0*y*y - 2.0*z*z, 2.0*x*y - 2.0*z*w, 2.0*x*z + 2.0*y*w,
-                                2.0*x*y + 2.0*z*w, 1.0 - 2.0*x*x - 2.0*z*z, 2.0*y*z - 2.0*x*w,
-                                2.0*x*z - 2.0*y*w, 2.0*y*z + 2.0*x*w, 1.0 - 2.0*x*x - 2.0*y*y
-                            );
-                            
-                            // Apply rotation and scale
-                            vec3 scaledPos = position * scale;
-                            vec3 rotatedPos = rotMat * scaledPos;
-                            
-                            // Project position
-                            gl_Position = projectionMatrix * modelViewMatrix * vec4(rotatedPos, 1.0);
-                            
-                            // Calculate point size based on scale and distance
-                            float dist = length((modelViewMatrix * vec4(rotatedPos, 1.0)).xyz);
-                            gl_PointSize = splatSize * scale.x / dist;
-                            
-                            vColor = color;
-                            vPosition = gl_Position.xy;
-                        }}
-                    `;
-
-                    // Fragment shader for Gaussian splats
-                    const fsSource = `#version 300 es
-                        precision highp float;
-                        
-                        in vec3 vColor;
-                        in vec2 vPosition;
-                        
-                        out vec4 fragColor;
-                        
-                        void main() {{
-                            // Calculate distance from center of point
-                            vec2 coord = gl_PointCoord - vec2(0.5);
-                            float dist = length(coord);
-                            
-                            // Gaussian falloff
-                            float alpha = exp(-dist * dist * 2.0);
-                            
-                            // Discard pixels below threshold
-                            if (alpha < 0.01) discard;
-                            
-                            fragColor = vec4(vColor, alpha);
-                        }}
-                    `;
-
-                    // Initialize shaders
-                    function initShaderProgram(gl, vsSource, fsSource) {{
-                        const vertexShader = loadShader(gl, gl.VERTEX_SHADER, vsSource);
-                        const fragmentShader = loadShader(gl, gl.FRAGMENT_SHADER, fsSource);
-
-                        const shaderProgram = gl.createProgram();
-                        gl.attachShader(shaderProgram, vertexShader);
-                        gl.attachShader(shaderProgram, fragmentShader);
-                        gl.linkProgram(shaderProgram);
-
-                        if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {{
-                            throw new Error('Shader program failed to link: ' + gl.getProgramInfoLog(shaderProgram));
-                        }}
-
-                        return shaderProgram;
-                    }}
-
-                    function loadShader(gl, type, source) {{
-                        const shader = gl.createShader(type);
-                        gl.shaderSource(shader, source);
-                        gl.compileShader(shader);
-
-                        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {{
-                            gl.deleteShader(shader);
-                            throw new Error('Shader failed to compile: ' + gl.getShaderInfoLog(shader));
-                        }}
-
-                        return shader;
-                    }}
-
-                    // Initialize buffers
-                    async function initBuffers(gl, url) {{
-                        debugInfo.textContent = "Loading PLY file...";
-                        
-                        const response = await fetch(url);
-                        const data = await response.arrayBuffer();
-                        
-                        // Parse PLY file (simplified for example)
-                        // You'll need to implement proper PLY parsing here
-                        const positions = new Float32Array(data);
-                        const scales = new Float32Array(data.byteLength / 12);
-                        const rotations = new Float32Array(data.byteLength / 9);
-                        const colors = new Float32Array(data.byteLength / 12);
-
-                        // Create and bind buffers
-                        const positionBuffer = gl.createBuffer();
-                        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-                        gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-
-                        const scaleBuffer = gl.createBuffer();
-                        gl.bindBuffer(gl.ARRAY_BUFFER, scaleBuffer);
-                        gl.bufferData(gl.ARRAY_BUFFER, scales, gl.STATIC_DRAW);
-
-                        const rotationBuffer = gl.createBuffer();
-                        gl.bindBuffer(gl.ARRAY_BUFFER, rotationBuffer);
-                        gl.bufferData(gl.ARRAY_BUFFER, rotations, gl.STATIC_DRAW);
-
-                        const colorBuffer = gl.createBuffer();
-                        gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
-                        gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
-
-                        return {{
-                            position: positionBuffer,
-                            scale: scaleBuffer,
-                            rotation: rotationBuffer,
-                            color: colorBuffer,
-                            count: positions.length / 3
-                        }};
-                    }}
-
-                    // Main render function
-                    function render(gl, programInfo, buffers) {{
-                        gl.clearColor(0.2, 0.2, 0.2, 1.0);
-                        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-                        // Set up camera and matrices
-                        // ... (implement camera controls and matrix calculations)
-
-                        // Bind buffers and attributes
-                        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position);
-                        gl.vertexAttribPointer(programInfo.attribLocations.position, 3, gl.FLOAT, false, 0, 0);
-                        gl.enableVertexAttribArray(programInfo.attribLocations.position);
-
-                        // ... (bind other attributes)
-
-                        // Draw
-                        gl.useProgram(programInfo.program);
-                        gl.drawArrays(gl.POINTS, 0, buffers.count);
-                    }}
-
-                    // Main initialization
-                    async function main() {{
-                        try {{
-                            debugInfo.textContent = "Initializing shaders...";
-                            const shaderProgram = initShaderProgram(gl, vsSource, fsSource);
-
-                            const programInfo = {{
-                                program: shaderProgram,
-                                attribLocations: {{
-                                    position: gl.getAttribLocation(shaderProgram, 'position'),
-                                    scale: gl.getAttribLocation(shaderProgram, 'scale'),
-                                    rotation: gl.getAttribLocation(shaderProgram, 'rotation'),
-                                    color: gl.getAttribLocation(shaderProgram, 'color'),
-                                }},
-                                uniformLocations: {{
-                                    projectionMatrix: gl.getUniformLocation(shaderProgram, 'projectionMatrix'),
-                                    modelViewMatrix: gl.getUniformLocation(shaderProgram, 'modelViewMatrix'),
-                                    splatSize: gl.getUniformLocation(shaderProgram, 'splatSize'),
-                                }},
-                            }};
-
-                            debugInfo.textContent = "Loading data...";
-                            const buffers = await initBuffers(gl, "{ply_url}");
-
-                            debugInfo.textContent = "Rendering...";
-                            function renderLoop() {{
-                                render(gl, programInfo, buffers);
-                                requestAnimationFrame(renderLoop);
-                            }}
-                            renderLoop();
-
-                        }} catch (error) {{
-                            console.error("Error:", error);
-                            debugInfo.textContent = "Error: " + error.message;
-                        }}
-                    }}
-
-                    // Start the application
-                    main();
-                </script>
-            </body>
-            </html>
-        '
-        style="width: 100%; height: 600px; border: none;"
-        scrolling="no"
-        ></iframe>
-        """
-        
-        return html_content
-
-    except Exception as e:
-        print(f"Error in view_splat: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return f"Error loading PLY file: {str(e)}"
-
 def on_select(evt: gr.SelectData, data):
     """Handle row selection in the files table"""
     try:
@@ -1455,7 +1195,8 @@ def create_s3_browser_tab():
             clear_color=[0.2, 0.2, 0.2, 1.0],
             height=900,
             interactive=True,
-            render=False
+            render=False,
+            #camera_position = (0, 0, 0) 
         )
 
         viewer_status = gr.Textbox(
@@ -1465,6 +1206,9 @@ def create_s3_browser_tab():
             value="",
             render=False
         )
+        
+        # Store the current model URL
+        current_model = gr.State(None)
 
         # Create a container for favorites that can be updated
         favorites_container = gr.Column()
@@ -1492,7 +1236,10 @@ def create_s3_browser_tab():
                                 favorite_name = favorite['filename']
                                 
                                 favorite_btn.click(
-                                    fn=lambda p=favorite_path, n=favorite_name: (p, f"Loaded local file: {n}"),
+                                    fn=lambda p=favorite_path, n=favorite_name: (
+                                        p,
+                                        f"Loaded local file: {n}"
+                                    ),
                                     inputs=[],
                                     outputs=[viewer, viewer_status]
                                 )
@@ -1508,20 +1255,42 @@ def create_s3_browser_tab():
 
         def on_select(evt: gr.SelectData):
             try:
+                # Create a timestamp to trace this specific selection event
+                selection_time = time.time()
+                print(f"\n=== DEBUG TABLE SELECTION {selection_time} ===")
+                
                 # Get the current data from the DataFrame
                 current_data = files_box.value
                 
-                # Handle data if it's a dictionary with 'data' key
+                # Debug print to see what's in the table
+                print(f"Type of files_box.value: {type(current_data)}")
+                print(f"Event index: {evt.index}")
+                
+                # Always convert data to a consistent format
                 if isinstance(current_data, dict) and 'data' in current_data:
                     current_data = current_data['data']
-                    #print(f"Extracted data from dictionary: {current_data}")
+                    print(f"Extracted data from dictionary, new type: {type(current_data)}")
+                
+                # Convert to list if it's a numpy array or other sequence type
+                if not isinstance(current_data, list) and hasattr(current_data, '__iter__'):
+                    current_data = list(current_data)
+                    print(f"Converted data to list")
                 
                 row_index = evt.index[0]
+                print(f"Row index: {row_index}, Data length: {len(current_data) if current_data else 0}")
                 
-                if current_data and isinstance(current_data, list) and len(current_data) > row_index:
+                if current_data and row_index < len(current_data):
                     selected_row = current_data[row_index]
-                    #print(f"Selected row data: {selected_row}")
+                    print(f"Selected row data: {selected_row}")
+                    print(f"Type of selected row: {type(selected_row)}")
                     
+                    # Force selected_row to be a list if it's not already
+                    if not isinstance(selected_row, list):
+                        print(f"Converting selected_row to list")
+                        selected_row = list(selected_row)
+                        print(f"After conversion: {selected_row}")
+                    
+                    print(f"Enabling buttons for selection at {selection_time}")
                     return (
                         selected_row,
                         gr.update(interactive=True),
@@ -1530,14 +1299,16 @@ def create_s3_browser_tab():
                     )
                 else:
                     print(f"Invalid row index {row_index} or empty data")
-                    print(f"Data length: {len(current_data) if current_data else 0}")
-                
-                return (
-                    None,
-                    gr.update(interactive=False),
-                    gr.update(interactive=False),
-                    gr.update(interactive=False)
-                )
+                    if current_data:
+                        print(f"Data length: {len(current_data)}")
+                        print(f"First few items: {current_data[:3] if len(current_data) > 3 else current_data}")
+                    print(f"Type of current_data: {type(current_data)}")
+                    return (
+                        None,
+                        gr.update(interactive=False),
+                        gr.update(interactive=False),
+                        gr.update(interactive=False)
+                    )
                 
             except Exception as e:
                 print("\n=== Error Debug Information ===")
@@ -1602,48 +1373,324 @@ def create_s3_browser_tab():
             ]
         )
 
-        def refresh_and_update():
-            """Refresh S3 contents and update the DataFrame"""
-            try:
-                files = refresh_s3_contents()
-                
-                if isinstance(files, dict) and 'data' in files:
-                    files = files['data']
-                
-                return files
-            except Exception as e:
-                print(f"Error in refresh_and_update: {str(e)}")
-                return []
-
-        def add_to_favorites_and_update(selected_data):
-            """Add to favorites and update the UI"""
-            status = add_to_favorites(selected_data)
-            # Return the updated favorites UI
-            return update_favorites_ui(), status
+def refresh_and_update():
+    """Refresh S3 contents and update the DataFrame"""
+    try:
+        files = refresh_s3_contents()
         
-        def add_to_favorites_and_reload(selected_data):
-            """Add to favorites and force a page reload"""
-            status = add_to_favorites(selected_data)
+        if isinstance(files, dict) and 'data' in files:
+            files = files['data']
+        
+        # Ensure we always return a list, even if empty
+        if files is None:
+            files = []
             
-            # Create a JavaScript snippet that will reload the page
-            reload_html = """
-            <script>
-            // Force a complete page reload (not from cache)
-            setTimeout(function() {
-                window.location.href = window.location.href + '?t=' + new Date().getTime();
-            }, 1000);
-            </script>
-            """
+        # Reset the selection state when refreshing data
+        print("Refreshed data, resetting selection state")
+        return files, None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+    except Exception as e:
+        print(f"Error in refresh_and_update: {str(e)}")
+        return [], None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+
+def add_to_favorites_and_update(selected_data):
+    """Add to favorites and update the UI"""
+    status = add_to_favorites(selected_data)
+    # Return the updated favorites UI
+    return update_favorites_ui(), status
+
+def add_to_favorites_and_reload(selected_data):
+    """Add to favorites and force a page reload"""
+    status = add_to_favorites(selected_data)
+    
+    # Create a JavaScript snippet that will reload the page
+    reload_html = """
+    <script>
+    // Force a complete page reload (not from cache)
+    setTimeout(function() {
+        window.location.href = window.location.href + '?t=' + new Date().getTime();
+    }, 1000);
+    </script>
+    """
+    
+    gr.Info("Adding to favorites...the Favorites list will be updated when the local website is re-launched.")
+    return gr.HTML(reload_html)
+
+def create_s3_browser_tab():
+    with gr.Tab("3D Viewer & Library"):
+        # Create viewer and status first (but don't render yet)
+        viewer = gr.Model3D(
+            label="3D Viewer",
+            clear_color=[0.2, 0.2, 0.2, 1.0],
+            height=900,
+            interactive=True,
+            render=False,
+            #camera_position = (0, 0, 0) 
+        )
+
+        viewer_status = gr.Textbox(
+            label="Viewer Status",
+            interactive=False,
+            show_label=True,
+            value="",
+            render=False
+        )
+        
+        # Store the current model URL
+        current_model = gr.State(None)
+
+        # Create a container for favorites that can be updated
+        favorites_container = gr.Column()
+        
+        # Function to update favorites UI
+        def update_favorites_ui():
+            favorites = load_favorites()
+            with gr.Column() as new_container:
+                gr.Markdown("### Favorites")
+                with gr.Row(elem_classes="favorites-buttons-row"):
+                    if not favorites:
+                        gr.HTML('<div class="no-favorites-text">No favorites yet</div>')
+                    else:
+                        for favorite in favorites:
+                            with gr.Column(scale=1, min_width=100):
+                                display_name = favorite.get('display_name', favorite['filename'])
+                                favorite_btn = gr.Button(
+                                    value=f"📌 {display_name}", 
+                                    elem_classes=["favorite-button"],
+                                    size="sm"
+                                )
+                                                        
+                                # Create a click handler for this favorite
+                                favorite_path = favorite['path']
+                                favorite_name = favorite['filename']
+                                
+                                favorite_btn.click(
+                                    fn=lambda p=favorite_path, n=favorite_name: (
+                                        p,
+                                        f"Loaded local file: {n}"
+                                    ),
+                                    inputs=[],
+                                    outputs=[viewer, viewer_status]
+                                )
+            return new_container
+
+        # Initial render of favorites
+        with favorites_container:
+            update_favorites_ui()
+
+        # Now render the viewer
+        viewer.render()
+        viewer_status.render()
+
+        def on_select(evt: gr.SelectData):
+            try:
+                # Create a unique ID for this selection event for tracking
+                selection_id = f"sel_{time.time()}"
+                print(f"\n=== DEBUG TABLE SELECTION [{selection_id}] ===")
+                
+                # Get the current data directly from the event
+                # This ensures we're working with the exact data that was clicked
+                row_index = evt.index[0]
+                col_index = evt.index[1]
+                
+                print(f"Selection event indices: row={row_index}, col={col_index}")
+                
+                # Get the current data from the DataFrame
+                current_data = files_box.value
+                
+                # Debug print to see what's in the table
+                print(f"Type of files_box.value: {type(current_data)}")
+                
+                # Handle data if it's a dictionary with 'data' key
+                if isinstance(current_data, dict) and 'data' in current_data:
+                    current_data = current_data['data']
+                    print(f"Extracted data from dictionary, new type: {type(current_data)}")
+                
+                # Ensure current_data is a list
+                if not isinstance(current_data, list):
+                    if hasattr(current_data, '__iter__'):
+                        current_data = list(current_data)
+                        print(f"Converted data to list, length: {len(current_data)}")
+                    else:
+                        print(f"Warning: current_data is not iterable: {type(current_data)}")
+                        return (None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False))
+                
+                # Verify row index is valid
+                if not current_data or row_index >= len(current_data):
+                    print(f"Invalid row index {row_index}, data length: {len(current_data) if current_data else 0}")
+                    return (None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False))
+                
+                # Get the selected row data
+                selected_row = current_data[row_index]
+                print(f"Selected row data: {selected_row}")
+                print(f"Type of selected row: {type(selected_row)}")
+                
+                # Force selected_row to be a list if it's not already
+                if not isinstance(selected_row, list):
+                    print(f"Converting selected_row to list")
+                    selected_row = list(selected_row)
+                    print(f"After conversion: {selected_row}")
+                
+                print(f"Enabling buttons for selection [{selection_id}]")
+                return (
+                    selected_row,
+                    gr.update(interactive=True),
+                    gr.update(interactive=True),
+                    gr.update(interactive=True)
+                )
+                
+            except Exception as e:
+                print("\n=== Error Debug Information ===")
+                print(f"Error in selection handler: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                print("=== End Error Information ===\n")
+                return (
+                    None,
+                    gr.update(interactive=False),
+                    gr.update(interactive=False),
+                    gr.update(interactive=False)
+                )
+                
+        # File browser section
+        with gr.Row():
+            with gr.Column(scale=2):
+                gr.Markdown("### Contents")
+                refresh_button = gr.Button(
+                    "Refresh Input Contents", 
+                    variant="primary",
+                    size="sm"
+                )
+                with gr.Row():
+                    download_btn = gr.Button(
+                        "Download Selected", 
+                        interactive=False,
+                        size="sm"
+                    )
+                    view_btn = gr.Button(
+                        "View Selected", 
+                        interactive=False,
+                        size="sm"
+                    )
+                    add_favorite_btn = gr.Button(
+                        "Add to Favorites", 
+                        interactive=False,
+                        size="sm"
+                    )
+                files_box = gr.Dataframe(
+                    headers=["Job ID", "Filename", "Size", "Last Modified"],
+                    interactive=False,
+                    type="array",
+                    value=[],
+                    visible=True,
+                    elem_id="files_table"
+                )
+
+                selected_data = gr.State(None)
+
+        download_iframe = gr.HTML(visible=True)
+        
+        # Replace the select event handler with a more direct approach
+        def direct_select(evt: gr.SelectData, data):
+            """Direct selection handler that uses the event data to get the selected row"""
+            try:
+                # Get row index from the event
+                row_idx = evt.index[0]
+                
+                # Debug info
+                print(f"\n=== DIRECT SELECT ===")
+                print(f"Event index: {evt.index}")
+                print(f"Data type: {type(data)}")
+                print(f"Data length: {len(data) if hasattr(data, '__len__') else 'unknown'}")
+                
+                # Get the selected row directly from the data
+                if data and row_idx < len(data):
+                    selected_row = data[row_idx]
+                    print(f"Selected row: {selected_row}")
+                    
+                    # Enable buttons
+                    return selected_row, gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=True)
+                else:
+                    print(f"Invalid selection: row_idx={row_idx}, data_len={len(data) if data else 0}")
+                    return None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+                    
+            except Exception as e:
+                print(f"Error in direct_select: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                return None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+        
+        # Connect the direct selection handler
+        files_box.select(
+            fn=direct_select,
+            inputs=[files_box],  # Pass the current data directly
+            outputs=[
+                selected_data,
+                download_btn,
+                view_btn,
+                add_favorite_btn
+            ]
+        )
+
+        # Add a callback to log when the dataframe value changes
+        files_box.change(
+            fn=lambda data: print(f"\n=== DATA UPDATED ===\nNew data type: {type(data)}\nData length: {len(data) if hasattr(data, '__len__') else 'unknown'}\nFirst 2 items: {data[:2] if hasattr(data, '__getitem__') else 'N/A'}\n"),
+            inputs=[files_box],
+            outputs=[]
+        )
+        
+        # Connect refresh button with a direct callback that ensures proper data setting
+        def refresh_button_handler():
+            # Get fresh data
+            refresh_id = f"refresh_{time.time()}"
+            print(f"\n=== REFRESH TRIGGERED (ID: {refresh_id}) ===")
             
-            gr.Info("Adding to favorites...the Favorites list will be updated when the local website is re-launched.")
-            return gr.HTML(reload_html)
-
-
-        # Connect refresh button
+            try:
+                # Get fresh data from S3
+                files_data = refresh_s3_contents()
+                
+                # Log the data we're about to set
+                print(f"Data to set - Type: {type(files_data)}, Length: {len(files_data)}")
+                for i, item in enumerate(files_data[:5]):  # Log first 5 items
+                    print(f"Item {i}: {item}")
+                
+                # Make sure files_data is a list
+                if not isinstance(files_data, list):
+                    if hasattr(files_data, '__iter__'):
+                        files_data = list(files_data)
+                    else:
+                        files_data = []
+                
+                # Sort the data to ensure consistent ordering
+                # Sort by Last Modified column (index 3) in descending order
+                files_data.sort(key=lambda x: x[3] if len(x) > 3 else "", reverse=True)
+                
+                # Force a clean list of lists structure
+                clean_data = []
+                for row in files_data:
+                    if isinstance(row, list) and len(row) >= 4:
+                        clean_data.append(row)
+                
+                print(f"Refresh complete [{refresh_id}], returning {len(clean_data)} items")
+                
+                # Explicitly set the value and disable buttons
+                return clean_data, None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+                
+            except Exception as e:
+                print(f"Error in refresh_button_handler: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                return [], None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+            
         refresh_button.click(
-            fn=refresh_and_update,
+            fn=refresh_button_handler,
             inputs=[],
-            outputs=[files_box]
+            outputs=[
+                files_box, 
+                selected_data, 
+                download_btn, 
+                view_btn, 
+                add_favorite_btn
+            ]
         )
 
         # Connect other buttons
@@ -1660,7 +1707,6 @@ def create_s3_browser_tab():
         )
         
         # Update this to use the new function that updates the UI
-        # In create_s3_browser_tab function
         add_favorite_btn.click(
             fn=add_to_favorites_and_reload,
             inputs=[selected_data],
@@ -1673,7 +1719,7 @@ def create_s3_browser_tab():
             initial_files = initial_files['data']
         files_box.value = initial_files
 
-    return files_box
+        return files_box
 
 def handle_download(selected_data):
     try:
@@ -1845,9 +1891,12 @@ def load_favorites():
     
     return favorites
 
+def display_image(image):
+    return image
+
 def create_interface():
     # Create the main Gradio interface
-    with gr.Blocks(theme=gr.themes.Ocean(), css="""
+    with gr.Blocks(title="Open Source 3D Reconstruction Toolbox for Gaussian Splats on AWS", theme=gr.themes.Ocean(), css="""
         #viewer-container {
             width: 100%;
             height: 600px;
@@ -1860,10 +1909,111 @@ def create_interface():
             height: 100%;
             touch-action: none;
         }
-    """) as interface:
-        gr.Markdown("# Open Source</br>3D Reconstruction Toolbox</br>for Gaussian Splats on AWS")
-        gr.Markdown("Generate and upload a metadata file and media (.mov, .mp4, .zip) for gaussian splat creation.</br>Browse and render generated splats in a local 3D web viewer.")
+        .logo-container {
+            display: block;
+            margin-left: auto;
+            margin-right: 0;
+            text-align: right;
+        }
         
+        /* Logo container styling */
+        .logo-container {
+            text-align: right;
+        }
+        
+        /* Theme-based images */
+        .theme-image-light {
+            display: none;
+        }
+        
+        .theme-image-dark {
+            display: none;
+        }
+        
+        /* Show appropriate image based on theme */
+        @media (prefers-color-scheme: light) {
+            .theme-image-light {
+                display: block;
+            }
+            
+            .theme-image-dark {
+                display: none;
+            }
+        }
+        
+        @media (prefers-color-scheme: dark) {
+            .theme-image-light {
+                display: none;
+            }
+            
+            .theme-image-dark {
+                display: block;
+            }
+        }
+    """) as interface:
+        # These images are not needed anymore as we're using the theme-based images in the layout
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("# Open Source 3D Reconstruction Toolbox for Gaussian Splats on AWS")
+                gr.Markdown("Generate and upload a metadata file and media (.mov, .mp4, .zip) for gaussian splat creation.</br>Browse and render generated splats in a local 3D web viewer.")
+            with gr.Column():
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        pass
+                    with gr.Column(scale=0, elem_classes=["logo-container"]):
+                        # Load logos directly from Gradio components and apply theme-based visibility
+                        light_logo = gr.Image(
+                            "../../assets/images/PoweredByAWS_horiz_RGB_1c_Gray850.png",
+                            show_download_button=False,
+                            show_label=False,
+                            container=False,
+                            height=40,
+                            width=None,
+                            show_fullscreen_button=False,
+                            elem_classes=["theme-image-light"]
+                        )
+                        dark_logo = gr.Image(
+                            "../../assets/images/PoweredByAWS_horiz_RGB_1c_White.png",
+                            show_download_button=False,
+                            show_label=False,
+                            container=False,
+                            height=40,
+                            width=None,
+                            show_fullscreen_button=False,
+                            elem_classes=["theme-image-dark"]
+                        )
+                        
+                        # JavaScript to handle theme detection and switching
+                        gr.HTML("""
+                        <script>
+                        // Add listener for theme changes if supported
+                        if (window.matchMedia) {
+                            const darkModeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+                            const lightModeMediaQuery = window.matchMedia('(prefers-color-scheme: light)');
+                            
+                            function updateTheme() {
+                                const isDarkMode = darkModeMediaQuery.matches;
+                                const isLightMode = lightModeMediaQuery.matches;
+                                
+                                document.querySelectorAll('.theme-image-dark').forEach(img => {
+                                    img.style.display = isDarkMode ? 'block' : 'none';
+                                });
+                                
+                                document.querySelectorAll('.theme-image-light').forEach(img => {
+                                    img.style.display = isLightMode ? 'block' : 'none';
+                                });
+                            }
+                            
+                            // Set initial theme
+                            updateTheme();
+                            
+                            // Listen for changes
+                            darkModeMediaQuery.addEventListener('change', updateTheme);
+                            lightModeMediaQuery.addEventListener('change', updateTheme);
+                        }
+                        </script>
+                        """)
+
         with gr.Tabs():
             create_aws_configuration_tab()
             create_advanced_settings_tab()
@@ -1880,4 +2030,4 @@ if __name__ == "__main__":
     iface = create_interface()
     # Add favorites directory to allowed_paths to fix the permission error
     favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
-    iface.launch(share=False, allowed_paths=[favorites_dir])
+    iface.launch(server_name="0.0.0.0", server_port=7860, share=False, allowed_paths=[favorites_dir])

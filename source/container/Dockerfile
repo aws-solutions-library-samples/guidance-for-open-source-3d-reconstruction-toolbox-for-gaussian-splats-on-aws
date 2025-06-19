@@ -285,6 +285,7 @@ COPY ./src/pipeline/segmentation/remove_object_using_mask.py ${CODE_PATH}/segmen
 COPY ./src/pipeline/segmentation/remove_background.py ${CODE_PATH}/segmentation
 COPY ./src/pipeline/post_processing/spz ${CODE_PATH}/post_processing/spz
 COPY ./src/pipeline/segmentation/remove_background_sam2.py ${CODE_PATH}/sam
+COPY ./src/pipeline/training/rotate_splat_simple.py ${CODE_PATH}/training
 
 # Build the SPZ tool
 WORKDIR ${CODE_PATH}/post_processing/spz/src

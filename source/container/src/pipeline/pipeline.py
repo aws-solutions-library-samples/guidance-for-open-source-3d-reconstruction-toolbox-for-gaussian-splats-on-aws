@@ -187,8 +187,6 @@ class Pipeline:
             result = subprocess.run(
                 self.components[index].args,
                 check=True,
-                #capture_output=True,
-                #text=True,
                 cwd=self.components[index].cwd
             )
             self.session.log.info(result.stdout)
@@ -196,8 +194,10 @@ class Pipeline:
                 self.session.log.error(result.stderr)
         except subprocess.CalledProcessError as e:
             print(f"Command '{' '.join(e.cmd)}' failed with return code {e.returncode}")
-            print(f"Error message: {e.stderr.strip()}")
-            print(f"Output (if any): {e.stdout.strip()}")
+            if e.stderr is not None:
+                print(f"Error message: {e.stderr.strip()}")
+            if e.stdout is not None:
+                print(f"Output (if any): {e.stdout.strip()}")
             sys.exit(1)
         except Exception as e:
             self.session.log.error(f"An unexpected error occurred: {str(e)}")

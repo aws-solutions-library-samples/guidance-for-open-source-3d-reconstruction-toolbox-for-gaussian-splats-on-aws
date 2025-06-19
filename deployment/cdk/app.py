@@ -45,7 +45,7 @@ environment = cdk.Environment(
 
 # Comply with SageMaker path definitions
 current_path = os.path.dirname(os.path.realpath(__file__))
-build_args = {'CODE_PATH':'/opt/ml/code','MODEL_PATH':'/opt/ml/model'}
+build_args = {'CODE_PATH':'/opt/ml/code','MODEL_PATH':'/opt/ml/model'} #,'--no-cache': 'true'}
 
 # Handle deploying and destroying groups of stacks
 select_all = False
@@ -64,7 +64,8 @@ if is_destroy or select_all or bootstrap or bundling_stacks is None or (bundling
         scope=app,
         id="GSWorkflowBaseStack",
         config_data=config_data,
-        env=environment
+        env=environment,
+        description="Guidance for Open Source 3D Reconstruction Toolbox for Gaussian Splats on AWS (SO9142)"
     )
 
 # Always include post-deploy stack in the app definition, even during destroy
@@ -89,7 +90,8 @@ if select_all or bundling_stacks is None or len(bundling_stacks) == 0 or (bundli
                 output_json_path=outputs_path,
                 build_args=build_args,
                 dockerfile_path=os.path.join(current_path, "../../source/container"),
-                env=environment
+                env=environment,
+                description="Guidance for Open Source 3D Reconstruction Toolbox for Gaussian Splats on AWS (SO9142)"
             )
             print("Post-deploy stack created successfully")
             

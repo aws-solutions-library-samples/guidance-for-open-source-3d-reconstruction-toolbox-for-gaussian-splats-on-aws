@@ -22,7 +22,7 @@ terraform {
   required_providers {
     aws = {
       source = "hashicorp/aws"
-      version = "~> 5.97.0"
+      version = "~> 5.99.1"
     }
     random = {
       source  = "hashicorp/random"
@@ -30,11 +30,11 @@ terraform {
     }
     archive = {
       source  = "hashicorp/archive"
-      version = "~> 2.7.0"
+      version = "~> 2.7.1"
     }
     docker = {
       source  = "kreuzwerker/docker"
-      version = "3.5.0"
+      version = "3.6.1"
     } 
   }
 }
@@ -81,17 +81,16 @@ module "post_deployment" {
   project_prefix = var.project_prefix
 }
 
-/*
-# Next, deploy the frontend
-# terraform apply -target=module.frontend -var-file=terraform.tfvars
-module "frontend" {
-  source = "./modules/frontend"
-  account_id = var.account_id
-  region = var.region
-  stage = var.stage
-  tf_random_suffix = random_string.tf_random_suffix.result
-  depends_on = [ 
-    module.infra
-    ]
+# Adding guidance solution ID via AWS CloudFormation resource
+resource "aws_cloudformation_stack" "guidance_deployment_metrics" {
+  name = "tracking-stack"
+  template_body = jsonencode({
+    AWSTemplateFormatVersion = "2010-09-09",
+    Description = "Guidance for Open Source 3D Reconstruction Toolbox for Gaussian Splats on AWS (SO9142)",
+    Resources = {
+      EmptyResource = {
+        Type = "AWS::CloudFormation::WaitConditionHandle"
+      }
+    }
+  })
 }
-*/

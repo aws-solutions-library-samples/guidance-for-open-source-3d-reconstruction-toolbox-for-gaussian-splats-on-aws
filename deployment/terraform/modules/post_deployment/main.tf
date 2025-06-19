@@ -24,15 +24,15 @@ terraform {
   required_providers {
     local = {
       source = "hashicorp/local"
-      version = "~> 2.4.0"
+      version = "~> 2.5.3"
     }
     aws = {
       source = "hashicorp/aws"
-      version = "~> 5.97.0"
+      version = "~> 5.99.1"
     }
     archive = {
       source  = "hashicorp/archive"
-      version = "~> 2.7.0"
+      version = "~> 2.7.1"
     }
   }
 }
@@ -48,6 +48,7 @@ locals {
   ecr_repo_url = local.outputs[local.project_key].ECRRepo
   bucket_name = local.outputs[local.project_key].BucketName
   repo_name = split("/", local.ecr_repo_url)[1]
+  tf_random_suffix = split("-", local.project_key)[1]
 }
 
 # Write updated outputs.json with project prefix for scripts to use
@@ -85,7 +86,7 @@ resource "null_resource" "docker_packaging" {
 
 # Create IAM role for the Lambda function
 resource "aws_iam_role" "model_deployment_lambda_role" {
-  name = "${var.project_prefix}-model-deployment-lambda-role"
+  name = "${var.project_prefix}-model-deployment-lambda-role-${local.tf_random_suffix}"
   
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -108,7 +109,7 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
 }
 
 resource "aws_iam_role_policy" "lambda_s3_access" {
-  name = "${var.project_prefix}-lambda-s3-access"
+  name = "${var.project_prefix}-lambda-s3-access-${local.tf_random_suffix}"
   role = aws_iam_role.model_deployment_lambda_role.id
   
   policy = jsonencode({
@@ -139,7 +140,7 @@ data "archive_file" "lambda_zip" {
 
 # Create Lambda function for model deployment
 resource "aws_lambda_function" "model_deployment_lambda" {
-  function_name    = "${var.project_prefix}-model-deployment"
+  function_name    = "${var.project_prefix}-model-deployment-${local.tf_random_suffix}"
   filename         = data.archive_file.lambda_zip.output_path
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   handler          = "model_deployment.handler"
@@ -166,19 +167,9 @@ resource "null_resource" "invoke_lambda" {
   }
 
   provisioner "local-exec" {
-    command = <<-EOT
-      echo "Invoking Lambda function to download and upload models..."
-      aws lambda invoke \
-        --function-name ${aws_lambda_function.model_deployment_lambda.function_name} \
-        --region ${var.region} \
-        --invocation-type Event \
-        --payload '{}' \
-        /tmp/lambda_output.json
-      
-      echo "Lambda invocation started asynchronously. Check CloudWatch logs for details."
-      echo "You can monitor the S3 bucket for the models.tar.gz file to appear."
-    EOT
+    command = "echo 'Invoking Lambda function to download and upload models...' && aws lambda invoke --function-name ${aws_lambda_function.model_deployment_lambda.function_name} --region ${var.region} --invocation-type Event --payload '{}' /tmp/lambda_output.json && echo 'Lambda invocation started asynchronously. Check CloudWatch logs for details.' && echo 'You can monitor the S3 bucket for the models.tar.gz file to appear.'"
   }
+
 
   depends_on = [
     aws_lambda_function.model_deployment_lambda,

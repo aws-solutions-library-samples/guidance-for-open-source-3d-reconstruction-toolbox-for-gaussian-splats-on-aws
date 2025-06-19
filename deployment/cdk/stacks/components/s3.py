@@ -59,6 +59,7 @@ class S3(Construct):
             enforce_ssl=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
             removal_policy=removal_policy,
+            auto_delete_objects=removal_policy == RemovalPolicy.DESTROY,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             lifecycle_rules=[
                 s3.LifecycleRule(
@@ -104,7 +105,8 @@ class S3(Construct):
             versioned=True,
             enforce_ssl=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
+            auto_delete_objects=removal_policy == RemovalPolicy.DESTROY,
             cors=[
                 s3.CorsRule(
                     allowed_methods=[
