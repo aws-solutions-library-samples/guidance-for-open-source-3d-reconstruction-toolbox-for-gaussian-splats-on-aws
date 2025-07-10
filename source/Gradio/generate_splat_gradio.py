@@ -27,10 +27,7 @@ import boto3
 import time
 import threading
 import gradio as gr
-from pathlib import Path
 import boto3.s3.transfer
-import tempfile
-import queue
 
 print(f"Gradio Version: {gr.__version__}")
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
@@ -68,6 +65,7 @@ class SharedState:
         self.model_3d = None
         self.rotate_splat = "true"
 
+# Create a singleton instance
 shared_state = SharedState()
 
 def check_aws_credentials():
@@ -422,296 +420,6 @@ def generate_splat(s3_bucket_name, s3_input_prefix, s3_output_prefix, file_obj,
     except Exception as e:
         return f"Error processing file: {str(e)}"
 
-def submit_webcam_recording(video, recording_complete):
-    if not video:
-        return "Please record a video first"
-    
-    if not recording_complete:
-        return "Please complete the recording first"
-    
-    try:
-        import ffmpeg
-        
-        # Define input path
-        input_path = Path(video)
-        
-        # Create a temporary file for the processed video
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_out:
-            temp_output_path = Path(temp_out.name)
-        
-        # Convert WebM to MP4 with optimized settings
-        stream = ffmpeg.input(str(input_path))
-        stream = ffmpeg.output(
-            stream,
-            str(temp_output_path),
-            **{
-                'c:v': 'libx264',           # Use H.264 codec
-                'preset': 'ultrafast',       # Fastest encoding
-                'crf': '23',                # Reasonable quality
-                'vsync': '0',               # Prevent frame duplication
-                'r': '30',                  # Force 30fps
-                'movflags': '+faststart',   # Web optimization
-                'fflags': '+genpts',        # Generate timestamps
-                'vf': 'fps=30'              # Force consistent frame rate
-            }
-        )
-        ffmpeg.run(stream, overwrite_output=True, quiet=True)
-        
-        # Create a temporary video object
-        class TempVideo:
-            def __init__(self, path):
-                self.name = str(path)
-                # Keep the original filename for display purposes
-                self.original_name = os.path.basename(str(path))
-        
-        temp_video = TempVideo(temp_output_path)
-        
-        # Pass to generate_splat with default values from shared_state
-        result = generate_splat(
-            shared_state.s3_bucket,
-            shared_state.s3_input,
-            shared_state.s3_output,
-            temp_video,
-            shared_state.instance,
-            shared_state.sfm,
-            shared_state.model,
-            shared_state.faces,
-            shared_state.optimize,
-            shared_state.bg_model,
-            shared_state.filter_blurry,
-            shared_state.max_images,
-            shared_state.sfm_enable,
-            shared_state.enhanced_feature,
-            shared_state.matching_method,
-            shared_state.use_colmap_model,
-            shared_state.use_transform_json,
-            shared_state.training_enable,
-            shared_state.max_steps,
-            shared_state.enable_multi_gpu,
-            shared_state.spherical_enable,
-            shared_state.remove_bg,
-            shared_state.remove_human,
-            shared_state.source_coordinate,
-            shared_state.pose_world_to_cam,
-            shared_state.log_verbosity,
-            shared_state.mask_threshold,
-            shared_state.media_input,
-            shared_state.rotate_splat
-        )
-        
-        return result
-        
-    except Exception as e:
-        return f"Error processing webcam recording: {str(e)}"
-        
-    finally:
-        # Clean up temporary files
-        try:
-            if temp_output_path and temp_output_path.exists():
-                temp_output_path.unlink()
-            if input_path and input_path.exists():
-                input_path.unlink()
-        except Exception as e:
-            print(f"Warning: Could not clean up temporary files: {e}")
-
-def create_record_video_tab():
-    with gr.Tab("Record Video") as tab:
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("### Record from Webcam")
-                
-                recording_duration = gr.Slider(
-                    label="Recording Duration (seconds)",
-                    minimum=1,
-                    maximum=300,
-                    value=30,
-                    step=1,
-                    interactive=True
-                )
-
-                webcam = gr.Video(
-                    label="Record from Webcam",
-                    sources=["webcam"],
-                    format="mp4",
-                    mirror_webcam=True,
-                    interactive=True,
-                    visible=True,
-                    height=400,
-                    width=600
-                )
-                
-                recording_status = gr.Textbox(
-                    label="Status", 
-                    value="Ready to record",
-                    interactive=False,
-                    elem_id="recording_status"
-                )
-                
-                with gr.Row():
-                    record_btn = gr.Button(
-                        "Start Recording", 
-                        variant="primary",
-                        elem_id="record_btn"
-                    )
-                    stop_btn = gr.Button(
-                        "Stop Recording",
-                        variant="stop",
-                        visible=False,
-                        elem_id="stop_btn"
-                    )
-                
-                submit_btn = gr.Button(
-                    "Submit Recording",
-                    variant="primary",
-                    interactive=False
-                )
-
-                # Add state variables
-                is_recording = gr.State(False)
-                start_time = gr.State(0)
-                recording_complete = gr.State(False)
-                status_queue = queue.Queue()
-
-                class RecordingThread(threading.Thread):
-                    def __init__(self, duration, status_queue):
-                        super().__init__()
-                        self.duration = duration
-                        self.status_queue = status_queue
-                        self.stop_flag = threading.Event()
-                        self.daemon = True
-
-                    def run(self):
-                        start_time = time.time()
-                        while not self.stop_flag.is_set():
-                            elapsed = time.time() - start_time
-                            if elapsed >= self.duration:
-                                self.status_queue.put(f"Recording complete after {int(elapsed)}s")
-                                break
-                            time.sleep(0.1)
-
-                    def stop(self):
-                        self.stop_flag.set()
-
-                recording_thread = gr.State(None)
-
-                def start_recording(duration):
-                    thread = RecordingThread(duration, status_queue)
-                    thread.start()
-
-                    return {
-                        record_btn: gr.update(visible=False),
-                        stop_btn: gr.update(visible=True),
-                        recording_status: gr.update(value="Recording started..."),
-                        is_recording: True,
-                        start_time: time.time(),
-                        recording_complete: False,
-                        submit_btn: gr.update(interactive=False),
-                        webcam: gr.update(interactive=True),
-                        recording_thread: thread
-                    }
-
-                def stop_recording(thread):
-                    if thread:
-                        thread.stop()
-
-                    return {
-                        record_btn: gr.update(visible=True),
-                        stop_btn: gr.update(visible=False),
-                        recording_status: gr.update(value="Recording stopped. Click 'Submit Recording' to process."),
-                        is_recording: False,
-                        recording_complete: True,
-                        submit_btn: gr.update(interactive=True),
-                        webcam: gr.update(interactive=False),
-                        recording_thread: None
-                    }
-
-                # JavaScript for real-time timer updates
-                gr.HTML("""
-                    <script>
-                    let timerInterval;
-                    let isRecording = false;
-                    
-                    function updateTimer() {
-                        const statusElement = document.getElementById('recording_status');
-                        const startTime = window.recordingStartTime;
-                        const duration = window.recordingDuration;
-                        
-                        if (!statusElement || !startTime || !isRecording) return;
-                        
-                        const elapsed = Math.floor((Date.now() - startTime) / 1000);
-                        const remaining = duration - elapsed;
-                        
-                        if (remaining <= 0) {
-                            document.getElementById('stop_btn').click();
-                            clearInterval(timerInterval);
-                            isRecording = false;
-                        } else {
-                            statusElement.value = `Recording: ${elapsed}s / ${duration}s`;
-                        }
-                    }
-
-                    document.addEventListener('click', function(e) {
-                        if (e.target.id === 'record_btn') {
-                            const duration = parseInt(document.querySelector('input[data-testid="slider"]').value);
-                            window.recordingStartTime = Date.now();
-                            window.recordingDuration = duration;
-                            isRecording = true;
-                            
-                            if (timerInterval) clearInterval(timerInterval);
-                            timerInterval = setInterval(updateTimer, 100);
-                        }
-                    });
-
-                    document.addEventListener('click', function(e) {
-                        if (e.target.id === 'stop_btn') {
-                            isRecording = false;
-                            clearInterval(timerInterval);
-                        }
-                    });
-                    </script>
-                """)
-
-                # Connect the recording buttons
-                record_btn.click(
-                    fn=start_recording,
-                    inputs=[recording_duration],
-                    outputs=[
-                        record_btn,
-                        stop_btn,
-                        recording_status,
-                        is_recording,
-                        start_time,
-                        recording_complete,
-                        submit_btn,
-                        webcam,
-                        recording_thread
-                    ]
-                )
-
-                stop_btn.click(
-                    fn=stop_recording,
-                    inputs=[recording_thread],
-                    outputs=[
-                        record_btn,
-                        stop_btn,
-                        recording_status,
-                        is_recording,
-                        recording_complete,
-                        submit_btn,
-                        webcam,
-                        recording_thread
-                    ]
-                )
-
-                # Connect the submit button
-                submit_btn.click(
-                    fn=submit_webcam_recording,
-                    inputs=[webcam, recording_complete],
-                    outputs=[recording_status]
-                )
-
-    return tab
-
 def create_upload_aws_tab():
     with gr.Tab("Upload Media"):
         with gr.Row():
@@ -892,7 +600,7 @@ def create_advanced_settings_tab():
                 gr.Markdown("### General")
                 log_verbosity = gr.Dropdown(
                     label="Log Verbosity",
-                    choices=["debug", "info", "warning", "error"],
+                    choices=["info", "warning", "error"],
                     value="info"
                 )
         with gr.Row():
@@ -1110,6 +818,20 @@ def handle_view(selected_row):
         filename = selected_row[1]
         file_key = f"{output_prefix}/{job_id}/{filename}"
         
+        # Get file size information
+        file_size_mb = None
+        try:
+            s3_client = boto3.client('s3')
+            response = s3_client.head_object(Bucket=bucket_name, Key=file_key)
+            file_size = response['ContentLength']
+            file_size_mb = file_size / (1024 * 1024)
+            size_info = f" ({file_size_mb:.1f} MB)"
+        except Exception as e:
+            print(f"Error getting file size: {str(e)}")
+            size_info = ""
+        
+        # Note: Removed artificial delay as it's not necessary for functionality
+        
         # Generate a presigned URL for the file
         presigned_url = generate_presigned_url(bucket_name, file_key)
         
@@ -1117,7 +839,7 @@ def handle_view(selected_row):
             return gr.update(value=None), "Error generating URL"
         
         # Return the URL for the Model3D component
-        return gr.update(value=presigned_url), f"Loading {filename}"
+        return gr.update(value=presigned_url), f"Loading {filename}{size_info}..."
         
     except Exception as e:
         error_msg = f"Error viewing file: {str(e)}"
@@ -1351,7 +1073,6 @@ def create_s3_browser_tab():
                 files_box = gr.Dataframe(
                     headers=["Job ID", "Filename", "Size", "Last Modified"],
                     interactive=False,
-                    type="array",
                     value=[],
                     visible=True,
                     elem_id="files_table"
@@ -1391,12 +1112,6 @@ def refresh_and_update():
     except Exception as e:
         print(f"Error in refresh_and_update: {str(e)}")
         return [], None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
-
-def add_to_favorites_and_update(selected_data):
-    """Add to favorites and update the UI"""
-    status = add_to_favorites(selected_data)
-    # Return the updated favorites UI
-    return update_favorites_ui(), status
 
 def add_to_favorites_and_reload(selected_data):
     """Add to favorites and force a page reload"""
@@ -1481,76 +1196,7 @@ def create_s3_browser_tab():
         viewer.render()
         viewer_status.render()
 
-        def on_select(evt: gr.SelectData):
-            try:
-                # Create a unique ID for this selection event for tracking
-                selection_id = f"sel_{time.time()}"
-                print(f"\n=== DEBUG TABLE SELECTION [{selection_id}] ===")
-                
-                # Get the current data directly from the event
-                # This ensures we're working with the exact data that was clicked
-                row_index = evt.index[0]
-                col_index = evt.index[1]
-                
-                print(f"Selection event indices: row={row_index}, col={col_index}")
-                
-                # Get the current data from the DataFrame
-                current_data = files_box.value
-                
-                # Debug print to see what's in the table
-                print(f"Type of files_box.value: {type(current_data)}")
-                
-                # Handle data if it's a dictionary with 'data' key
-                if isinstance(current_data, dict) and 'data' in current_data:
-                    current_data = current_data['data']
-                    print(f"Extracted data from dictionary, new type: {type(current_data)}")
-                
-                # Ensure current_data is a list
-                if not isinstance(current_data, list):
-                    if hasattr(current_data, '__iter__'):
-                        current_data = list(current_data)
-                        print(f"Converted data to list, length: {len(current_data)}")
-                    else:
-                        print(f"Warning: current_data is not iterable: {type(current_data)}")
-                        return (None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False))
-                
-                # Verify row index is valid
-                if not current_data or row_index >= len(current_data):
-                    print(f"Invalid row index {row_index}, data length: {len(current_data) if current_data else 0}")
-                    return (None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False))
-                
-                # Get the selected row data
-                selected_row = current_data[row_index]
-                print(f"Selected row data: {selected_row}")
-                print(f"Type of selected row: {type(selected_row)}")
-                
-                # Force selected_row to be a list if it's not already
-                if not isinstance(selected_row, list):
-                    print(f"Converting selected_row to list")
-                    selected_row = list(selected_row)
-                    print(f"After conversion: {selected_row}")
-                
-                print(f"Enabling buttons for selection [{selection_id}]")
-                return (
-                    selected_row,
-                    gr.update(interactive=True),
-                    gr.update(interactive=True),
-                    gr.update(interactive=True)
-                )
-                
-            except Exception as e:
-                print("\n=== Error Debug Information ===")
-                print(f"Error in selection handler: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                print("=== End Error Information ===\n")
-                return (
-                    None,
-                    gr.update(interactive=False),
-                    gr.update(interactive=False),
-                    gr.update(interactive=False)
-                )
-                
+
         # File browser section
         with gr.Row():
             with gr.Column(scale=2):
@@ -1579,7 +1225,6 @@ def create_s3_browser_tab():
                 files_box = gr.Dataframe(
                     headers=["Job ID", "Filename", "Size", "Last Modified"],
                     interactive=False,
-                    type="array",
                     value=[],
                     visible=True,
                     elem_id="files_table"
@@ -1602,15 +1247,19 @@ def create_s3_browser_tab():
                 print(f"Data type: {type(data)}")
                 print(f"Data length: {len(data) if hasattr(data, '__len__') else 'unknown'}")
                 
-                # Get the selected row directly from the data
-                if data and row_idx < len(data):
+                # Handle different data types
+                if hasattr(data, 'empty') and not data.empty and row_idx < len(data):
+                    # DataFrame case
+                    selected_row = data.iloc[row_idx].tolist()
+                    print(f"Selected row: {selected_row}")
+                    return selected_row, gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=True)
+                elif hasattr(data, '__len__') and len(data) > 0 and row_idx < len(data):
+                    # List/array case
                     selected_row = data[row_idx]
                     print(f"Selected row: {selected_row}")
-                    
-                    # Enable buttons
                     return selected_row, gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=True)
                 else:
-                    print(f"Invalid selection: row_idx={row_idx}, data_len={len(data) if data else 0}")
+                    print(f"Invalid selection: row_idx={row_idx}, data_len={len(data) if hasattr(data, '__len__') else 0}")
                     return None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
                     
             except Exception as e:
@@ -1672,14 +1321,26 @@ def create_s3_browser_tab():
                 
                 print(f"Refresh complete [{refresh_id}], returning {len(clean_data)} items")
                 
-                # Explicitly set the value and disable buttons
-                return clean_data, None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+                # Return data directly for the dataframe
+                return (
+                    clean_data, 
+                    None, 
+                    gr.update(interactive=False), 
+                    gr.update(interactive=False), 
+                    gr.update(interactive=False)
+                )
                 
             except Exception as e:
                 print(f"Error in refresh_button_handler: {str(e)}")
                 import traceback
                 traceback.print_exc()
-                return [], None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+                return (
+                    [], 
+                    None, 
+                    gr.update(interactive=False), 
+                    gr.update(interactive=False), 
+                    gr.update(interactive=False)
+                )
             
         refresh_button.click(
             fn=refresh_button_handler,
@@ -1693,6 +1354,8 @@ def create_s3_browser_tab():
             ]
         )
 
+        # SuperSplat link will be added in the UI layout
+        
         # Connect other buttons
         download_btn.click(
             fn=handle_download,
@@ -1703,7 +1366,8 @@ def create_s3_browser_tab():
         view_btn.click(
             fn=handle_view,
             inputs=[selected_data],
-            outputs=[viewer, viewer_status]
+            outputs=[viewer, viewer_status],
+            show_progress="full"  # Show full progress animation
         )
         
         # Update this to use the new function that updates the UI
@@ -1711,6 +1375,11 @@ def create_s3_browser_tab():
             fn=add_to_favorites_and_reload,
             inputs=[selected_data],
             outputs=[gr.HTML(visible=True)]  # Changed to HTML output
+        )
+        
+        # Replace button with centered HTML link
+        supersplat_link = gr.HTML(
+            '<div style="text-align:center; margin:10px 0;"><a href="https://superspl.at/editor" target="_blank" style="display:inline-block; background:#f97316; color:white; padding:8px 16px; text-decoration:none; border-radius:6px; font-size:14px; font-weight:500;">🚀 Open SuperSplat Editor</a></div>'
         )
 
         # Initial load of S3 contents
@@ -1815,7 +1484,8 @@ def create_debug_tab():
                         try:
                             # Try to convert string to list if it's a string representation of a list
                             if isinstance(faces, str) and (faces.startswith('[') or faces.startswith('[')):
-                                faces = eval(faces)
+                                import ast
+                                faces = ast.literal_eval(faces)
                             else:
                                 faces = []
                         except:
@@ -1890,9 +1560,6 @@ def load_favorites():
         print(f"Error loading favorites: {str(e)}")
     
     return favorites
-
-def display_image(image):
-    return image
 
 def create_interface():
     # Create the main Gradio interface
@@ -2017,17 +1684,28 @@ def create_interface():
         with gr.Tabs():
             create_aws_configuration_tab()
             create_advanced_settings_tab()
-            #create_record_video_tab()
             create_upload_aws_tab()
             create_s3_browser_tab()
-            create_credentials_tab()
-            create_debug_tab()
+            
+            # Less frequently used tabs with visual distinction
+            with gr.Tab("⚙️ AWS Credentials"):
+                create_credentials_tab()
+            
+            with gr.Tab("🔧 Debug"):
+                create_debug_tab()
     return interface
 
 # Modify your main execution code
 if __name__ == "__main__":
+    # Disable Hugging Face integration to avoid postMessage errors
+    os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
+    os.environ["GRADIO_SERVER_NAME"] = "0.0.0.0"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    
     check_aws_credentials()
+    
     iface = create_interface()
-    # Add favorites directory to allowed_paths to fix the permission error
+
+    # Add favorites directory to allowed_paths
     favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
     iface.launch(server_name="0.0.0.0", server_port=7860, share=False, allowed_paths=[favorites_dir])

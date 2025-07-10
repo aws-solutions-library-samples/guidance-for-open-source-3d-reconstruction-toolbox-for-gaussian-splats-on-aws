@@ -36,12 +36,33 @@ import ast
 import subprocess
 import multiprocessing
 import shutil
+import logging
+import sys
+import shlex
+from rich.logging import RichHandler
 
 def arg_as_list(s):
-    v = ast.literal_eval(s)                                                    
-    if type(v) is not list:                                                    
-        raise argparse.ArgumentTypeError("Argument \"%s\" is not a list" % (s))
-    return v
+    try:
+        # Handle empty string or None
+        if not s or s.strip() == '':
+            return []
+        
+        # Try to evaluate as literal
+        v = ast.literal_eval(s)
+        if type(v) is not list:
+            raise argparse.ArgumentTypeError("Argument \"%s\" is not a list" % (s))
+        return v
+    except (ValueError, SyntaxError):
+        # If literal_eval fails, try to parse as comma-separated values
+        try:
+            # Remove quotes and brackets, split by comma
+            cleaned = s.strip('[]"\'')
+            if not cleaned:
+                return []
+            items = [item.strip().strip('"\'') for item in cleaned.split(',')]
+            return [item for item in items if item]  # Remove empty items
+        except Exception:
+            raise argparse.ArgumentTypeError("Argument \"%s\" is not a valid list format" % (s))
 
 def reverse_file_order(directory_path):
     """
@@ -80,8 +101,8 @@ def reverse_file_order(directory_path):
             shutil.move(temp_path, new_path)
             
         # Remove temporary directory
-        os.rmdir(temp_dir)
-        print("File renaming completed successfully!")
+        #os.rmdir(temp_dir)
+        #log.info("File renaming completed successfully!")
         
     except Exception as e:
         if os.path.exists(temp_dir):
@@ -91,9 +112,12 @@ def reverse_file_order(directory_path):
 if __name__ == '__main__':
     # Create Argument Parser with Rich Formatter
     parser = argparse.ArgumentParser(
-    prog='remove-360-face',
-    description='Create a filter that will remove portions of a \
-        spherical image based on a cubemap face selection regime'
+    prog='equirectangular-to-perspective-images',
+    description='Transform ERP images into a sequence of perspective views \
+        using cube maps. An optimization regime can be applied to ensure views \
+        are sequentially and spatially consistent with the other views, \
+        thus improving sequential SfM matching. \
+        A filter can be applied to remove unwanted cube faces'
     )
 
     # Define the Arguments
@@ -106,10 +130,10 @@ if __name__ == '__main__':
 
     parser.add_argument(
         '-rf', '--remove_faces',
-        type=arg_as_list,
-        default=[],
-        help="""A list of faces to remove. 
-        Can be ["back", "down", "front", "left", "right", "up"]"""
+        type=str,
+        default='',
+        help="""Comma-separated list of faces to remove. 
+        Can be 'back,down,front,left,right,up'"""
     )
 
     parser.add_argument(
@@ -117,14 +141,51 @@ if __name__ == '__main__':
         required=False,
         default='true',
         action='store',
-        help='Whether to enable optimization of spherical video frames to help solve SfM'
+        help='Whether to enable optimization of spherical video frames to help solve SfM (default is "true")'
     )
     
+    parser.add_argument(
+        '-gpu', '--use_gpu',
+        required=False,
+        default='true',
+        action='store',
+        help='Whether to enable GPU acceleration (default is "true")'
+    )
+
+    parser.add_argument(
+        '-log', '--log_level',
+        required=False,
+        default='info',
+        action='store',
+        help='Level of logs to write to stdout (default is "info", can be "error" or "debug")'
+    )
+
     args = parser.parse_args()
+
+    # Setup logging
+    level = logging.INFO
+    if str(args.log_level).lower() == "debug":
+        level = logging.DEBUG
+    elif str(args.log_level).lower() == "error":
+        level = logging.ERROR
+    logging.basicConfig(
+        level = level, 
+        format = "%(asctime)s %(message)s",
+        datefmt = "%m/%d/%Y %I:%M:%S %p",
+        handlers = [
+            RichHandler(),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    log = logging.getLogger()
 
     # Setup paths
     data_dir = str(args.data_dir)
-    remove_face_list = args.remove_faces
+    # Parse comma-separated faces
+    if args.remove_faces:
+        remove_face_list = [face.strip() for face in args.remove_faces.split(',') if face.strip()]
+    else:
+        remove_face_list = []
     thread_count = multiprocessing.cpu_count()
     optimize_seq_spherical_frames = True
     if str(args.optimize_sequential_spherical_frame_order).lower() == "true":
@@ -133,7 +194,7 @@ if __name__ == '__main__':
         optimize_seq_spherical_frames = False
 
     # If you need to use GPU to accelerate (especially for the need of converting many images)
-    USE_GPU = True # set False to disable
+    USE_GPU = bool(args.use_gpu)
     Image.MAX_IMAGE_PIXELS = 1000000000
     try:
         # Check that input directory exists
@@ -142,7 +203,6 @@ if __name__ == '__main__':
             filenames = os.listdir(data_dir)
             filenames = sorted(filenames)
             if filenames is not None:
-
                 for filename in filenames:
                     base_name, extension = os.path.splitext(filename)
                     if base_name[:5].lower() == "frame": # if using opencv frame extraction, will be in format "frame_298_01520.png"
@@ -165,7 +225,7 @@ if __name__ == '__main__':
                         new_path = os.path.join(new_dir, f"{img_num}{extension}")
 
                         if not os.path.isfile(new_path):
-                            print(f"Moving {orig_path} to {new_path}")
+                            log.info(f"Moving {orig_path} to {new_path}")
                             shutil.move(orig_path, new_path)
 
                         # Read the Equirectangular to Cubemap projection
@@ -194,7 +254,7 @@ if __name__ == '__main__':
                             face = (cubemap[i] * 255).astype(np.uint8)
                             if not os.path.isdir(f"{new_dir}/faces"):
                                 os.mkdir(f"{new_dir}/faces")
-                            print(f"Saving face {term} to {new_dir}/faces/{term}.png")
+                            log.info(f"Saving face {term} to {new_dir}/faces/{term}.png")
                             imwrite(f"{new_dir}/faces/{term}.png", face)
 
                         # Remove the unwanted faces
@@ -240,21 +300,38 @@ if __name__ == '__main__':
                             if not os.path.isdir(pers_img_dir):
                                 os.mkdir(pers_img_dir)
 
-                            try:
-                                # Run the converter script for ERP to perspective images
-                                subprocess.run([
-                                    "python", "spherical/360ImageConverterforColmap.py",
-                                    "-i", filtered_img_dir,
-                                    "-o", pers_img_dir,
-                                    "--overlap", "0",
-                                    "--fov", "90", "90",
-                                    "--base_angle", "45", "45",
-                                    "--resolution", str(960), str(960),
-                                    "--threads", str(thread_count),
-                                    "--exclude_v_angles", "90"
-                                ], check=True)
-                            except Exception as e:
-                                raise RuntimeError(f"An error occurred converting ERP to perspective images: {str(e)}") from e
+                            # Generate multiple connective images at different angles
+                            # Create perspective images at 22.5, 45, and 67.5 degree intervals
+                            connective_angles = [22, 45, 67]
+                            for angle in connective_angles:
+                                try:
+                                    # Subprocess usage is intentional and secure:
+                                    # - All arguments are validated and escaped with shlex.quote() or manual escaping
+                                    # - Script path is hardcoded, not user-controllable
+                                    # - Numeric values are converted from validated inputs
+                                    def safe_escape(s):
+                                        """Safe shell escaping for compatibility with older Python versions"""
+                                        if hasattr(shlex, 'quote'):
+                                            return shlex.quote(str(s))
+                                        else:
+                                            # Fallback for Python < 3.3
+                                            return "'" + str(s).replace("'", "'\"'\"'") + "'"
+                                    
+                                    cmd_args = [
+                                        safe_escape(sys.executable), 
+                                        safe_escape("spherical/360ImageConverterforColmap.py"),
+                                        "-i", safe_escape(filtered_img_dir),
+                                        "-o", safe_escape(pers_img_dir),
+                                        "--overlap", "0",
+                                        "--fov", "90", "90",
+                                        "--base_angle", safe_escape(str(angle)), "45",
+                                        "--resolution", safe_escape(str(960)), safe_escape(str(960)),
+                                        "--threads", safe_escape(str(thread_count)),
+                                        "--exclude_v_angles", "90"
+                                    ]
+                                    subprocess.run(cmd_args, check=True)  # nosemgrep: dangerous-subprocess-use-audit
+                                except Exception as e:
+                                    raise RuntimeError(f"An error occurred converting ERP to perspective images at {angle} degrees: {str(e)}") from e
 
                 # Reorder the image sequence to be primarily ordered by view across frames instead of inverse
                 # Theoretically, this will allow better matching during SfM due to parallax effect in sequential frames
@@ -296,7 +373,7 @@ if __name__ == '__main__':
                         filename_str = f"{img_num}{tail}"
                         dest_path = os.path.join(view_dir, filename_str)
                         try:
-                            print(f"Moving {img_file} to {dest_path}")
+                            log.info(f"Moving {img_file} to {dest_path}")
                             shutil.move(img_file, dest_path)
                         except Exception as e:
                             raise RuntimeError(f"An error occurred moving cube face images: {str(e)}") from e
@@ -345,35 +422,57 @@ if __name__ == '__main__':
                             last_view = os.path.basename(head_last_fn)
                             last_view =  f"{int(last_view):0{view_num_len}d}"
 
-                            persp_image_path = ""
                             view = os.path.basename(os.path.normpath(view_subfolder))
+                            connective_images = []
 
                             if view == "up":
-                                persp_image_path = os.path.join(view_path, "front", f"{last_view}.png")
+                                connective_images = [os.path.join(view_path, "front", f"{last_view}.png")]
                             elif view == "back":
-                                persp_image_path = os.path.join(data_dir, last_view, "filtered_imgs", "pers_imgs", f"{last_view}_perspective_04.png") # 45 LB
+                                base_path = os.path.join(data_dir, last_view, "filtered_imgs", "pers_imgs")
+                                connective_images = [
+                                    os.path.join(base_path, f"{last_view}_perspective_01.png"),
+                                    os.path.join(base_path, f"{last_view}_perspective_04.png"),
+                                    os.path.join(base_path, f"{last_view}_perspective_07.png")
+                                ]
                             elif view == "front":
-                                persp_image_path = os.path.join(data_dir, last_view, "filtered_imgs", "pers_imgs", f"{last_view}_perspective_02.png") # 45 RF
+                                base_path = os.path.join(data_dir, last_view, "filtered_imgs", "pers_imgs")
+                                connective_images = [
+                                    os.path.join(base_path, f"{last_view}_perspective_01.png"),
+                                    os.path.join(base_path, f"{last_view}_perspective_02.png"),
+                                    os.path.join(base_path, f"{last_view}_perspective_03.png")
+                                ]
                             elif view == "left":
                                 reverse_file_order(view_subfolder)
-                                persp_image_path = os.path.join(data_dir, first_view, "filtered_imgs", "pers_imgs", f"{first_view}_perspective_01.png") # 45 LB
+                                base_path = os.path.join(data_dir, first_view, "filtered_imgs", "pers_imgs")
+                                connective_images = [
+                                    os.path.join(base_path, f"{first_view}_perspective_01.png"),
+                                    os.path.join(base_path, f"{first_view}_perspective_01.png"),
+                                    os.path.join(base_path, f"{first_view}_perspective_01.png")
+                                ]
                             elif view == "right":
                                 reverse_file_order(view_subfolder)
-                                persp_image_path = os.path.join(data_dir, first_view, "filtered_imgs", "pers_imgs", f"{first_view}_perspective_03.png") # 45 RB
+                                base_path = os.path.join(data_dir, first_view, "filtered_imgs", "pers_imgs")
+                                connective_images = [
+                                    os.path.join(base_path, f"{first_view}_perspective_01.png"),
+                                    os.path.join(base_path, f"{first_view}_perspective_03.png"),
+                                    os.path.join(base_path, f"{first_view}_perspective_05.png")
+                                ]
                             elif view == "down":
                                 reverse_file_order(view_subfolder)
-                            destination_path = os.path.join(view_subfolder, f"{file_count:0{view_num_len}d}{tail}")
-                            if persp_image_path != "":
-                                if os.path.isfile(persp_image_path):
-                                    print(f"Copying {persp_image_path} to {destination_path}")
-                                    shutil.copy(persp_image_path, destination_path)
-                                else:
-                                    raise RuntimeError(f"Error: {persp_image_path} is not a valid file path.")
+                            
+                            for idx, persp_image_path in enumerate(connective_images):
+                                if persp_image_path != "":
+                                    destination_path = os.path.join(view_subfolder, f"{file_count + idx:0{view_num_len}d}{tail}")
+                                    if os.path.isfile(persp_image_path):
+                                        log.info(f"Copying {persp_image_path} to {destination_path}")
+                                        shutil.copy(persp_image_path, destination_path)
+                                    else:
+                                        log.warning(f"Warning: {persp_image_path} is not a valid file path, skipping.")
 
                 # Only get subfolders in the view directory                # .../views/back
                 view_path = os.path.join(data_dir, "..", "views")
                 view_subfolders = [ f.path for f in os.scandir(view_path) if f.is_dir() ]
-                print(f"Found {len(view_subfolders)} views in {view_path}")
+                log.info(f"Found {len(view_subfolders)} views in {view_path}")
 
                 # Remove original image folder after moving them to view path
                 shutil.rmtree(data_dir)
@@ -384,7 +483,7 @@ if __name__ == '__main__':
                 for view_dir_path in view_subfolders:
                     rest, view = os.path.split(view_dir_path)
                     view_order = ""
-                    print(f"Processing {view} view")
+                    log.info(f"Processing {view} view")
                     # Need to use match in order to map views to image order
                     match str(view).lower():
                         case "up":
@@ -403,10 +502,7 @@ if __name__ == '__main__':
                             else:
                                 view_order = "05"
                         case "front":
-                            if optimize_seq_spherical_frames is True:
-                                view_order = "01"
-                            else:
-                                view_order = "01"
+                            view_order = "01"
                         case "left":
                             if optimize_seq_spherical_frames is True:
                                 view_order = "04"
@@ -431,7 +527,7 @@ if __name__ == '__main__':
                     img_path = os.path.join(*root_path_parts, "images")
                 view_dirs = os.listdir(view_path)
                 view_dirs = sorted(view_dirs)
-                print(f"Found {len(view_dirs)} views in {view_path}")
+                log.info(f"Found {len(view_dirs)} views in {view_path}")
 
                 # Move the images from the "view" directory to the "images" directory
                 i = 1
@@ -439,18 +535,18 @@ if __name__ == '__main__':
                     view_dir_path = os.path.join(view_path, view_dir)
                     img_filenames = os.listdir(view_dir_path)
                     img_filenames = sorted(img_filenames)
-                    print(f"Found {len(img_filenames)} images in {view_dir_path}")
+                    log.info(f"Found {len(img_filenames)} images in {view_dir_path}")
                     for img_filename in img_filenames:
                         input_img_filename_path = os.path.join(view_dir_path, img_filename)
                         head, extension = os.path.splitext(input_img_filename_path)
                         output_img_filename_path = os.path.join(img_path, f"{i:05d}{extension}")
-                        print(f"Moving {input_img_filename_path} to {output_img_filename_path}")
+                        log.info(f"Moving {input_img_filename_path} to {output_img_filename_path}")
                         shutil.move(input_img_filename_path, output_img_filename_path)
                         i = i + 1
                 shutil.rmtree(view_path)
             else:
-                print(f"No supported images present in {data_dir}.")
+                log.warning(f"No supported images present in {data_dir}.")
         else:
-            print("Input directory is not valid")
+            log.error("Input directory is not valid")
     except Exception as e:
         raise RuntimeError("Error running spherical to perspective transformation. {e}") from e

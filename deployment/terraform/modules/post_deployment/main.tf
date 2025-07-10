@@ -148,6 +148,7 @@ resource "aws_lambda_function" "model_deployment_lambda" {
   role             = aws_iam_role.model_deployment_lambda_role.arn
   timeout          = 900  # 15 minutes
   memory_size      = 3072
+  reserved_concurrent_executions = 1
   
   environment {
     variables = {
@@ -157,6 +158,10 @@ resource "aws_lambda_function" "model_deployment_lambda" {
 
   ephemeral_storage {
     size = 10240  # 10 GB
+  }
+
+  tracing_config {
+    mode = "Active"
   }
 }
 

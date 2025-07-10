@@ -79,7 +79,7 @@ if select_all or bundling_stacks is None or len(bundling_stacks) == 0 or (bundli
             print(f"File exists: {os.path.exists(outputs_path)}")
             
             # Try to read existing outputs
-            with open(outputs_path, "r") as f:
+            with open(outputs_path, "r", encoding="utf-8") as f:
                 output_data = json.load(f)
                 print(f"Successfully loaded outputs data: {list(output_data.keys()) if output_data else 'empty'}")
             

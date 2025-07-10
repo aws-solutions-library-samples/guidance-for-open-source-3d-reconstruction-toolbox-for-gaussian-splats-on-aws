@@ -71,7 +71,8 @@ resource "aws_s3_bucket" "s3_bucket" {
   }
 }
 
-# Enable versioning for main bucket
+# Enable versioning for main bucket - intentionally enabled for data protection
+# This provides backup mechanism for accidental deletions/overwrites
 resource "aws_s3_bucket_versioning" "s3_bucket_versioning" {
   bucket = aws_s3_bucket.s3_bucket.id
   versioning_configuration {
@@ -198,7 +199,7 @@ resource "aws_s3_bucket_cors_configuration" "bucket_cors_config" {
   cors_rule {
     allowed_headers = ["*"]
     allowed_methods = ["GET","POST","PUT"]
-    allowed_origins = ["*"]
+    allowed_origins = ["http://localhost:*", "https://localhost:*"]
     expose_headers = []
     max_age_seconds = 0
   }

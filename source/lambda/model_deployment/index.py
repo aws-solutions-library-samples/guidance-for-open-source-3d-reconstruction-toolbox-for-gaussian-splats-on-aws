@@ -24,11 +24,12 @@ import os
 import tempfile
 import shutil
 import boto3
-import urllib.request
 import tarfile
 import json
-import urllib.parse
 import time
+from urllib.parse import urlparse
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
 
 # CloudFormation custom resource response function
 def send_response(event, context, response_status, response_data, physical_resource_id=None):
@@ -52,15 +53,23 @@ def send_response(event, context, response_status, response_data, physical_resou
     }
     
     try:
-        req = urllib.request.Request(
-            url=event['ResponseURL'],
-            data=response_body_json.encode('utf-8'),
-            headers=headers,
-            method='PUT'
-        )
-        response = urllib.request.urlopen(req)
-        print(f"Status code: {response.getcode()}")
-        print(f"Status message: {response.msg}")
+        # Validate URL scheme and format for security
+        response_url = event.get('ResponseURL', '')
+        if not response_url or not isinstance(response_url, str):
+            raise ValueError("Invalid or missing ResponseURL")
+        
+        parsed_url = urlparse(response_url)
+        if parsed_url.scheme not in ('http', 'https'):
+            raise ValueError(f"Unsupported URL scheme: {parsed_url.scheme}. Only HTTP and HTTPS are allowed.")
+        
+        # Additional validation to prevent malicious URLs
+        if not parsed_url.netloc:
+            raise ValueError("Invalid URL: missing network location")
+        
+        req = Request(response_url, data=response_body_json.encode('utf-8'), headers=headers, method='PUT')
+        with urlopen(req, timeout=30) as response:  # nosemgrep: dynamic-urllib-use-detected
+            print(f"Status code: {response.status}")
+            print(f"Status message: {response.reason}")
         return True
     except Exception as e:
         print(f"Error sending response: {str(e)}")
@@ -71,15 +80,20 @@ def download_with_progress(url, destination):
     print(f"Starting download from {url}")
     start_time = time.time()
     
-    # Create a request with a user agent to avoid being blocked
+    # Validate URL scheme for security
+    parsed_url = urlparse(url)
+    if parsed_url.scheme not in ('http', 'https'):
+        raise ValueError(f"Unsupported URL scheme: {parsed_url.scheme}. Only HTTP and HTTPS are allowed.")
+    
+    # Create headers to avoid being blocked
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
-    req = urllib.request.Request(url, headers=headers)
     
-    # Open the URL and get file size
-    with urllib.request.urlopen(req) as response:
-        file_size = int(response.info().get('Content-Length', 0))
+    # Use urllib for file download - URL validated above
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=30) as response:  # nosemgrep: dynamic-urllib-use-detected
+        file_size = int(response.headers.get('Content-Length', 0))
         print(f"File size: {file_size / (1024 * 1024):.2f} MB")
         
         # Download the file with progress reporting
@@ -89,20 +103,20 @@ def download_with_progress(url, destination):
         
         with open(destination, 'wb') as f:
             while True:
-                buffer = response.read(block_size)
-                if not buffer:
+                chunk = response.read(block_size)
+                if not chunk:
                     break
-                
-                downloaded += len(buffer)
-                f.write(buffer)
+                downloaded += len(chunk)
+                f.write(chunk)
                 
                 # Report progress every 5%
-                progress = downloaded / file_size * 100
-                if progress - last_report >= 5:
-                    elapsed = time.time() - start_time
-                    speed = downloaded / elapsed / (1024 * 1024) if elapsed > 0 else 0
-                    print(f"Downloaded {downloaded / (1024 * 1024):.2f} MB of {file_size / (1024 * 1024):.2f} MB ({progress:.1f}%) - {speed:.2f} MB/s")
-                    last_report = progress // 5 * 5
+                if file_size > 0:
+                    progress = downloaded / file_size * 100
+                    if progress - last_report >= 5:
+                        elapsed = time.time() - start_time
+                        speed = downloaded / elapsed / (1024 * 1024) if elapsed > 0 else 0
+                        print(f"Downloaded {downloaded / (1024 * 1024):.2f} MB of {file_size / (1024 * 1024):.2f} MB ({progress:.1f}%) - {speed:.2f} MB/s")
+                        last_report = progress // 5 * 5
     
     elapsed = time.time() - start_time
     print(f"Download completed in {elapsed:.2f} seconds")

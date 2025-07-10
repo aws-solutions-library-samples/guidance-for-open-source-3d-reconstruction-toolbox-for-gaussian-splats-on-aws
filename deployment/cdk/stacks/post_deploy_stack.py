@@ -68,7 +68,7 @@ class GSWorkflowPostDeployStack(Stack):
 
             # Load and validate output data
             try:
-                with open(output_json_path, 'r') as f:
+                with open(output_json_path, 'r', encoding='utf-8') as f:
                     output_data = json.load(f)
                 
                 if 'GSWorkflowBaseStack' not in output_data:

@@ -21,6 +21,7 @@
 # This file serves as the Dockerfile code that is used to build the container image for
 # building splats using NerfStudio, GSplat, Colmap, etc
 
+# nosemgrep: dockerfile-source-not-pinned
 FROM pytorch/pytorch:2.1.2-cuda11.8-cudnn8-devel
 
 # Only build for supported GPU architectures
@@ -142,7 +143,8 @@ RUN cd /usr/src \
     && cd Python-3.11.0 \
     && ./configure --enable-optimizations --with-openssl=/usr --prefix=/usr/local --with-system-ffi --with-system-expat --enable-loadable-sqlite-extensions \
     && make -j $(nproc) \
-    && make altinstall
+    && make altinstall \
+    && cd /usr/src && rm -rf Python-3.11.0*
 
 # Create explicit symlinks
 RUN ln -sf /usr/local/bin/python3.11 /usr/local/bin/python3 \
@@ -165,10 +167,11 @@ RUN pip install "setuptools<70.0.0" ninja boto3 packaging rich natsort trimesh o
 RUN pip install git+https://github.com/NVlabs/tiny-cuda-nn.git#subdirectory=bindings/torch
 
 # Install Cmake 3.30.3 for Glomap
-RUN wget https://github.com/Kitware/CMake/releases/download/v3.30.3/cmake-3.30.3-linux-x86_64.sh
-RUN mkdir /opt/cmake
-RUN sh cmake-3.30.3-linux-x86_64.sh --prefix=/opt/cmake --skip-license
-RUN ln -s /opt/cmake/bin/cmake /usr/local/bin/cmake
+RUN wget https://github.com/Kitware/CMake/releases/download/v3.30.3/cmake-3.30.3-linux-x86_64.sh \
+    && mkdir /opt/cmake \
+    && sh cmake-3.30.3-linux-x86_64.sh --prefix=/opt/cmake --skip-license \
+    && ln -s /opt/cmake/bin/cmake /usr/local/bin/cmake \
+    && rm cmake-3.30.3-linux-x86_64.sh
 WORKDIR ${CODE_PATH}
 
 # Install Eigen 3.4.0 for Glomap
@@ -188,14 +191,16 @@ RUN tar -xvzf 2.0.0.tar.gz && rm 2.0.0.tar.gz && mkdir ceres-bin && cd ceres-bin
 ENV Ceres_DIR=${CODE_PATH}/ceres-bin
 WORKDIR ${CODE_PATH}
 
-# Install COLMAP v3.11.1 from source
-RUN wget https://github.com/colmap/colmap/archive/refs/tags/3.11.1.zip \
-    && unzip 3.11.1.zip && rm 3.11.1.zip
-RUN bash -c "cd colmap-3.11.1/ && mkdir build && cd build && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES='${TCNN_CUDA_ARCHITECTURES}' -DMARCH_NATIVE=OFF && ninja install"
+# Install COLMAP v3.12.0 from source
+RUN wget https://github.com/colmap/colmap/archive/refs/tags/3.12.0.zip \
+    && unzip 3.12.0.zip && rm 3.12.0.zip
+RUN bash -c "cd colmap-3.12.0/ && mkdir build && cd build && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES='${TCNN_CUDA_ARCHITECTURES}' -DMARCH_NATIVE=OFF && ninja install"
 WORKDIR ${CODE_PATH}
 
-# Download the vocab tree which is used by Colmap
-RUN wget https://demuc.de/colmap/vocab_tree_flickr100K_words32K.bin
+# Download the vocab tree which is used by Colmap - FAISS converted
+#RUN wget https://demuc.de/colmap/vocab_tree_flickr100K_words32K.bin
+RUN git clone https://github.com/ZachMckennedyFWig/ColmapFaissVocabTrees.git
+RUN mv ${CODE_PATH}/ColmapFaissVocabTrees/vocab_tree_flickr100K_words32K.bin ${CODE_PATH}
 
 # Install Glomap v1.0.0 (see https://github.com/colmap/glomap/issues/55#issuecomment-2437082982)
 RUN wget https://github.com/colmap/glomap/archive/refs/tags/1.0.0.tar.gz && \
@@ -268,24 +273,26 @@ RUN mkdir -p ${CODE_PATH}/spherical
 RUN mkdir -p ${CODE_PATH}/segmentation
 RUN mkdir -p ${CODE_PATH}/post_processing
 
-COPY ./src/main.py ${CODE_PATH}
-COPY ./src/config.json ${CODE_PATH}
-COPY ./src/pipeline/pipeline.py ${CODE_PATH}
-COPY ./src/pipeline/image_processing/filter_blurry_images.py ${CODE_PATH}/image_processing
-COPY ./src/pipeline/video_processing/simple_video_to_images.py ${CODE_PATH}/video_processing
-COPY ./src/pipeline/sfm/extract_poses_imgs.py ${CODE_PATH}/sfm
-COPY ./src/pipeline/sfm/process_pose_transforms.py ${CODE_PATH}/sfm
-COPY ./src/pipeline/training/gsplat_pt_to_ply.py ${CODE_PATH}/training
-COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py ${CODE_PATH}/training
+COPY ./src/main.py                                              ${CODE_PATH}
+COPY ./src/config.json                                          ${CODE_PATH}
+COPY ./src/pipeline/pipeline.py                                 ${CODE_PATH}
+COPY ./src/pipeline/image_processing/filter_blurry_images.py    ${CODE_PATH}/image_processing
+COPY ./src/pipeline/video_processing/simple_video_to_images.py  ${CODE_PATH}/video_processing
+COPY ./src/pipeline/sfm/extract_poses_imgs.py                   ${CODE_PATH}/sfm
+COPY ./src/pipeline/sfm/process_pose_transforms.py              ${CODE_PATH}/sfm
+COPY ./src/pipeline/sfm/update_camera_model.py                  ${CODE_PATH}/sfm
+COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py        ${CODE_PATH}/training
 COPY ./src/pipeline/spherical/equirectangular_to_perspective.py ${CODE_PATH}/spherical
-COPY ./src/pipeline/spherical/Equirec2Cube.py ${CODE_PATH}/spherical
-COPY ./src/pipeline/spherical/360ImageConverterforColmap.py ${CODE_PATH}/spherical
-COPY ./src/pipeline/spherical/py360convert.py ${CODE_PATH}/spherical
-COPY ./src/pipeline/segmentation/remove_object_using_mask.py ${CODE_PATH}/segmentation
-COPY ./src/pipeline/segmentation/remove_background.py ${CODE_PATH}/segmentation
-COPY ./src/pipeline/post_processing/spz ${CODE_PATH}/post_processing/spz
-COPY ./src/pipeline/segmentation/remove_background_sam2.py ${CODE_PATH}/sam
-COPY ./src/pipeline/training/rotate_splat_simple.py ${CODE_PATH}/training
+COPY ./src/pipeline/spherical/Equirec2Cube.py                   ${CODE_PATH}/spherical
+COPY ./src/pipeline/spherical/360ImageConverterforColmap.py     ${CODE_PATH}/spherical
+COPY ./src/pipeline/spherical/py360convert.py                   ${CODE_PATH}/spherical
+COPY ./src/pipeline/segmentation/remove_object_using_mask.py    ${CODE_PATH}/segmentation
+COPY ./src/pipeline/segmentation/remove_background.py           ${CODE_PATH}/segmentation
+COPY ./src/pipeline/post_processing/rotate_splat.py             ${CODE_PATH}/post_processing
+COPY ./src/pipeline/post_processing/mirror_splat.py             ${CODE_PATH}/post_processing
+COPY ./src/pipeline/post_processing/gsplat_pt_to_ply.py         ${CODE_PATH}/post_processing
+COPY ./src/pipeline/post_processing/spz                         ${CODE_PATH}/post_processing/spz
+COPY ./src/pipeline/segmentation/remove_background_sam2.py      ${CODE_PATH}/sam
 
 # Build the SPZ tool
 WORKDIR ${CODE_PATH}/post_processing/spz/src
@@ -297,3 +304,4 @@ RUN make install
 RUN ln -sf ${CODE_PATH}/post_processing/spz/src/build/splat_converter /usr/local/bin/splat_converter
 
 WORKDIR ${CODE_PATH}
+EXPOSE 29500

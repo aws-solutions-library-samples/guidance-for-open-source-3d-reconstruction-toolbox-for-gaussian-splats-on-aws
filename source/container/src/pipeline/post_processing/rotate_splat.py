@@ -41,7 +41,6 @@ def load_ply(ply_path):
     Returns:
         Dictionary containing the Gaussian parameters and the original vertex data
     """
-    print(f"Loading PLY file from {ply_path}")
     plydata = plyfile.PlyData.read(ply_path)
     
     # Extract vertex data
@@ -49,7 +48,6 @@ def load_ply(ply_path):
     
     # Get all property names from the vertex element
     property_names = [prop.name for prop in vertices.properties]
-    print(f"Available fields in PLY: {property_names}")
     
     # Create a dictionary to store all parameters
     gaussian_data = {
@@ -74,9 +72,6 @@ def load_ply(ply_path):
     # Sort the fields to ensure correct order
     sh_fields['dc'].sort(key=lambda x: int(x.split('_')[-1]))
     sh_fields['rest'].sort(key=lambda x: int(x.split('_')[-1]))
-    
-    print(f"Found DC fields: {sh_fields['dc']}")
-    print(f"Found rest fields: {sh_fields['rest']}")
     
     # Extract DC components
     if sh_fields['dc']:
@@ -190,8 +185,6 @@ def save_ply(gaussian_data, output_path):
         gaussian_data: Dictionary containing Gaussian parameters
         output_path: Path to save the PLY file
     """
-    print(f"Saving rotated Gaussian data to {output_path}")
-    
     # Get the original vertex data and property names
     original_vertices = gaussian_data['original_vertices']
     property_names = gaussian_data['property_names']
@@ -363,22 +356,12 @@ def main():
     for axis, angle in rotations:
         # Create rotation matrix
         rotation_matrix = create_rotation_matrix(axis, angle)
-        print(f"Rotating around {axis}-axis by {angle} degrees")
         
         # Rotate Gaussian data
         gaussian_data = rotate_gaussians(gaussian_data, rotation_matrix)
     
-    # Debug info about the data we're saving
-    print(f"Saving data with fields: {list(gaussian_data.keys())}")
-    if 'sh_dc' in gaussian_data:
-        print(f"sh_dc shape: {gaussian_data['sh_dc'].shape}")
-    if 'sh_rest' in gaussian_data:
-        print(f"sh_rest shape: {gaussian_data['sh_rest'].shape}")
-    
     # Save rotated data
     save_ply(gaussian_data, output_path)
-    
-    print(f"Rotation complete! Applied {len(rotations)} rotation(s)")
 
 if __name__ == "__main__":
     # Example usage:

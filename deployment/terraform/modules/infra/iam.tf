@@ -67,6 +67,7 @@ data "aws_iam_policy_document" "iam_policy_s3" {
         "s3:GetBucket*",
         "s3:GetObject*",
         "s3:List*",
+        "s3:ListBucket",
         "s3:PutObject",
         "s3:PutObjectLegalHold",
         "s3:PutObjectRetention",
@@ -93,15 +94,34 @@ data "aws_iam_policy_document" "iam_policy_eventbridge" {
   statement {
     effect = "Allow"
     actions = [
+      "events:DescribeRule",
       "events:PutRule",
       "events:PutTargets",
       "events:DeleteRule",
       "events:RemoveTargets",
-      "events:DescribeRule",
       "events:EnableRule",
       "events:DisableRule"
     ]
-    resources = ["*"]
+    resources = [
+      "arn:aws:events:*:*:rule/${var.project_prefix}-*",
+      "arn:aws:events:*:*:rule/StepFunctionsGetEventsForSageMakerTrainingJobsRule",
+      "arn:aws:events:*:*:rule/StepFunctionsGetEventsForSageMakerTransformJobsRule",
+      "arn:aws:events:*:*:rule/StepFunctionsGetEventsForSageMakerTuningJobsRule",
+      "arn:aws:events:*:*:rule/StepFunctionsGetEventsForECSTaskRule",
+      "arn:aws:events:*:*:rule/StepFunctionsGetEventsForBatchJobsRule"
+    ]
+  }
+  statement {
+    effect = "Allow"
+    actions = [
+      "events:CreateRule",
+      "events:DescribeRule",
+      "events:PutRule",
+      "events:PutTargets"
+    ]
+    resources = [
+      "arn:aws:events:*:*:rule/StepFunctions*"
+    ]
   }
 }
 
@@ -149,11 +169,19 @@ data "aws_iam_policy_document" "iam_policy_ecr" {
   statement {
     effect = "Allow"
     actions = [
-          "ecr:CreateRepository",
           "ecr:GetAuthorizationToken"
         ]
     resources = [
         "*"
+        ]
+  }
+  statement {
+    effect = "Allow"
+    actions = [
+          "ecr:CreateRepository"
+        ]
+    resources = [
+        "arn:aws:ecr:*:*:repository/${var.project_prefix}-*"
         ]
   }
   statement {
@@ -184,11 +212,10 @@ data "aws_iam_policy_document" "iam_policy_step_functions" {
   statement {
     effect = "Allow"
     actions = [
-        "states:StartExecution",
-        "states:ValidateStateMachineDefinition",
+        "states:StartExecution"
         ]
     resources = [
-        "*"
+        "arn:aws:states:*:*:stateMachine:${var.project_prefix}-*"
         ]
   }
 }
@@ -204,12 +231,12 @@ data "aws_iam_policy_document" "iam_policy_sagemaker" {
   statement {
     effect = "Allow"
     actions = [
-        "sagemaker:CreateTransformJob",
         "sagemaker:DescribeTransformJob",
+        "sagemaker:CreateTransformJob",
         "sagemaker:AddTags"
     ]
     resources = [
-        "*"
+        "arn:aws:sagemaker:*:*:transform-job/${var.project_prefix}-*"
     ]
   }
 }
@@ -230,7 +257,9 @@ data "aws_iam_policy_document" "iam_policy_ssm" {
         "ssm:DescribeParameter",
         "ssm:GetParameterHistory"
     ]
-    resources = ["*"]
+    resources = [
+        "arn:aws:ssm:*:*:parameter/${var.project_prefix}-*"
+    ]
   }
 }
 
@@ -264,18 +293,44 @@ data "aws_iam_policy_document" "iam_policy_sfn_logs" {
   statement {
     effect = "Allow"
     actions = [
-      "logs:CreateLogDelivery",
-      "logs:CreateLogStream",
-      "logs:GetLogDelivery",
-      "logs:UpdateLogDelivery",
-      "logs:DeleteLogDelivery",
-      "logs:ListLogDeliveries",
-      "logs:PutLogEvents",
-      "logs:PutResourcePolicy",
-      "logs:DescribeResourcePolicies",
       "logs:DescribeLogGroups"
     ]
-    resources = ["*"]
+    resources = [
+      "arn:aws:logs:*:*:log-group:/aws/stepfunctions/${var.project_prefix}-*"
+    ]
+  }
+  statement {
+    effect = "Allow"
+    actions = [
+      "logs:CreateLogStream",
+      "logs:PutLogEvents"
+    ]
+    resources = [
+      "arn:aws:logs:*:*:log-group:/aws/stepfunctions/${var.project_prefix}-*",
+      "arn:aws:logs:*:*:log-group:/aws/stepfunctions/${var.project_prefix}-*:*"
+    ]
+  }
+  statement {
+    effect = "Allow"
+    actions = [
+      "logs:GetLogDelivery",
+      "logs:CreateLogDelivery",
+      "logs:UpdateLogDelivery",
+      "logs:DeleteLogDelivery"
+    ]
+    resources = [
+      "arn:aws:logs:*:*:destination:${var.project_prefix}-*"
+    ]
+  }
+  statement {
+    effect = "Allow"
+    actions = [
+      "logs:DescribeResourcePolicies",
+      "logs:PutResourcePolicy"
+    ]
+    resources = [
+      "arn:aws:logs:*:*:destination:${var.project_prefix}-*"
+    ]
   }
 }
 
@@ -294,22 +349,38 @@ resource "aws_iam_policy" "sagemaker_policy" {
         {
             "Effect": "Allow",
             "Action": [
-                "sagemaker:CreateTrainingJob",
-                "sagemaker:DescribeTrainingJob",
-                "sagemaker:StopTrainingJob"
+                "sagemaker:DescribeTrainingJob"
             ],
             "Resource": [
-                "*"
+                "arn:aws:sagemaker:*:*:training-job/*"
             ]
         },
         {
             "Effect": "Allow",
             "Action": [
-                "sagemaker:ListTags",
+                "sagemaker:CreateTrainingJob",
+                "sagemaker:StopTrainingJob"
+            ],
+            "Resource": [
+                "arn:aws:sagemaker:*:*:training-job/${var.project_prefix}-*"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "sagemaker:ListTags"
+            ],
+            "Resource": [
+                "arn:aws:sagemaker:*:*:training-job/${var.project_prefix}-*"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
                 "sagemaker:AddTags"
             ],
             "Resource": [
-                "*"
+                "arn:aws:sagemaker:*:*:training-job/${var.project_prefix}-*"
             ]
         },
         {
@@ -318,7 +389,7 @@ resource "aws_iam_policy" "sagemaker_policy" {
                 "iam:PassRole"
             ],
             "Resource": [
-                "*"
+                "arn:aws:iam::*:role/${var.project_prefix}-*"
             ],
             "Condition": {
                 "StringEquals": {
@@ -329,12 +400,20 @@ resource "aws_iam_policy" "sagemaker_policy" {
         {
             "Effect": "Allow",
             "Action": [
-                "events:PutTargets",
-                "events:PutRule",
                 "events:DescribeRule"
             ],
             "Resource": [
-                "*"
+                "arn:aws:events:*:*:rule/${var.project_prefix}-*"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "events:PutTargets",
+                "events:PutRule"
+            ],
+            "Resource": [
+                "arn:aws:events:*:*:rule/${var.project_prefix}-*"
             ]
         }
     ]
@@ -370,7 +449,10 @@ data "aws_iam_policy_document" "iam_policy_cloudwatch_lambda" {
       "logs:GetLogEvents"
     ]
     resources = [
-      "*"
+      "arn:aws:logs:*:*:log-group:/aws/lambda/${var.project_prefix}-*",
+      "arn:aws:logs:*:*:log-group:/aws/lambda/${var.project_prefix}-*:*",
+      "arn:aws:logs:*:*:log-group:/aws/sagemaker/TrainingJobs",
+      "arn:aws:logs:*:*:log-group:/aws/sagemaker/TrainingJobs:*"
       ]
   }
 }
@@ -408,14 +490,13 @@ locals {
         s3 = "${aws_iam_policy.iam_policy_s3.arn}",
         sagemaker = "${data.aws_iam_policy.AmazonSageMakerFullAccess_policy.arn}",
         event_bridge = "${aws_iam_policy.iam_policy_eventbridge.arn}",
-        #sagemaker_custom = "${aws_iam_policy.sagemaker_policy.arn}",
+        sfn_logs = "${aws_iam_policy.iam_policy_step_functions_logs.arn}",
         lambda = "${aws_iam_policy.iam_policy_invoke_lambda.arn}"
     }
     container_policies = {
         sagemaker = "${data.aws_iam_policy.AmazonSageMakerFullAccess_policy.arn}",
         ecr = "${aws_iam_policy.iam_policy_ecr.arn}",
-        s3 = "${aws_iam_policy.iam_policy_s3.arn}",
-        kms = "${aws_iam_policy.iam_policy_kms.arn}",
+        s3 = "${aws_iam_policy.iam_policy_s3.arn}"
     }
 }
 

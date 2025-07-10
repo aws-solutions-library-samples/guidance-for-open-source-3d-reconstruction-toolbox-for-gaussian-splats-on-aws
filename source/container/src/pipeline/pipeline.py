@@ -26,6 +26,7 @@ import logging
 import enum
 import subprocess
 import traceback
+import shlex
 from typing import List
 from rich.logging import RichHandler
 
@@ -177,17 +178,50 @@ class Pipeline:
         Run a pipeline component
         """
         self.session.log.info(f"Running component {self.components[index].name}")
-        self.components[index].args.insert(0, self.components[index].command)
+        
+        # Create a copy of the current environment
+        env = os.environ.copy()
+        
+        # Set up the command and arguments
+        cmd_args = []
+        
+        # Add the command
         if self.components[index].comp_environ == ComponentEnvironment.python:
-            self.components[index].args.insert(0, "python")
-        self.session.log.info(f"Component command: {self.components[index].args}")
+            cmd_args.append(sys.executable)
+        cmd_args.append(self.components[index].command)
+        
+        # Add all arguments, handling environment variables specially
+        for arg in self.components[index].args:
+            # Validate argument is a string to prevent injection
+            if not isinstance(arg, str):
+                raise ValueError(f"Invalid argument type: {type(arg)}")
+            
+            # Additional validation: check for dangerous characters
+            if any(char in arg for char in ['`', '$', '|', '&', ';', '>', '<']):
+                raise ValueError(f"Potentially dangerous characters in argument: {arg}")
+            
+            if '=' in arg and arg.split('=')[0] == 'CUDA_VISIBLE_DEVICES':
+                # This is an environment variable setting, not an argument
+                env_value = arg.split('=')[1]
+                # Validate environment variable value
+                if not env_value.replace(',', '').replace(' ', '').isdigit():
+                    raise ValueError(f"Invalid CUDA_VISIBLE_DEVICES value: {env_value}")
+                env['CUDA_VISIBLE_DEVICES'] = env_value
+            else:
+                # Add argument directly - no shell escaping needed for subprocess.run() with list
+                cmd_args.append(arg)
+                
+        self.session.log.info(f"Component command: {cmd_args}")
+        if 'CUDA_VISIBLE_DEVICES' in env:
+            self.session.log.info(f"Using CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']}")
+            
         try:
-            print(self.components[index].cwd)
-            print(", ".join(os.listdir(self.components[index].cwd)))
-            result = subprocess.run(
-                self.components[index].args,
+            # Subprocess call is secure: uses list format (not shell=True) with validated arguments
+            result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit
+                cmd_args,
                 check=True,
-                cwd=self.components[index].cwd
+                cwd=self.components[index].cwd,
+                env=env
             )
             self.session.log.info(result.stdout)
             if result.stderr:

@@ -228,6 +228,7 @@ class GSWorkflowBaseStack(Stack):
             "SfnArnParameter",
             parameter_name=self.sfn_ssm_param_name,
             string_value=sfn.state_machine.state_machine_arn,
+            type=ssm.ParameterType.SECURE_STRING
         )
         CfnOutput(self, "SfnArnSsmParameterName", value=ssm_sfn_arn.parameter_name)
 

@@ -77,10 +77,7 @@ class Equirec2Cube(nn.Module):
         xyz[:, :, 0] = (RADIUS / D) * x_map[:, :]
         xyz[:, :, 1] = (RADIUS / D) * y_map[:, :]
         xyz[:, :, 2] = (RADIUS / D) * z_map[:, :]
-        if CUDA:
-            xyz = Variable(torch.FloatTensor(xyz))
-        else:
-            xyz = Variable(torch.FloatTensor(xyz))
+        xyz = Variable(torch.FloatTensor(xyz))
         
         reshape_xyz = xyz.view(cube_length * cube_length, 3).transpose(0, 1)
         self.batch_size = batch_size # NOTE: Might give an error when batch_size smaller than real batch_size of the batch input

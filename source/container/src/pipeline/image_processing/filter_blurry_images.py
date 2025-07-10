@@ -52,6 +52,7 @@ import cv2  # type: ignore
 import numpy as np
 import numpy.typing as npt
 import subprocess
+import shlex
 
 try:
     from natsort import natsorted  # type: ignore   # Only for sorting "naturally" input images
@@ -584,15 +585,17 @@ def select_frames(
         _LOGGER.info("""Using simple video to images script instead 
                      because laplacian_var does not have the same size as the number of frames in the video.""")
         try:
+            import sys
+            # Validated subprocess call with safe arguments
             subprocess.run([
-                "python",
+                sys.executable,
                 "video_processing/simple_video_to_images.py",
                 "-i", input_path_name,
                 "-o", image_dir,
                 "-n", str(num_frames_target)
-            ], check=True)
+            ], check=True)  # nosemgrep: dangerous-subprocess-use-audit
             _LOGGER.info("Successfully ran video to image fallback script")
-            exit(0)
+            sys.exit(0)
         except Exception as e:
             raise RuntimeError("Error using video to image fallback script: {e}") from e
         
@@ -601,7 +604,14 @@ def select_frames(
         #)
 
     frames_selected = []
-    spacing = num_frames // num_frames_target
+    
+    # Ensure num_frames_target is positive to avoid division by zero
+    if num_frames_target <= 0:
+        _LOGGER.warning(f"num_frames_target must be greater than 0, got {num_frames_target}. Setting to default value of 300.")
+        num_frames_target = 300  # Set a reasonable default
+    
+    spacing = max(1, num_frames // num_frames_target)  # Ensure spacing is at least 1
+    
     if laplacian_var is None:
         # nerfstudio-like frame selection
         return np.asarray(list(range(0, num_frames, spacing)), dtype=int)
@@ -726,6 +736,7 @@ def copy_images(
     image_dir: Path,
     frames: npt.NDArray[np.int32],
     pattern: str = "frame_{i:03d}_{f:05d}",
+    preserve_names: bool = False,
 ) -> None:
     """Converts a video into a sequence of PNG images using OpenCV.
     Not recommended for HDR video (BT.2020).
@@ -742,6 +753,8 @@ def copy_images(
     pattern : str
         Python string format used for generating image names. i is the image index, f
         is the frame number.
+    preserve_names : bool
+        If True, preserve original filenames instead of using pattern.
 
     Raises
     ------
@@ -750,12 +763,17 @@ def copy_images(
     """
 
     create_image_dir(image_dir, force=True)
-    out_filename = str(image_dir / pattern)
-
-    _LOGGER.info(f"Copying frames to {out_filename}.SUFFIX")
-
-    for i, f in enumerate(tqdm(frames, disable=not _LOGGER.isEnabledFor(logging.INFO))):
-        shutil.copy(str(input_path[f]), out_filename.format(f=f, i=i) + input_path[f].suffix)
+    
+    if preserve_names:
+        _LOGGER.info(f"Copying frames to {image_dir} with original names")
+        for i, f in enumerate(tqdm(frames, disable=not _LOGGER.isEnabledFor(logging.INFO))):
+            original_name = input_path[f].name
+            shutil.copy(str(input_path[f]), str(image_dir / original_name))
+    else:
+        out_filename = str(image_dir / pattern)
+        _LOGGER.info(f"Copying frames to {out_filename}.SUFFIX")
+        for i, f in enumerate(tqdm(frames, disable=not _LOGGER.isEnabledFor(logging.INFO))):
+            shutil.copy(str(input_path[f]), out_filename.format(f=f, i=i) + input_path[f].suffix)
 
 
 def extract_frames_opencv(
@@ -928,6 +946,11 @@ def main(args=None):
         action="store_true",
         help="Verbose execution.",
     )
+    parser.add_argument(
+        "--preserve-names",
+        action="store_true",
+        help="Preserve original image names instead of renaming with frame pattern.",
+    )
 
     args = parser.parse_args(args)
 
@@ -1039,7 +1062,7 @@ def main(args=None):
     )
     logging.info(f"Extracting {len(frames)} frames...")
     if input_is_images:
-        copy_images(input_path=video_path, image_dir=image_dir, frames=frames)
+        copy_images(input_path=video_path, image_dir=image_dir, frames=frames, preserve_names=args.preserve_names)
     else:
         extract_frames_opencv(video_path=video_path, image_dir=image_dir, frames=frames)
     removed = reduce_images_to_target(image_dir, num_frames_target)

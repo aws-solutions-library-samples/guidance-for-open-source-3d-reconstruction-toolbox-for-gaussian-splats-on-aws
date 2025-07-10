@@ -19,10 +19,29 @@
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY
 
-""" This script is the main entry point into training a gaussian splat from a
-given set of images or video """
-
 """
+This script is the main entry point into training a gaussian splat from a
+given set of images or video.
+
+It uses a pipeline class to create and configure a pipeline containing a
+list of components (each containing a script command with parameters). Each
+pipeline component will get executed sequentially and there can be infinite
+amount of components that can be chained together. The component types can be
+loader, filter, transform, renderer, or exporter based on the component function use.
+The scripts for components are ordered by task type under the pipeline directory
+such as image_processing, segmentation, post_processing
+          _________________________________________________________________________
+          |                           EXAMPLE PIPELINE                             |
+          |  __________________     __________________     __________________      |
+          |  |                 |    |                 |    |                 |     |
+          |  |   COMPONENT 1   |    |   COMPONENT 2   |    |   COMPONENT N   |     |   
+(.mov)o>-----|  (TRANSFORM):   |----|    (FILTER):    |----|  (COMP_TYPE):   |--//---->o[.ply,.spz]
+          |  | VIDEO-TO-IMAGES |    | FILTER-BLUR-IMG |    |  DO-SOMETHING   |     |
+          |  |     SCRIPT      |    |     SCRIPT      |    |     SCRIPT      |     |
+          |  |_________________|    |_________________|    |_________________|     |
+          |                                                                        |
+          |________________________________________________________________________|
+
 ERROR CODES
 700, "Error reading camera parameters from file
 705, "Input file type not supported. Only .mp3, .mp4, .mov, and .zip with .png or .jpeg/.jpg files are supported for input"
@@ -42,9 +61,11 @@ ERROR CODES
 770, "Issue running the training session, stage 1"
 780, "Issue exporting splat from NerfStudio"
 781, "Issue rotating splat before SPZ conversion"
-783, "Issue creating compressed spz splat"
+782, "Issue mirroring the splat before SPZ conversion"
+783, "Issue creating compressed SPZ splat"
 784, "Issue rotating splat after SPZ conversion"
-785, "Issue uploading asset to S3"
+785, "Issue mirroring splat after SPZ conversion"
+786, "Issue uploading asset to S3"
 790, "The archive doesn't contain supported image files .jpg, .jpeg, or .png"
 795, "General error running the pipeline"
 """
@@ -132,7 +153,7 @@ def resize_to_4k(image_path, orientation="landscape"):
 def read_camera_params_from_file(cameras_txt_path):
     """Read camera parameters from cameras.txt file"""
     try:
-        with open(cameras_txt_path, 'r') as f:
+        with open(cameras_txt_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
             
         for line in lines:
@@ -236,14 +257,29 @@ def untar_gz(file_path, extract_path='.'):
     """
     try:
         with tarfile.open(file_path, 'r:gz') as tar:
-            tar.extractall(extract_path)
-        print(f"Successfully extracted '{file_path}' to '{extract_path}'")
-    except FileNotFoundError:
-        print(f"Error: File not found: '{file_path}'")
-    except tarfile.ReadError:
-        print(f"Error: Could not open '{file_path}' with read mode 'r:gz'")
+            # Validate each member before extraction
+            for member in tar.getmembers():
+                # Check for directory traversal attempts
+                if os.path.isabs(member.name) or ".." in member.name:
+                    print(f"Warning: Skipping potentially dangerous path: {member.name}")
+                    continue
+                # Check for symlinks pointing outside extraction directory
+                if member.issym() or member.islnk():
+                    if os.path.isabs(member.linkname) or ".." in member.linkname:
+                        print(f"Warning: Skipping potentially dangerous link: {member.name} -> {member.linkname}")
+                        continue
+            # Extract only safe members - validated to prevent directory traversal
+            safe_members = [m for m in tar.getmembers() 
+                          if not (os.path.isabs(m.name) or ".." in m.name or 
+                                 (m.issym() or m.islnk()) and (os.path.isabs(m.linkname) or ".." in m.linkname))]
+            tar.extractall(extract_path, members=safe_members)  # nosemgrep: dangerous-tarfile-extractall
+            # Members are validated above to prevent directory traversal attacks
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"Model file not found: '{file_path}'") from e
+    except tarfile.ReadError as e:
+        raise tarfile.ReadError(f"Could not open '{file_path}' with read mode 'r:gz'. File may be corrupted or not a valid tar.gz archive.") from e
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        raise RuntimeError(f"An unexpected error occurred while extracting '{file_path}': {e}") from e
 
 def has_alpha_channel(image_path):
     """
@@ -281,8 +317,6 @@ def process_images(input_dir, output_dir=None):
     # Get all image files in the input directory
     image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
     
-    print(f"Found {len(image_files)} images in {input_dir}")
-    
     for image_file in tqdm_func(image_files, desc="Processing images"):
         input_path = os.path.join(input_dir, image_file)
         
@@ -304,12 +338,11 @@ def process_images(input_dir, output_dir=None):
             mask_file = f"{base_name}_mask.png"
             output_mask_path = os.path.join(output_dir, mask_file)
             alpha.save(output_mask_path)
-            
-            print(f"Processed {image_file} -> RGB + mask")
-        else:
-            print(f"Skipping {image_file} - not in RGBA format")
 
 if __name__ == "__main__":
+    ##################################
+    # INITIALIZATION
+    ##################################
     try:
         # Open config with default values
         with open("config.json", encoding="utf-8") as f:
@@ -335,9 +368,12 @@ if __name__ == "__main__":
             uuid=config['UUID'],
             num_threads=str(multiprocessing.cpu_count()),
             num_gpus=str(torch.cuda.device_count()),
-            log_verbosity=config['LOG_VERBOSITY'])
+            log_verbosity=config['LOG_VERBOSITY']
+        )
         log = pipeline.session.log
         pipeline.session.status = Status.INIT
+        log.info(f"Successfully extracted {os.path.join(os.environ['MODEL_PATH'], 'models.tar.gz')} \
+                 to {os.environ['MODEL_PATH']}")
         log.info(f"Pipeline status changed to {pipeline.session.status}")
     except Exception as e:
         error_message = f"""Required environment variables not set.
@@ -380,20 +416,24 @@ if __name__ == "__main__":
     colmap_db_path = os.path.join(config['DATASET_PATH'], "database.db")
     transforms_in_path = os.path.join(config['DATASET_PATH'], "transforms-in.json")
     transforms_out_path = os.path.join(config['DATASET_PATH'], "transforms.json")
-    spherical_num_images = int(float(config['MAX_NUM_IMAGES'])/float(6))
-    if str(config['SPHERICAL_CAMERA']).lower() == "true": # 6 views per 360 image using cube faces
-        num_images = spherical_num_images
-    else:
-        num_images = int(float(config['MAX_NUM_IMAGES']))
-    head, extension = os.path.splitext(str(config['FILENAME']))
-    os.environ['CUDA_VISIBLE_DEVICES'] = count_up_to(int(pipeline.config.num_gpus))
-    input_file_path = os.path.join(config['DATASET_PATH'], config['FILENAME'])
 
+    if str(config['SPHERICAL_CAMERA']).lower() == "true": # 6 views per 360 image using cube faces
+        config['MAX_NUM_IMAGES'] = str(int(float(config['MAX_NUM_IMAGES'])/float(6)))
+    else:
+        config['MAX_NUM_IMAGES'] = str(int(config['MAX_NUM_IMAGES']))
+
+    input_filename_extension = os.path.splitext(str(config['FILENAME']))[1]
+    input_file_path = os.path.join(config['DATASET_PATH'], config['FILENAME'])
     current_dir_path = os.path.dirname(os.path.realpath(__file__))
 
+    # Store the full list of GPUs
+    os.environ['CUDA_VISIBLE_DEVICES'] = count_up_to(int(pipeline.config.num_gpus))
+    GPU_MAX_IMAGES = 500 # est at 4k
+
     ##################################
-    # TRANSFORM: Pose Transform for SfM
-    ##################################
+    # TRANSFORM COMPONENT:
+    # Pose Transform for SfM
+    #################################
     try:
         if str(config['USE_POSE_PRIOR_TRANSFORM_JSON']).lower() == 'true' and \
             str(config['USE_POSE_PRIOR_COLMAP_MODEL_FILES']).lower() == 'true':
@@ -406,7 +446,7 @@ if __name__ == "__main__":
             )
         if str(config['USE_POSE_PRIOR_TRANSFORM_JSON']).lower() == 'true' or \
             str(config['USE_POSE_PRIOR_COLMAP_MODEL_FILES']).lower() == 'true':
-            if VIDEO is False and extension.lower() == ".zip":
+            if VIDEO is False and input_filename_extension.lower() == ".zip":
                 if str(config['USE_POSE_PRIOR_TRANSFORM_JSON']).lower() == 'true':
                     use_transforms = "true"
                 else:
@@ -429,7 +469,7 @@ if __name__ == "__main__":
                 raise RuntimeError(
                     pipeline.report_error(
                         720,
-                        f"""Improper file type {extension} given for prior pose transformations.
+                        f"""Improper file type {input_filename_extension} given for prior pose transformations.
                         Only '.zip' is supported."""
                     )
                 )
@@ -438,11 +478,11 @@ if __name__ == "__main__":
         pipeline.report_error(725, error_message)
 
     ##################################
-    # TRANSFORM: Video to Images
+    # TRANSFORM COMPONENT:
+    # Video to Images
     ##################################
     try:
-        if VIDEO is True:
-            if str(config['REMOVE_BACKGROUND']).lower() == "true" and \
+        if VIDEO is True and str(config['REMOVE_BACKGROUND']).lower() == "true" and \
                 str(config['BACKGROUND_REMOVAL_MODEL']).lower() == "sam2":
                 # SAM2 BACKGROUND REMOVAL COMPONENT
                 args = [
@@ -451,7 +491,6 @@ if __name__ == "__main__":
                     "-n", config['MAX_NUM_IMAGES'],
                     "-mt", config['MASK_THRESHOLD']
                 ]
-
                 pipeline.create_component(
                     name="RemoveBackground",
                     comp_type=ComponentType.filter,
@@ -461,56 +500,75 @@ if __name__ == "__main__":
                     cwd=current_dir_path,
                     requires_gpu=True
                 )
-            else: # Just extract the frames, remove background later
-                args = [
-                    "-i", input_file_path,
-                    "-o", image_path,
-                    "-n", config['MAX_NUM_IMAGES']
-                ]
-                pipeline.create_component(
-                    name="VideoToImages",
-                    comp_type=ComponentType.transform,
-                    comp_environ=ComponentEnvironment.python,
-                    command="video_processing/simple_video_to_images.py",
-                    args=args,
-                    cwd=current_dir_path,
-                    requires_gpu=False
-                )
         elif VIDEO is False and str(config['BACKGROUND_REMOVAL_MODEL']).lower() == "sam2" and \
             str(config['REMOVE_BACKGROUND']).lower()=="true":
             sys.exit("Error: SAM2 Background removal is only supported for video input")
-        else:
+        else: # Just extract the frames, remove background later
             args = [
+                "-i", input_file_path,
+                "-o", image_path,
+                "-n", config['MAX_NUM_IMAGES']
             ]
             pipeline.create_component(
                 name="VideoToImages",
                 comp_type=ComponentType.transform,
                 comp_environ=ComponentEnvironment.python,
-                command="",
+                command="video_processing/simple_video_to_images.py",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
             )
-
     except Exception as e:
         error_message = f"Issue creating video to images component: {e}"
         pipeline.report_error(730, error_message)
 
     ##################################
-    # FILTER: Remove Blurry Images
+    # FILTER COMPONENT:
+    # Remove Blurry Images
     ##################################
     try:
         # REMOVE BLURRY IMAGES COMPONENT
-        if str(config['FILTER_BLURRY_IMAGES']).lower() == "true":
-            args = [
+        # Skip blur filtering when using pose priors to maintain correspondence
+        if str(config['FILTER_BLURRY_IMAGES']).lower() == "true" and \
+           str(config['USE_POSE_PRIOR_TRANSFORM_JSON']).lower() != 'true' and \
+           str(config['USE_POSE_PRIOR_COLMAP_MODEL_FILES']).lower() != 'true':
+            # For zip archives, count images and use a percentage-based approach
+            if VIDEO is False and input_filename_extension.lower() == ".zip":
+                # Count the number of images in the directory
+                image_extensions = ('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')
+                image_files = [f for f in os.listdir(image_path) 
+                              if os.path.isfile(os.path.join(image_path, f)) 
+                              and any(f.lower().endswith(ext) for ext in image_extensions)]
+                total_images = len(image_files)
+                
+                # Initialize num_to_keep with a default value
+                num_to_keep = 300  # Default value
+                
+                # If we have images, set num_frames_target to 90% of total (adjust as needed)
+                if total_images > 0:
+                    num_to_keep = max(1, int(total_images * 0.9))
+                    log.info(f"Filtering blurry images from zip archive: keeping {num_to_keep} out of {total_images} images")
+                else:
+                    log.warning(f"No images found in {image_path}, using default target of {num_to_keep}")
+
+                args = [
+                    "-I", image_path,
+                    "-r", "30",
+                    "-n", str(num_to_keep),
+                    "-O", image_path
+                ]
+            else:
+                # For videos, use the MAX_NUM_IMAGES parameter as before
+                args = [
                     "-I", image_path,
                     "-r", "30",
                     "-n", str(config['MAX_NUM_IMAGES']),
                     "-O", image_path
-            ]
+                ]
 
             if str(config['LOG_VERBOSITY'].lower() == "debug"):
                 args.extend(["-v"])
+                
             pipeline.create_component(
                 name="RemoveBlurryImages",
                 comp_type=ComponentType.transform,
@@ -520,13 +578,15 @@ if __name__ == "__main__":
                 cwd=current_dir_path,
                 requires_gpu=False
             )
-
+        elif str(config['FILTER_BLURRY_IMAGES']).lower() == "true":
+            log.info("Skipping blur filtering because pose priors are enabled - must maintain image correspondence")
     except Exception as e:
         error_message = f"Issue creating remove blurry images component: {e}"
         pipeline.report_error(730, error_message)
 
     ##################################
-    # FILTER: Remove Background
+    # FILTER COMPONENT:
+    # Remove Background
     ##################################
     try:
         if config['REMOVE_BACKGROUND'].lower() == "true" and \
@@ -559,8 +619,8 @@ if __name__ == "__main__":
         pipeline.report_error(740, error_message)
 
     ##################################
-    # Filter: Spherical image
-    # into cubemap and perspective images
+    # FILTER COMPONENT:
+    # Spherical image into cubemap and perspective images
     ##################################
     try:
         if config['SPHERICAL_CAMERA'].lower() == "true":
@@ -568,8 +628,28 @@ if __name__ == "__main__":
             args = [
                 "-d", image_path,
                 "-ossfo", config['OPTIMIZE_SEQUENTIAL_SPHERICAL_FRAME_ORDER'],
-                "-rf", config['SPHERICAL_CUBE_FACES_TO_REMOVE']
+                "-gpu", "true",
+                "-log", config['LOG_VERBOSITY']
             ]
+            # Clean and process the faces to remove parameter
+            faces_to_remove = config['SPHERICAL_CUBE_FACES_TO_REMOVE'].strip()
+            if faces_to_remove and faces_to_remove != '[]':
+                try:
+                    # Try to parse as JSON first
+                    import ast
+                    faces_list = ast.literal_eval(faces_to_remove)
+                    if isinstance(faces_list, list) and faces_list:
+                        # Pass as comma-separated string
+                        faces_str = ','.join(faces_list)
+                        args.extend(["-rf", faces_str])
+                except (ValueError, SyntaxError):
+                    # If parsing fails, try to extract face names manually
+                    # Handle patterns like "down" or "back,down" or malformed lists
+                    cleaned_faces = faces_to_remove.strip("'\"[]")
+                    # Remove any remaining quotes around individual items
+                    cleaned_faces = cleaned_faces.replace('"', '').replace("'", '')
+                    if cleaned_faces:
+                        args.extend(["-rf", cleaned_faces])
             pipeline.create_component(
                 name="SphericaltoPerspective",
                 comp_type=ComponentType.filter,
@@ -577,14 +657,15 @@ if __name__ == "__main__":
                 command="spherical/equirectangular_to_perspective.py",
                 args=args,
                 cwd=current_dir_path,
-                requires_gpu=False
+                requires_gpu=True
             )
     except Exception as e:
         error_message = f"Issue creating spherical image component: {e}"
         pipeline.report_error(735, error_message)
 
     ##################################
-    # FILTER: Remove Human Subject
+    # FILTER COMPONENT:
+    # Remove Human Subject
     ##################################
     try:
         if config['REMOVE_HUMAN_SUBJECT'].lower() == "true":
@@ -618,9 +699,9 @@ if __name__ == "__main__":
         pipeline.report_error(745, error_message)
 
     ##################################
-    # TRANSFORM: Images to Point Cloud
+    # TRANSFORM COMPONENT:
+    # Images to Point Cloud
     ##################################
-    ### COLMAP SfM
     try:
         if config['RUN_SFM'].lower() == "true":
             if str(config['SFM_SOFTWARE_NAME']).lower() == "colmap" or \
@@ -634,11 +715,12 @@ if __name__ == "__main__":
                     "--SiftExtraction.num_threads", pipeline.config.num_threads#,
                 ]
                 if str(config['ENABLE_MULTI_GPU']).lower() == "true" or \
-                    str(config['MODEL']).lower() != "3dgut" or \
-                    str(config['MODEL']).lower() != "3dgrt":
-                    args.extend([
-                        "--ImageReader.camera_model", "PINHOLE"
-                    ])
+                    str(config['MODEL']).lower() == "3dgut" or \
+                    str(config['MODEL']).lower() == "3dgrt":
+                    if config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'].lower() == "false":
+                        args.extend([
+                            "--ImageReader.camera_model", "PINHOLE"
+                        ])
 
                 if config['ENABLE_ENHANCED_FEATURE_EXTRACTION'].lower() == "true":
                     args.extend([
@@ -808,10 +890,10 @@ if __name__ == "__main__":
                             "--image_path", image_path,
                             "--output_path", sparse_path
                         ]
-                        if config['LOG_VERBOSITY'].lower() == "error":
-                            args.extend([
-                                "--log_level", "1"
-                            ])
+                        #if config['LOG_VERBOSITY'].lower() == "error":
+                        #    args.extend([
+                        #        "--log_level", "1"
+                        #    ])
                         pipeline.create_component(
                             name="GlomapSfM-Mapper",
                             comp_type=ComponentType.transform,
@@ -822,7 +904,11 @@ if __name__ == "__main__":
                             requires_gpu=False
                         )
                 # IMAGE UNDISTORTER
-                if str(config['ENABLE_MULTI_GPU']).lower() == "true":
+                # Run undistorter for multi-GPU or when using 3DGRUT with pose priors (to convert SIMPLE_RADIAL to PINHOLE)
+                if str(config['ENABLE_MULTI_GPU']).lower() == "true" or \
+                   ((str(config['MODEL']).lower() == "3dgut" or str(config['MODEL']).lower() == "3dgrt") and \
+                    (str(config['USE_POSE_PRIOR_TRANSFORM_JSON']).lower() == 'true' or \
+                     str(config['USE_POSE_PRIOR_COLMAP_MODEL_FILES']).lower() == 'true')):
                     args = [
                         "image_undistorter",
                         "--image_path", image_path,
@@ -843,6 +929,23 @@ if __name__ == "__main__":
                         cwd=current_dir_path,
                         requires_gpu=False
                     )
+                    
+                    # Update cameras.txt to PINHOLE model after undistortion
+                    if (str(config['MODEL']).lower() == "3dgut" or str(config['MODEL']).lower() == "3dgrt") and \
+                       (str(config['USE_POSE_PRIOR_TRANSFORM_JSON']).lower() == 'true' or \
+                        str(config['USE_POSE_PRIOR_COLMAP_MODEL_FILES']).lower() == 'true'):
+                        args = [
+                            "-s", os.path.join(sparse_path, "0")
+                        ]
+                        pipeline.create_component(
+                            name="UpdateCameraModel",
+                            comp_type=ComponentType.transform,
+                            comp_environ=ComponentEnvironment.python,
+                            command="sfm/update_camera_model.py",
+                            args=args,
+                            cwd=current_dir_path,
+                            requires_gpu=False
+                        )
             else:
                 raise RuntimeError(
                     pipeline.report_error(
@@ -856,10 +959,9 @@ if __name__ == "__main__":
         pipeline.report_error(755, error_message)
 
     ##################################
-    # TRANSFORM: Point Cloud, Images,
-    # and Poses to NerfStudio format
+    # TRANSFORM COMPONENT:
+    # Point Cloud, Images, and Poses to NerfStudio format
     ##################################
-    # COLMAP TO NERFSTUDIO CONVERSION COMPONENT
     try:
         if config['GENERATE_SPLAT'].lower() == "true":
             if str(config['SFM_SOFTWARE_NAME']).lower() == "colmap" or \
@@ -888,10 +990,9 @@ if __name__ == "__main__":
         pipeline.report_error(760, error_message)
 
     ##################################
-    # TRANSFORM: Point Cloud, Images,
-    # and Poses to 3D Gaussian Splat
+    # TRANSFORM COMPONENT:
+    # Point Cloud, Images, and Poses to 3D Gaussian Splat
     ##################################
-    # CREATE NERFSTUDIO STAGE 1 COMPONENT
     try:
         if config['GENERATE_SPLAT'].lower() == "true":
             if config['SFM_SOFTWARE_NAME'].lower() == "glomap" or \
@@ -953,7 +1054,7 @@ if __name__ == "__main__":
                 str(config['MODEL']).lower() != "3dgut" and \
                 str(config['MODEL']).lower() != "3dgrt":
                 #multi-gpu, use gsplat training strategy
-                batch_size = 1
+                batch_size = 1  # Keep batch size small for memory efficiency
                 step_scaler = float(1/(int(pipeline.config.num_gpus)*batch_size))
                 if config['MODEL'] == "splatfacto-mcmc":
                     model = "mcmc"
@@ -961,7 +1062,7 @@ if __name__ == "__main__":
                     model = "default"
                 args = [
                     model,
-                    "--max_steps", str(config['MAX_STEPS']),
+                    "--max_steps", str(int(int(config['MAX_STEPS']))),
                     "--result-dir", output_path,
                     "--data_factor", "1",
                     "--steps_scaler", str(step_scaler),
@@ -982,18 +1083,21 @@ if __name__ == "__main__":
             # 3DGRUT
             elif str(config['MODEL']).lower() == "3dgut" or \
                 str(config['MODEL']).lower() == "3dgrt":
-                os.makedirs(os.path.join(config['DATASET_PATH'], '3dgrut', 'runs'), exist_ok=True)
                 args = [
                     "--config-name", f"apps/colmap_{str(config['MODEL']).lower()}_mcmc.yaml",
                     f"path={config['DATASET_PATH']}",
-                    f"out_dir={os.path.join(config['DATASET_PATH'], '3dgrut', 'runs')}",
-                    f"experiment_name={config['UUID']}",
+                    f"out_dir={output_path}",
                     f"n_iterations={str(config['MAX_STEPS'])}",
                     f"scheduler.positions.max_steps={str(config['MAX_STEPS'])}",
+                    "experiment_name=train-stage-1",
                     "dataset.downsample_factor=1",
-                    "export_ply.enabled=true",
-                    f"model.print_stats=true"
+                    "optimizer.type=selective_adam",
+                    "export_ply.enabled=true"
                 ]
+                if config['LOG_VERBOSITY'].lower() == "error":
+                    args.append("model.print_stats=true")
+                else:
+                    args.append("model.print_stats=false")
                 pipeline.create_component(
                     name="Train-Stage1",
                     comp_type=ComponentType.transform,
@@ -1013,8 +1117,8 @@ if __name__ == "__main__":
         pipeline.report_error(770, error_message)
 
     ##################################
-    # EXPORT:
-    # CREATE NERFSTUDIO EXPORT COMPONENT
+    # EXPORT COMPONENT:
+    # Export .ply from splat training
     ##################################
     try:
         if config['GENERATE_SPLAT'].lower() == "true" and \
@@ -1030,10 +1134,10 @@ if __name__ == "__main__":
                     name="Nerfstudio-Export",
                     comp_type=ComponentType.exporter,
                     comp_environ=ComponentEnvironment.python,
-                    command="training/gsplat_pt_to_ply.py",
+                    command="post_processing/gsplat_pt_to_ply.py",
                     args=args,
                     cwd=current_dir_path,
-                    requires_gpu=True
+                    requires_gpu=False
                 )
             else:
                 if config['MODEL'] == "nerfacto":
@@ -1047,7 +1151,10 @@ if __name__ == "__main__":
                         name="Nerfstudio-Export",
                         comp_type=ComponentType.exporter,
                         comp_environ=ComponentEnvironment.executable,
-                        command="ns-export", args=args, requires_gpu=True
+                        command="ns-export",
+                        args=args,
+                        cwd=current_dir_path,
+                        requires_gpu=False
                     )
                     # Texture
                     args = [
@@ -1101,22 +1208,27 @@ if __name__ == "__main__":
         pipeline.report_error(780, error_message)
 
     ##################################
-    # TRANSFORM:
-    # ROTATE SPLAT - PRE SPZ (SPZ MODULE HAS BUILT IN ROTATION around X-Y)
+    # TRANSFORM COMPONENT:
+    # Rotate splat - pre-SPZ (SPZ module has built in rotation around X-Y)
     ##################################
     try:
         # Apply pre-rotation if configured
         if str(config['ROTATE_SPLAT']).lower() == "true":
-            # Apply the original pre-rotation values to work with the SPZ converter
             args = [
                 "-i", os.path.join(output_path, "splat.ply"),
-                "--rotations", "x:270,y:180,z:0"
+                "--rotations"
             ]
+            if str(config['MODEL']).lower() != "3dgut" and \
+                str(config['MODEL']).lower() != "3dgrt":
+                # Apply standard rotation for non-3dgrt models
+                args.append("x:270,y:180,z:0")
+            else:
+                args.append("x:180,y:180,z:0")
             pipeline.create_component(
                 name="Rotation-Pre-SPZ",
                 comp_type=ComponentType.transform,
                 comp_environ=ComponentEnvironment.python,
-                command="training/rotate_splat_simple.py",
+                command="post_processing/rotate_splat.py",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
@@ -1126,8 +1238,34 @@ if __name__ == "__main__":
         pipeline.report_error(781, error_message)
 
     ##################################
-    # EXPORT:
-    # CREATE SPZ EXPORT COMPONENT
+    # TRANSFORM COMPONENT:
+    # Mirror splat - pre-SPZ (SPZ module has built in mirror around X-Y)
+    ##################################
+    try:
+        if str(config['ROTATE_SPLAT']).lower() == "true":
+            #if str(config['MODEL']).lower() == "3dgut" or \
+                #str(config['MODEL']).lower() == "3dgrt":
+                # Create a component to mirror the PLY file for 3dgrt/3dgut models
+            args = [
+                "--input", os.path.join(output_path, "splat.ply"),
+                "--axis", "x"  # Mirror along X-axis to compensate for SPZ built-in flip
+            ]
+            pipeline.create_component(
+                name="Mirror-Pre-SPZ",
+                comp_type=ComponentType.transform,
+                comp_environ=ComponentEnvironment.python,
+                command="post_processing/mirror_splat.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue mirroring the splat before SPZ conversion: {e}"
+        pipeline.report_error(782, error_message)
+
+    ##################################
+    # EXPORT COMPONENT:
+    # Export compressed SPZ splat file
     ##################################
     try:
         if config['MODEL'] != "nerfacto":
@@ -1148,22 +1286,21 @@ if __name__ == "__main__":
         pipeline.report_error(783, error_message)
 
     ##################################
-    # TRANSFORM:
-    # ROTATE SPLAT POST SPZ
+    # TRANSFORM COMPONENT:
+    # Rotate splat - post-SPZ
     ##################################
     try:
-        # Apply pre-rotation if configured
+        # Apply post-rotation if configured
         if str(config['ROTATE_SPLAT']).lower() == "true":
-            # Apply the original pre-rotation values to work with the SPZ converter
             args = [
                 "-i", os.path.join(output_path, "splat.ply"),
                 "--rotations", "x:180,y:180,z:0"
             ]
             pipeline.create_component(
-                name="Rotation-Post-SPZ",
+                name="Rotate-Post-SPZ",
                 comp_type=ComponentType.transform,
                 comp_environ=ComponentEnvironment.python,
-                command="training/rotate_splat_simple.py",
+                command="post_processing/rotate_splat.py",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
@@ -1173,8 +1310,34 @@ if __name__ == "__main__":
         pipeline.report_error(784, error_message)
 
     ##################################
-    # EXPORT:
-    # CREATE EXPORT SPZ COMPONENT TO S3
+    # TRANSFORM COMPONENT: MIRROR SPLAT
+    # Mirror splat - post-SPZ (SPZ module has built in mirror around X-Y)
+    ##################################
+    try:
+        if str(config['ROTATE_SPLAT']).lower() == "true":
+            #if str(config['MODEL']).lower() == "3dgut" or \
+                #str(config['MODEL']).lower() == "3dgrt":
+                # Create a component to mirror the PLY file for 3dgrt/3dgut models
+            args = [
+                "--input", os.path.join(output_path, "splat.ply"),
+                "--axis", "x"  # Mirror along X-axis to compensate for SPZ built-in flip
+            ]
+            pipeline.create_component(
+                name="Mirror-Post-SPZ",
+                comp_type=ComponentType.transform,
+                comp_environ=ComponentEnvironment.python,
+                command="post_processing/mirror_splat.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue mirroring splat after SPZ conversion: {e}"
+        pipeline.report_error(785, error_message)
+
+    ##################################
+    # EXPORT COMPONENT:
+    # Export SPZ to S3
     ##################################
     try:
         if config['GENERATE_SPLAT'].lower() == "true":
@@ -1200,11 +1363,11 @@ if __name__ == "__main__":
             )
     except Exception as e:
         error_message = f"Issue uploading asset to S3: {e}"
-        pipeline.report_error(785, error_message)
+        pipeline.report_error(786, error_message)
 
     ##################################
-    # EXPORT:
-    # CREATE EXPORT SPLAT COMPONENT TO S3
+    # EXPORT COMPONENT:
+    # Export PLY to S3
     ##################################
     try:
         if config['GENERATE_SPLAT'].lower() == "true":
@@ -1236,17 +1399,19 @@ if __name__ == "__main__":
             )
     except Exception as e:
         error_message = f"Issue uploading asset to S3: {e}"
-        pipeline.report_error(785, error_message)
+        pipeline.report_error(786, error_message)
 
     ##################################
-    # RUN THE PIPELINE
+    # RUN THE PIPELINE W/ COMPONENTS LOGIC
     ##################################
     try:
         pipeline.session.status = Status.RUNNING
         log.info(f"Pipeline status changed to {pipeline.session.status}")
         start_time = int(time.time())
         image_proc_time = None
+        image_proc_end_time = None
         sfm_time = None
+        sfm_end_time = None
         training_time = None
         for i in range(0, pipeline.config.num_components, 1):
             component = pipeline.components[i]
@@ -1265,7 +1430,7 @@ if __name__ == "__main__":
                             # unzip archive of images into /images directory
                             temp_path = os.path.join(config['DATASET_PATH'], 'temp')
                             with zipfile.ZipFile(input_file_path,"r") as zip_ref:
-                                zip_ref.extractall(temp_path)
+                                zip_ref.extractall(temp_path)  # nosemgrep: dangerous-tarfile-extractall
                             temp_dir_input = os.listdir(temp_path)[0]
                             if os.path.isdir(os.path.join(temp_path, temp_dir_input)): # Archive has a directory
                                 log.info("Moving directory from {temp_path} to {temp_dir_input}")
@@ -1287,7 +1452,7 @@ if __name__ == "__main__":
                                 filepath = os.path.join(image_path, filename)
                                 logging.info(f"Resizing image: {filepath}")
                                 resize_to_4k(filepath)
-                            head, first_file_ext = os.path.splitext(filenames[0])
+                            first_file_ext = os.path.splitext(filenames[0])[1]
                             if first_file_ext == ".png" or \
                                 first_file_ext == ".jpeg" or first_file_ext == ".jpg":
                                 logging.info("Found images in archive.")
@@ -1309,7 +1474,8 @@ if __name__ == "__main__":
                     # COLMAP FEATURE EXTRACTOR CONDITIONAL COMPONENT
                     current_time = int(time.time())
                     image_proc_time = current_time - start_time
-                    log.info(f"Time to prExtractorocess images: {image_proc_time}s")
+                    image_proc_end_time = current_time  # Store the timestamp when image processing completes
+                    log.info(f"Time to process images: {image_proc_time}s")
                     # If using pose prior, use the intrinsics from the txt file
                     if config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'].lower() == "true":
                         camera_params = read_camera_params_from_file(os.path.join(sparse_path, "0", "cameras.txt"))
@@ -1319,7 +1485,7 @@ if __name__ == "__main__":
                         ])
                     # Only use GPU if not too many images
                     num_images = len(os.listdir(image_path))
-                    if num_images > 500:
+                    if num_images > GPU_MAX_IMAGES:
                         use_gpu = "0"
                     else:
                         use_gpu = "1"
@@ -1330,13 +1496,24 @@ if __name__ == "__main__":
                 case "ColmapSfM-Feature-Matcher":
                     # Only use GPU if not too many images
                     num_images = len(os.listdir(image_path))
-                    if num_images > 500:
+                    if num_images > GPU_MAX_IMAGES:
                         use_gpu = "0"
                     else:
                         use_gpu = "1"
                     component.args.extend([
                         "--SiftMatching.use_gpu", use_gpu
                     ])
+                    pipeline.run_component(i)
+                case "Colmap-to-Nerfstudio":
+                    # Move existing transforms.json to transforms-in.json when using pose priors
+                    # This ensures colmap-to-nerfstudio creates fresh transforms.json from updated COLMAP data
+                    if (str(config['USE_POSE_PRIOR_TRANSFORM_JSON']).lower() == 'true' or \
+                        str(config['USE_POSE_PRIOR_COLMAP_MODEL_FILES']).lower() == 'true'):
+                        #transforms_path = os.path.join(config['DATASET_PATH'], "transforms.json")
+                        #transforms_in_path = os.path.join(config['DATASET_PATH'], "transforms-in.json")
+                        if os.path.exists(transforms_out_path):
+                            log.info(f"Moving {transforms_out_path} to {transforms_in_path} to preserve original")
+                            shutil.move(transforms_out_path, transforms_in_path)
                     pipeline.run_component(i)
                 case "Train-Stage1":
                     # TRAIN-STAGE1 CONDITIONAL COMPONENT
@@ -1346,16 +1523,14 @@ if __name__ == "__main__":
                             # Move the sparse point cloud from sparse/0/* to colmap/sparse/*
                             log.info('Running Training...')
                             current_time = int(time.time())
-                            print(f"Current time: {current_time}")
-                            print(f"Image Proc time: {image_proc_time}")
-                            print(f"Start time: {start_time}")
-                            sfm_time = current_time - image_proc_time
+                            sfm_time = current_time - image_proc_end_time  # Calculate time since image processing completed
                             log.info(f"Time for SfM: {sfm_time}s")
                             sparse_path_out = os.path.join(config['DATASET_PATH'], "colmap", "sparse")
-                            shutil.copytree(sparse_path, sparse_path_out)
+                            shutil.move(sparse_path, sparse_path_out)
+                            
                             # Set the image cache to disk if there are a lot of images to prevent OOM
                             num_images = len(os.listdir(image_path))
-                            if num_images > 500:
+                            if num_images > GPU_MAX_IMAGES:
                                 index = component.args.index("colmap")
                                 if index != -1:
                                     component.args.insert(index, "disk")
@@ -1364,18 +1539,15 @@ if __name__ == "__main__":
                         # Preprocess 3dgrut images if they have a mask
                         if str(config['MODEL']).lower() == "3dgut" or \
                             str(config['MODEL']).lower() == "3dgrt":
-                            print("Using 3D-GRUT")
                             if has_alpha_channel(os.path.join(image_path, os.listdir(image_path)[0])):
-                                print("Has alpha channel...")
                                 process_images(image_path)
-                            else:
-                                print("No alpha channel...")
                     pipeline.run_component(i)
                 case "Nerfstudio-Export":
                     # NERFSTUDIO EXPORT CONDITIONAL COMPONENT
                     pipeline.run_component(i)
                     current_time = int(time.time())
-                    training_time = current_time - sfm_time
+                    sfm_end_time = int(time.time())  # Store when SfM completes
+                    training_time = sfm_end_time - current_time  # Calculate actual training time
                     log.info(f"Time to train: {training_time}s")
                 case "Nerfstudio-Export-Nerfacto":
                     # NERFSTUDIO NERFACTO EXPORT CONDITIONAL COMPONENT
@@ -1384,20 +1556,61 @@ if __name__ == "__main__":
                         os.path.join(output_path, "textured", "mesh.obj"),
                         os.path.join(output_path, "textured", f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.glb")
                     )
-                case "Spz-Export":
+                case "Rotation-Pre-SPZ":
                     # If using 3dgrut, move the output splat over to where we expect it
                     if str(config['MODEL']).lower() == "3dgut" or \
                         str(config['MODEL']).lower() == "3dgrt":
-                        root_exp_dir = os.path.join(config['DATASET_PATH'], "3dgrut", "runs", str(config['UUID']))
+                        root_exp_dir = os.path.join(output_path, "train-stage-1")
                         exp_dir = os.listdir(root_exp_dir)[0]
                         shutil.move(os.path.join(root_exp_dir, exp_dir, "export_last.ply"), os.path.join(output_path, "splat.ply"))
+                    # Get the first image file from the directory
+                    image_files = [f for f in os.listdir(image_path) 
+                                  if os.path.isfile(os.path.join(image_path, f)) and 
+                                  f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                    
+                    # Default to landscape orientation if no images are found
+                    height, width = 1, 2  # Default to landscape (height < width)
+                    
+                    if image_files:
+                        sample_img_path = os.path.join(image_path, image_files[0])
+                        sample_img = cv2.imread(sample_img_path)
+                        if sample_img is not None:
+                            height, width = sample_img.shape[:2]
+                            log.info(f"Image dimensions: {width}x{height}")
+                        else:
+                            log.warning(f"Could not read image: {sample_img_path}")
+                    else:
+                        log.warning(f"No image files found in {image_path}")
+                    
+    
+                    # If the images are portrait, rotate the splat
+                    if height > width: # portrait, rotate -90 deg on y
+                        # Assuming 'args' is your list containing the rotation string
+                        if component.args and "y:" in component.args[-1]:
+                            # Parse the rotation string
+                            rotation_parts = component.args[-1].split(',')
+                            rotation_dict = {}
+                            
+                            # Convert to dictionary for easier manipulation
+                            for part in rotation_parts:
+                                axis, value = part.split(':')
+                                rotation_dict[axis] = int(value)
+                            
+                            # Subtract 90 from y rotation
+                            rotation_dict['y'] -= 90
+                            
+                            # Reconstruct the string
+                            new_rotation = f"x:{rotation_dict['x']},y:{rotation_dict['y']},z:{rotation_dict['z']}"
+                            
+                            # Replace the last element in the list
+                            component.args[-1] = new_rotation
                     pipeline.run_component(i)
                 case "S3-Export2":
                     # S3 UPLOAD CONDITIONAL COMPONENT
-                    log.info("Uploading asset to S3")
+                    log.info("Uploading output to S3")
                     pipeline.run_component(i)
                     # Copy result over to where SM expects it
-                    shutil.copytree(config['DATASET_PATH'], "/opt/ml/model/dataset")
+                    shutil.move(config['DATASET_PATH'], "/opt/ml/model/dataset")
                     log.info(f"Successful pipeline result generation located at \
                             {config['S3_OUTPUT']}/{str(os.path.splitext(config['FILENAME'])[0]).lower()}.*")
                 case _: # Default case, run Component

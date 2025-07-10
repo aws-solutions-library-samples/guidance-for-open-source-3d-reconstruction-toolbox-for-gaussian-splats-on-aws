@@ -46,8 +46,8 @@ def inspect_colmap_database(db_path):
             """
             SELECT name 
             FROM sqlite_master 
-            ORDER BY image_id
             WHERE type='table'
+            ORDER BY name
             """
         )
         #cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -63,13 +63,15 @@ def inspect_colmap_database(db_path):
             print(f"TABLE: {table_name}")
             print(f"{'=' * 50}")
             
-            # Get table schema
-            cursor.execute(
-                f"""
-                PRAGMA table_info({table_name})
-                """
-            )
-            #cursor.execute(f"PRAGMA table_info({table_name});")
+            # Validate table name to prevent SQL injection
+            if not table_name.replace('_', '').replace('-', '').isalnum():
+                print(f"Skipping table with invalid name: {table_name}")
+                continue
+            
+            # Get table schema using PRAGMA with safe identifier
+            # PRAGMA doesn't support parameterized queries, so we validate and escape the table name
+            safe_table_name = table_name.replace('"', '""')
+            cursor.execute('PRAGMA table_info("' + safe_table_name + '")')  # nosemgrep: sqlalchemy-execute-raw-query,formatted-sql-query
             columns = cursor.fetchall()
             
             # Print column information
@@ -80,25 +82,26 @@ def inspect_colmap_database(db_path):
                 print(f"{name:<20} {type_:<15} {not_null:<8} {str(default_val):<15} {primary_key}")
             
             # Print a few sample rows if the table has data
-            cursor.execute(
-                f"""
-                SELECT COUNT(*) FROM {table_name}
-                """
-            )
-            #cursor.execute(f"SELECT COUNT(*) FROM {table_name};")
-            count = cursor.fetchone()[0]
+            # Additional validation: ensure table name is safe for SQL
+            if not all(c.isalnum() or c in '_-' for c in table_name):
+                print(f"Skipping unsafe table name: {table_name}")
+                continue
             
-            if count > 0:
-                print(f"\nSample data ({min(3, count)} rows):")
-                cursor.execute(
-                    f"""
-                    SELECT * FROM {table_name} LIMIT 3
-                    """
-                )
-                #cursor.execute(f"SELECT * FROM {table_name} LIMIT 3;")
-                rows = cursor.fetchall()
-                for row in rows:
-                    print(row)
+            # Use safe table name with proper escaping
+            safe_table_name = table_name.replace('"', '""')
+            try:
+                cursor.execute('SELECT COUNT(*) FROM "' + safe_table_name + '"')  # nosemgrep: formatted-sql-query,sqlalchemy-execute-raw-query
+                count = cursor.fetchone()[0]
+                
+                if count > 0:
+                    print(f"\nSample data ({min(3, count)} rows):")
+                    cursor.execute('SELECT * FROM "' + safe_table_name + '" LIMIT 3')  # nosemgrep: formatted-sql-query,sqlalchemy-execute-raw-query
+                    rows = cursor.fetchall()
+                    for row in rows:
+                        print(row)
+            except sqlite3.Error as e:
+                print(f"Error querying table {table_name}: {e}")
+                continue
             else:
                 print("\nTable is empty.")
         
@@ -155,7 +158,7 @@ def sync_images_txt_with_db(database_path, images_dir, sparse_path):
     images_txt_content = {}
     current_image_block = []
     
-    with open(images_txt_path, 'r') as f:
+    with open(images_txt_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
         
     # Parse images.txt
@@ -181,7 +184,7 @@ def sync_images_txt_with_db(database_path, images_dir, sparse_path):
             i += 1
     
     # Write new images.txt with correct order
-    with open(images_txt_path, 'w') as f:
+    with open(images_txt_path, 'w', encoding='utf-8') as f:
         f.write("# Image list with two lines of data per image:\n")
         f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
         f.write("#   POINTS2D[] as (X, Y, POINT3D_ID)\n")
@@ -249,7 +252,7 @@ def load_transforms(transforms_path):
     Load the json file with the intrinsic and extrinsic parameters
     """
     print(f"Loading transforms from {transforms_path}")
-    with open(transforms_path, 'r') as f:
+    with open(transforms_path, 'r', encoding='utf-8') as f:
         return json.load(f)
     
 def normalize_poses(poses):
@@ -418,8 +421,9 @@ def write_cameras_file(cameras, output_dir):
         f.write('#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n')
 
         for idx, camera in enumerate(cameras, 1):
-            params = [camera['fl_x'], camera['cx'], camera['cy'], 0.0]
-            f.write(f'{idx} SIMPLE_RADIAL {camera["w"]} {camera["h"]} {" ".join(map(str, params))}\n')
+            # Use SIMPLE_PINHOLE for 3DGRUT compatibility (f, cx, cy)
+            params = [camera['fl_x'], camera['cx'], camera['cy']]
+            f.write(f'{idx} SIMPLE_PINHOLE {camera["w"]} {camera["h"]} {" ".join(map(str, params))}\n')
     print(f"Wrote {len(cameras)} cameras to file")
 
 def write_images_file(image_names, poses, output_dir, source_coord_name, pose_is_world_to_cam):
@@ -503,7 +507,7 @@ def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
         
         # Parse images.txt to extract pose information
         image_poses = {}
-        with open(images_txt_path, 'r') as f:
+        with open(images_txt_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
             
         i = 0
@@ -583,7 +587,7 @@ def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
             # Use coordinate system 1 (COLMAP world coordinate system)
             coordinate_system = 1
             
-            # Insert into pose_priors table
+            # Insert into pose_priors table using parameterized query
             cursor.execute("""
                 INSERT OR REPLACE INTO pose_priors 
                 (image_id, position, coordinate_system, position_covariance)
@@ -592,7 +596,7 @@ def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
             
             # Check if the insert was successful
             if cursor.rowcount == 0:
-                print(f"Warning: Failed to insert pose prior for image ID {image_id}")
+                print("Warning: Failed to insert pose prior for image ID", image_id)
         
         # Commit changes and close connection
         conn.commit()
@@ -679,10 +683,31 @@ if __name__ == '__main__':
             reordered_poses = []
             reordered_cameras = []
 
+            # Debug: Print available names and what we're looking for
+            print(f"Available image names from transforms: {sorted(image_names)[:5]}...")  # First 5
+            print(f"COLMAP image names: {sorted(colmap_image_names)[:5]}...")  # First 5
+            print(f"Looking for: {colmap_image_names[0] if colmap_image_names else 'None'}")
+            
             for img_name in colmap_image_names:
-                idx = name_to_idx[img_name]
-                reordered_poses.append(poses[idx])
-                reordered_cameras.append(cameras[idx])
+                if img_name not in name_to_idx:
+                    print(f"WARNING: Image '{img_name}' not found in transforms data, trying base name match...")
+                    base_name = os.path.splitext(img_name)[0]
+                    found_match = False
+                    for transform_name in name_to_idx.keys():
+                        if os.path.splitext(transform_name)[0] == base_name:
+                            print(f"Found match: {transform_name} for {img_name}")
+                            idx = name_to_idx[transform_name]
+                            reordered_poses.append(poses[idx])
+                            reordered_cameras.append(cameras[idx])
+                            found_match = True
+                            break
+                    if not found_match:
+                        print("ERROR: No match found for", img_name)
+                        raise KeyError("Image '" + img_name + "' not found")
+                else:
+                    idx = name_to_idx[img_name]
+                    reordered_poses.append(poses[idx])
+                    reordered_cameras.append(cameras[idx])
 
             # Write reconstruction files with correct order
             write_cameras_file(reordered_cameras, sparse_path),
@@ -697,4 +722,4 @@ if __name__ == '__main__':
         # Using spatial matcher matcher for pose priors requires colmap db to be updated with poses
         update_colmap_db_with_pose_priors(colmap_db_path, os.path.join(sparse_path, "images.txt"))
     except Exception as e:
-        raise RuntimeError(f"Error converting pose priors: {e}") from e
+        raise RuntimeError("Error converting pose priors: " + str(e)) from e

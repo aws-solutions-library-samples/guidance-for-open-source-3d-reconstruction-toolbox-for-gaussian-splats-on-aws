@@ -44,19 +44,17 @@ provider "aws" {
   allowed_account_ids = [
     "${var.account_id}"
   ]
-  # Use below fields to input credentials (either hardcode or use credentials file)
-  #shared_credentials_files = ["/home/eecorn/.aws/credentials"]
-  #access_key = ""
-  #secret_key = ""
+  # Configure AWS credentials via environment variables, IAM roles, or AWS CLI
+  # See: https://registry.terraform.io/providers/hashicorp/aws/latest/docs#authentication-and-configuration
 }
 
-# Random string for unique resource suffix
+# Random string for unique resource suffix - not an API key
 resource "random_string" "tf_random_suffix" {
   length = 8
-  upper = false
+  upper = false  # gitleaks:allow
   lower  = true
-  numeric = true
-  special = false
+  numeric = true  # gitleaks:allow - not an API key, just a boolean flag
+  special = false # gitleaks:allow
 }
 
 # Base infrastructure deployment

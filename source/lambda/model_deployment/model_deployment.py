@@ -24,25 +24,28 @@ import os
 import tempfile
 import shutil
 import boto3
-import urllib.request
 import tarfile
 import json
-import urllib.parse
 import time
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
 
-def download_with_progress(url, destination):
+def download_with_progress(destination):
+    # Use hardcoded HTTPS URL for security - prevents file:// scheme vulnerabilities
+    # URL is not user-controllable to avoid arbitrary file access
+    url = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
     print(f"Starting download from {url}")
     start_time = time.time()
     
-    # Create a request with a user agent to avoid being blocked
+    # Create headers to avoid being blocked
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
-    req = urllib.request.Request(url, headers=headers)
     
-    # Open the URL and get file size
-    with urllib.request.urlopen(req) as response:
-        file_size = int(response.info().get('Content-Length', 0))
+    # Use urllib for file download - hardcoded HTTPS URL prevents file:// vulnerabilities
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=30) as response:  # nosemgrep: dynamic-urllib-use-detected
+        file_size = int(response.headers.get('Content-Length', 0))
         print(f"File size: {file_size / (1024 * 1024):.2f} MB")
         
         # Download the file with progress reporting
@@ -52,20 +55,20 @@ def download_with_progress(url, destination):
         
         with open(destination, 'wb') as f:
             while True:
-                buffer = response.read(block_size)
-                if not buffer:
+                chunk = response.read(block_size)
+                if not chunk:
                     break
-                
-                downloaded += len(buffer)
-                f.write(buffer)
+                downloaded += len(chunk)
+                f.write(chunk)
                 
                 # Report progress every 5%
-                progress = downloaded / file_size * 100
-                if progress - last_report >= 5:
-                    elapsed = time.time() - start_time
-                    speed = downloaded / elapsed / (1024 * 1024) if elapsed > 0 else 0
-                    print(f"Downloaded {downloaded / (1024 * 1024):.2f} MB of {file_size / (1024 * 1024):.2f} MB ({progress:.1f}%) - {speed:.2f} MB/s")
-                    last_report = progress // 5 * 5
+                if file_size > 0:
+                    progress = downloaded / file_size * 100
+                    if progress - last_report >= 5:
+                        elapsed = time.time() - start_time
+                        speed = downloaded / elapsed / (1024 * 1024) if elapsed > 0 else 0
+                        print(f"Downloaded {downloaded / (1024 * 1024):.2f} MB of {file_size / (1024 * 1024):.2f} MB ({progress:.1f}%) - {speed:.2f} MB/s")
+                        last_report = progress // 5 * 5
     
     elapsed = time.time() - start_time
     print(f"Download completed in {elapsed:.2f} seconds")
@@ -81,14 +84,13 @@ def handler(event, context):
         temp_dir = tempfile.mkdtemp()
         print(f"Created temporary directory: {temp_dir}")
         
-        # Define model URL and file path
-        model_url = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
+        # Define model file path
         model_filename = "sam2.1_hiera_large.pt"
         model_path = os.path.join(temp_dir, model_filename)
         
         # Download the model file directly
-        print(f"Downloading model from {model_url}")
-        download_with_progress(model_url, model_path)
+        print("Downloading model")
+        download_with_progress(model_path)
         
         # Verify the file was downloaded
         if os.path.exists(model_path):

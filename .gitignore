@@ -12,6 +12,7 @@ deployment/terraform/terraform.tfstate.backup
 deployment/terraform/outputs.json
 source/lambda/workflow_trigger/workflow_trigger.zip
 source/lambda/workflow_complete/workflow_complete.zip
+source/lambda/model_deployment/model_deployment.zip
 source/workflow-submissions
 source/containers/build-deploy-containers.log
 deployment/terraform/workflow-submissions/
