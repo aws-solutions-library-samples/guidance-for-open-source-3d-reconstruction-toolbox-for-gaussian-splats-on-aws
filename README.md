@@ -96,9 +96,7 @@ In this project, there is only one Docker container that contains all of the 3D 
 
 ### AWS account requirements
 
-An active AWS Account with IAM user or role with elevated permissions to deploy resources is required to deploy this guidance, along with either a local computer with appropriate AWS credentials to deploy the CDK or Terraform solution, or utilize an AWS EC2 workstation to build and deploy the CDK or Terraform solution. Instructions for doing this will be in the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
-
-Resources included in this deployment:
+An active AWS Account with IAM user or role with elevated permissions to deploy resources is required to deploy this guidance, along with either a local computer with appropriate AWS credentials to deploy the CDK or Terraform solution, or utilize an AWS EC2 workstation to build and deploy the CDK or Terraform solution. Please refer to the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.
 
 - EC2 (if choosing not to deploy infrastructure from your local computer)
 - IAM roles with permissions
@@ -109,26 +107,15 @@ Resources included in this deployment:
 - Lambda Functions
 - SageMaker Training Jobs
 - Step Functions State Machine
-- CDK (bootstrap instructions will be included in the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html))
+- CDK (Please refer to the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.)
 
 ### Service limits
 
 - [Service quotas](https://docs.aws.amazon.com/servicequotas/latest/userguide/intro.html) - increases can be requested via the AWS Management Console, AWS CLI, or AWS SDKs (see [Accessing Service Quotas](https://docs.aws.amazon.com/servicequotas/latest/userguide/intro.html#access))
 
-- (Optional) SageMaker Training Jobs uses a Docker container to run the training. This deployment guide walks through building a custom container image for SageMaker. You can optionally build and test this container locally (not running on SageMaker) on a GPU-enabled EC2 instance. If you plan to do this, increase the EC2 quota named "Running On-Demand G and VT instances" and/or "Running On-Demand P instances", depending on the instance family you plan to use, to a desired maximum number of vCPUs for running instances of the target family. Note, this is vCPUs NOT number of instances like the SageMaker Training Jobs quota.
-
-- Install and configure the AWS CLI (if not using the recommended EC2 deployment below)
-
-  - [Install or update the latest version of the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
-
-  - [Set up the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-quickstart.html) - create configuration and set up credentials
-
-- Install [Git](https://git-scm.com/) (if not using the recommended EC2 deployment below)
-
-- [Docker](https://docs.docker.com/get-docker/) installed (if not using the recommended EC2 deployment below)
-  - N.B. [`buildx`](https://github.com/docker/buildx) is also required. For Windows and macOS `buildx` [is included](https://github.com/docker/buildx#windows-and-macos) in [Docker Desktop](https://docs.docker.com/desktop/)
-  - Docker is required to build the container image that is used for training the splat. This will require at least 20GB of empty disk space on your deployment machine.
-    > _Note: If building on Windows or MacOS and receive the below error, set the number of logical processors to 1. Also, it is recommended to use the EC2 Ubuntu deployment method below to mitigate this error._
+- This solution runs SageMaker Training Jobs which uses a Docker container to run the training. This deployment guide walks through building a custom container image for SageMaker.
+  - Depending on what instances you will be using to train on (configured during job submission, ml.g5.4xlarge is the default), you may need to adjust the SageMaker Training Jobs quota. This will be under the SageMaker service in Service Quotas named "training job usage".
+  - (Optional) You can optionally build and test this container locally (not running on SageMaker) on a GPU-enabled EC2 instance. If you plan to do this, increase the EC2 quota named "Running On-Demand G and VT instances" and/or "Running On-Demand P instances", depending on the instance family you plan to use, to a desired maximum number of vCPUs for running instances of the target family. Note, this is vCPUs NOT number of instances like the SageMaker Training Jobs quota.
 
 ## Cost
 
@@ -158,6 +145,19 @@ The following table provides a sample cost breakdown for deploying this Guidance
 
 **TO DO: update with Live link when published**
 For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
+
+## Security
+**Considerations**
+
+At the time of publishing, the codebase was scanned using Semgrep, Bandit, Checkov, and Gitleaks. The following table outlines all security issues flagged as ERROR or CRITICAL with an explanation. 
+
+| Level   | Classification  | Source       | Rule ID                             | Cause                                                                                                  | Explanation                                                                                                                                                              |
+| ------- | --------------- | ------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Error   | False Positive  | Bandit       | B202 tarfile.extractall             | tarfile.extractall used without any validation. Please check and discard dangerous members             | This is a zipfile extraction (not tarfile), and the input file path is validated earlier in the code, making it safe from directory traversal attacks.                                                                                          |
+| Error   | False Positive  | Semgrep      | 590 dangerous-subprocess-use-audit  | Detected subprocess function 'run' without a static string. If this data can be controlled by a malicious actor, it may be an instance of command injection | The subprocess call is already validated - it uses a list of arguments (preventing shell injection) and all parameters are validated before use, making it safe from command injection attacks. |
+| Error   | False Positive  | Semgrep      | 98 sqlalchemy-execute-raw-query     | Avoiding SQL string concatenation: untrusted input concatenated with raw SQL query can result in SQL Injection | The query is already validated with proper table name escaping, making it safe from SQL injection attacks.                                                                                                                               |
+| Error   | False Positive  | Semgrep      | 93 sqlalchemy-execute-raw-query     | Avoiding SQL string concatenation: untrusted input concatenated with raw SQL query can result in SQL Injection | The query is already validated with proper table name escaping and validation, making it safe from SQL injection attacks.                                                                                                                   |
+| Error   | False Positive  | Gitleaks     | 54 generic-api-key : fingerprint    | API Key found | This is not an API key but just a random prefix for the project components                                                                                                                                                               |
 
 ## Next Steps
 
