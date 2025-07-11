@@ -609,7 +609,7 @@ def create_advanced_settings_tab():
                 max_images = gr.Number(
                 label="Max Images",
                 value=300,
-                minimum=50,
+                minimum=1,
                 maximum=1000
                 )
         with gr.Row():

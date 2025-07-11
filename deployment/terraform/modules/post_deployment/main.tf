@@ -72,15 +72,7 @@ resource "null_resource" "docker_packaging" {
   }
 
   provisioner "local-exec" {
-    command = "docker build -t ${local.repo_name}:latest -f ${path.root}/../../source/container/Dockerfile ${path.root}/../../source/container/"
-  }
-
-  provisioner "local-exec" {
-    command = "docker tag ${local.repo_name}:latest ${local.ecr_repo_url}:latest"
-  }
-
-  provisioner "local-exec" {
-    command = "docker push ${local.ecr_repo_url}:latest"
+    command = "TIMESTAMP=$(date +%Y%m%d%H%M%S) && docker build -t ${local.repo_name}:$TIMESTAMP -f ${path.root}/../../source/container/Dockerfile ${path.root}/../../source/container/ && docker tag ${local.repo_name}:$TIMESTAMP ${local.ecr_repo_url}:$TIMESTAMP && docker tag ${local.repo_name}:$TIMESTAMP ${local.ecr_repo_url}:latest && docker push ${local.ecr_repo_url}:$TIMESTAMP && (docker push ${local.ecr_repo_url}:latest || true)"
   }
 }
 

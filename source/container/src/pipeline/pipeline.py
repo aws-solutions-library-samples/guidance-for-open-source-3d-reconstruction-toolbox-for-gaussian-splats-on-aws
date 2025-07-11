@@ -26,7 +26,6 @@ import logging
 import enum
 import subprocess
 import traceback
-import shlex
 from typing import List
 from rich.logging import RichHandler
 
