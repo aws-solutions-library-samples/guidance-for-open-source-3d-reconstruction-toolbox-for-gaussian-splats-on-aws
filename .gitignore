@@ -1,7 +1,6 @@
 deployment/cdk/cdk.out
 deployment/cdk/node_modules
 deployment/cdk/package-lock.json
-deployment/cdk/outputs.json
 deployment/cdk/stacks/__pycache__
 deployment/cdk/stacks/components/__pycache__/
 deployment/terraform/.terraform
@@ -9,7 +8,6 @@ deployment/terraform/.terraform.lock.hcl
 deployment/terraform/.terraform.tfstate.lock.info
 deployment/terraform/terraform.tfstate
 deployment/terraform/terraform.tfstate.backup
-deployment/terraform/outputs.json
 source/lambda/workflow_trigger/workflow_trigger.zip
 source/lambda/workflow_complete/workflow_complete.zip
 source/lambda/model_deployment/model_deployment.zip
