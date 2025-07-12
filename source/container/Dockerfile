@@ -226,6 +226,8 @@ WORKDIR ${CODE_PATH}
 RUN pip install git+https://github.com/nerfstudio-project/gsplat.git
 
 # Install latest Splatfacto-w (in the wild) model and download repo to expose splat export script
+# Warning: This will down-grade gsplat to the version it supports. Future work will isolate dep versions
+# from the functionality
 RUN git clone https://github.com/KevinXu02/splatfacto-w
 RUN pip install git+https://github.com/KevinXu02/splatfacto-w
 

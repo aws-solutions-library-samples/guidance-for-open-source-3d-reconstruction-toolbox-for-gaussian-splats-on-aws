@@ -124,11 +124,17 @@ def check_for_timeout(training_job_name):
 
 def is_sfm_failure(message):
     """Check if the message indicates an SFM reconstruction failure."""
-    if ('Command \'glomap mapper\'' in message and 
-        'failed with return code -11' in message and 
-        'glomap::ViewGraph::KeepLargestConnectedComponents' in message and 
-        'SIGSEGV' in message):
-        print("SFM failure detected!")  # Debug log
+    # Check for various SFM failure patterns
+    sfm_patterns = [
+        'torch.multinomial',
+        'gsplat/strategy/ops.py',
+        '_multinomial_sample',
+        'glomap::ViewGraph::KeepLargestConnectedComponents',
+        'Command \'glomap mapper\'' and 'failed with return code -11'
+    ]
+    
+    if any(pattern in message for pattern in sfm_patterns):
+        print(f"SFM failure detected in message: {message[:100]}...")  # Debug log
         return True
     return False
 
@@ -312,10 +318,9 @@ def get_cloudwatch_logs(training_job_name):
             - Verify image quality before processing
 
             Technical Details:
-            - Error: ViewGraph Component Connection Failure
-            - Component: glomap::ViewGraph::KeepLargestConnectedComponents
-            - Exit Code: -11
-            - Status: Process terminated with SIGSEGV"""
+            - Error: SFM reconstruction failure during Gaussian optimization
+            - Component: torch.multinomial sampling in gsplat strategy
+            - Status: Process terminated during training"""
                     error_messages.append(sfm_error_message)
                     found_error = True
                     break
@@ -575,56 +580,39 @@ This is an automated message from the Splat Processing System"""
         
         error_message = container_logs.get('message', '')
         
-        # Check if this is an SFM failure
+        # Handle error cases with detailed logging
+        error_details = {
+            'statusCode': 500,
+            'body': {
+                'status': 'Failed',
+                'containerError': container_logs['message'] if container_logs.get('status') == 'ERROR' else 'No container errors found',
+                'error': str(e) if not error else error
+            }
+        }
+        
+        # Check if this is an SFM failure for specialized messaging
         if container_logs.get('status') == 'ERROR' and 'Structure from Motion (SFM) Reconstruction Failed' in error_message:
-            error_details = {
-                'statusCode': 500,
-                'body': {
-                    'status': 'Failed',
-                    'error_type': 'SFM_FAILURE',
-                    'containerError': error_message,
-                    'error': str(e) if not error else error
-                }
-            }
-            
-            message_text = f"""⚠️ Structure from Motion (SFM) Processing Error
-
-    Failed to process file: {event['envVars']['FILENAME']}
-
-    {error_message}
-
-    Additional Details:
-    {json.dumps(error_details, indent=2)[:1000]}
-
-    ------------------------------------------
-    This is an automated message from the Splat Processing System"""
+            error_details['body']['error_type'] = 'SFM_FAILURE'
+            subject_prefix = "⚠️ Structure from Motion (SFM) Processing Error"
         else:
-            # Handle other types of errors as before
-            error_details = {
-                'statusCode': 500,
-                'body': {
-                    'status': 'Failed',
-                    'containerError': container_logs['message'] if container_logs.get('status') == 'ERROR' else 'No container errors found',
-                    'error': str(e) if not error else error
-                }
-            }
+            subject_prefix = "⚠️ Splat Processing Error"
             
-            message_text = f"""⚠️ Splat Processing Error
+        message_text = f"""{subject_prefix}
 
-    Failed to process file: {event['envVars']['FILENAME']}
+Failed to process file: {event['envVars']['FILENAME']}
 
-    ❌ Container Error Details:
-    {container_logs['message'][:50000] if container_logs.get('status') == 'ERROR' else 'No container errors found'}
+❌ Container Error Details:
+{container_logs['message'][:50000] if container_logs.get('status') == 'ERROR' else 'Job failed: AlgorithmError: , exit code: 1'}
 
-    ❌ Additional Error Information:
-    {json.dumps(error_details, indent=2)[:10000]}
+❌ Additional Error Information:
+{json.dumps(error_details, indent=2)[:10000]}
 
-    ------------------------------------------
-    This is an automated message from the Splat Processing System"""
+------------------------------------------
+This is an automated message from the Splat Processing System"""
 
         # Publish the error message
         response = sns_client.publish(
             TargetArn=sns_topic_arn,
             Message=message_text,
-            Subject=f"⚠️ Splat Processing Error: {event['envVars']['UUID']}",
+            Subject=f"{subject_prefix}: {event['envVars']['UUID']}",
         )

@@ -51,7 +51,7 @@ class GSWorkflowBaseStack(Stack):
             env: Environment,
             config_data: dict,
             **kwargs) -> None:
-        super().__init__(scope, id, **kwargs)
+        super().__init__(scope, id, env=env, **kwargs)
 
         # Initialize Ids and Variables
         self.prefix = config_data['constructNamePrefix']

@@ -428,6 +428,41 @@ if __name__ == "__main__":
 
     # Store the full list of GPUs
     os.environ['CUDA_VISIBLE_DEVICES'] = count_up_to(int(pipeline.config.num_gpus))
+    
+    # Configure multi-GPU distributed training
+    if int(pipeline.config.num_gpus) > 1:
+        # Read SageMaker resource config for multi-container setup
+        resource_config_path = '/opt/ml/input/config/resourceconfig.json'
+        if os.path.exists(resource_config_path):
+            with open(resource_config_path, 'r') as f:
+                resource_config = json.load(f)
+            
+            hosts = resource_config.get('hosts', ['algo-1'])
+            current_host = resource_config.get('current_host', 'algo-1')
+            network_interface = resource_config.get('network_interface_name', 'eth0')
+            
+            log.info(f"DEBUG: Resource config - hosts: {hosts}, current: {current_host}, interface: {network_interface}")
+            
+            # Set distributed training environment variables
+            os.environ['MASTER_ADDR'] = hosts[0]  # First host is master
+            os.environ['MASTER_PORT'] = '29500'  # Use standard PyTorch distributed port
+            os.environ['WORLD_SIZE'] = str(len(hosts))
+            os.environ['RANK'] = str(hosts.index(current_host))
+            os.environ['LOCAL_RANK'] = '0'  # Single GPU per container
+            
+            log.info(f"DEBUG: Multi-container setup - MASTER_ADDR={os.environ['MASTER_ADDR']}, MASTER_PORT={os.environ['MASTER_PORT']}, WORLD_SIZE={os.environ['WORLD_SIZE']}, RANK={os.environ['RANK']}")
+        else:
+            # Single instance multi-GPU setup
+            os.environ['MASTER_ADDR'] = 'localhost'
+            os.environ['MASTER_PORT'] = '29500'  # Use standard PyTorch distributed port
+            os.environ['WORLD_SIZE'] = '1'
+            os.environ['RANK'] = '0'
+            os.environ['LOCAL_RANK'] = '0'
+            
+            log.info(f"DEBUG: Single instance multi-GPU - MASTER_ADDR={os.environ['MASTER_ADDR']}, MASTER_PORT={os.environ['MASTER_PORT']}, WORLD_SIZE={os.environ['WORLD_SIZE']}")
+    else:
+        log.info("DEBUG: Single GPU setup, no distributed training configuration needed")
+    
     GPU_MAX_IMAGES = 500 # est at 4k
 
     ##################################

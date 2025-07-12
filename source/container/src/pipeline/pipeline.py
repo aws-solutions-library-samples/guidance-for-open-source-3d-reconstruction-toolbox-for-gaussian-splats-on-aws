@@ -102,7 +102,7 @@ class Pipeline:
             handlers = [
                 RichHandler(),
                 logging.FileHandler(f"{self.config.name}-pipeline-log"),
-                logging.StreamHandler(sys.stdout)
+                #logging.StreamHandler(sys.stdout)
             ]
         )
     class Config:
@@ -211,8 +211,6 @@ class Pipeline:
                 cmd_args.append(arg)
                 
         self.session.log.info(f"Component command: {cmd_args}")
-        if 'CUDA_VISIBLE_DEVICES' in env:
-            self.session.log.info(f"Using CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']}")
             
         try:
             # Subprocess call is secure: uses list format (not shell=True) with validated arguments

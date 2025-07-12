@@ -38,9 +38,6 @@ from aws_cdk import (
 from constructs import Construct
 import os
 import json
-import subprocess
-import tempfile
-import shutil
 
 class GSWorkflowPostDeployStack(Stack):
     """Class for Post Deploy Infrastructure Stack"""
@@ -54,7 +51,7 @@ class GSWorkflowPostDeployStack(Stack):
             build_args: dict,
             dockerfile_path: str,
             **kwargs) -> None:
-        super().__init__(scope, id, **kwargs)
+        super().__init__(scope, id, env=env, **kwargs)
 
         try:
             # Initialize Ids and Variables
