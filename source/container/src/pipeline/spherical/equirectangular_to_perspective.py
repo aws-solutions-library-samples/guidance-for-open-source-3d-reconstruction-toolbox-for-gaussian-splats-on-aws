@@ -245,8 +245,8 @@ def get_node_image_paths(data_dir, source_frame, angles_horiz, perspectives):
 def get_oval_node_paths(data_dir, center_frame, neighbor_frames, angles_horiz, perspectives):
     """Generate oval view node paths using center frame and neighbors for temporal translation.
     
-    Creates an elliptical camera path by alternating between center frame and neighboring frames
-    to provide better parallax for SfM convergence.
+    Creates an elliptical camera path by using different temporal frames for different angles
+    while maintaining the original perspective ordering.
     
     Args:
         data_dir: Base data directory
@@ -260,21 +260,37 @@ def get_oval_node_paths(data_dir, center_frame, neighbor_frames, angles_horiz, p
     """
     paths = []
     
-    # Ensure neighbor frames exist, fallback to center frame if not
-    prev_frame = neighbor_frames[0] if len(neighbor_frames) > 0 else center_frame
-    next_frame = neighbor_frames[1] if len(neighbor_frames) > 1 else center_frame
+    # Validate neighbor frames have required connective images, fallback to center frame if not
+    def validate_frame(frame_name, perspective):
+        test_path = os.path.join(data_dir, frame_name, "filtered_imgs", 
+                                f"pers_imgs_{angles_horiz[0]}_horiz",
+                                f"{frame_name}_perspective_{perspective:02d}.png")
+        return os.path.exists(test_path)
     
+    # Check if neighbor frames have all required perspective images
+    def validate_all_perspectives(frame_name, perspectives):
+        for perspective in perspectives:
+            if not validate_frame(frame_name, perspective):
+                return False
+        return True
+    
+    prev_frame = neighbor_frames[0] if len(neighbor_frames) > 0 and validate_all_perspectives(neighbor_frames[0], perspectives) else center_frame
+    next_frame = neighbor_frames[1] if len(neighbor_frames) > 1 and validate_all_perspectives(neighbor_frames[1], perspectives) else center_frame
+    
+    # Create frame assignment for each angle to create oval pattern
+    frame_assignments = []
+    for i, angle in enumerate(angles_horiz):
+        if i % 3 == 0:
+            frame_assignments.append(center_frame)  # Primary position
+        elif i % 3 == 1:
+            frame_assignments.append(prev_frame)    # Temporal offset backward
+        else:
+            frame_assignments.append(next_frame)    # Temporal offset forward
+    
+    # Generate paths maintaining original perspective ordering
     for perspective in perspectives:
         for i, angle in enumerate(angles_horiz):
-            # Create oval pattern: alternate between center, prev, next frames
-            # This creates temporal translation along the viewing circle
-            if i % 3 == 0:
-                frame_source = center_frame  # Primary position
-            elif i % 3 == 1:
-                frame_source = prev_frame    # Temporal offset backward
-            else:
-                frame_source = next_frame    # Temporal offset forward
-                
+            frame_source = frame_assignments[i]
             paths.append(os.path.join(data_dir, frame_source, "filtered_imgs",
                                     f"pers_imgs_{angle}_horiz",
                                     f"{frame_source}_perspective_{perspective:02d}.png"))
@@ -416,7 +432,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '-oval', '--use_oval_nodes',
         required=False,
-        default='false',
+        default='true',
         action='store',
         help='Whether to use oval view node paths for better SfM convergence (default is "true")'
     )
@@ -575,8 +591,29 @@ if __name__ == '__main__':
 
                         # Generate "connective images" between change in views to increase sfm convergence
                         if optimize_seq_spherical_frames is True:
-                            if filename in [start_frame_filename, stop_frame_filename, middle_frame_filename, 
-                                          frame_20_filename, frame_40_filename, frame_60_filename, frame_80_filename]:
+                            # Include neighbor frames for oval view nodes if enabled
+                            key_frames = [start_frame_filename, stop_frame_filename, middle_frame_filename, 
+                                        frame_20_filename, frame_40_filename, frame_60_filename, frame_80_filename]
+                            
+                            # Add neighbor frames for oval nodes
+                            if use_oval_nodes:
+                                # Add neighbors of key insertion frames
+                                neighbor_indices = set()
+                                for pct in [0.2, 0.4, 0.6, 0.8]:
+                                    idx = int(len(filenames) * pct)
+                                    # Add previous and next frames if they exist
+                                    if idx > 0:
+                                        neighbor_indices.add(idx - 1)
+                                    if idx < len(filenames) - 1:
+                                        neighbor_indices.add(idx + 1)
+                                
+                                # Convert indices to filenames and add to key_frames
+                                neighbor_frames = [filenames[i] for i in neighbor_indices]
+                                unique_neighbors = list(set(neighbor_frames))
+                                key_frames.extend(unique_neighbors)
+                                log.info(f"Generating connective images for oval neighbor frames: {unique_neighbors}")
+                            
+                            if filename in key_frames:
                                 # Horizontal Connective Images
                                 for angle in angles_horiz:
                                     pers_img_dir_horiz = os.path.join(filtered_img_dir, f"pers_imgs_{str(angle)}_horiz")
@@ -768,7 +805,8 @@ if __name__ == '__main__':
                                         shutil.copy(persp_image_path, destination_path)
                                         file_count = file_count + 1
                                     else:
-                                        raise RuntimeError(f"Error: {persp_image_path} is not a valid file path.")
+                                        log.warning(f"Skipping missing connective image: {persp_image_path}")
+                                        # Skip missing files instead of raising error
 
                             # Apply reverse_file_order to down view after all processing
                             if view == "down":
