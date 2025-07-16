@@ -35,7 +35,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 class SharedState:
     def __init__(self):
-        self.s3_bucket = "3dgs-bucket-bqmst2"
+        self.s3_bucket = ""
         self.s3_input = "workflow-input"
         self.s3_output = "workflow-output"
         self.media_input = "media-input"
