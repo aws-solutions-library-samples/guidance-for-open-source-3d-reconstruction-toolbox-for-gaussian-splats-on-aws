@@ -171,7 +171,7 @@ By leveraging other AWS services, you can further enhance your workflow to scale
 
 ## License
 
-This library is licensed under the MIT-0 License. See the LICENSE file.
+This library is licensed under the MIT-0 License. See the [LICENSE](./LICENSE) file.
 
 ## Authors
 
