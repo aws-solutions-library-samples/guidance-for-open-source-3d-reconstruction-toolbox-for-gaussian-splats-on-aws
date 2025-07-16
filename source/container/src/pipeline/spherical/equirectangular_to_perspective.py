@@ -18,14 +18,88 @@
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY
 
-""" This script will mask/remove parts of a 360/spherical/equirectangular image
-# based on cubemap face structure. It will then reproject a directory of ERP images into
-# perspective images that are masked (.png) """
+""" 
+EQUIRECTANGULAR TO PERSPECTIVE IMAGE SEQUENCE OPTIMIZER
+AUTHOR: ERIC CORNWELL
+
+This script transforms equirectangular (360°) images into optimized perspective image sequences
+for Structure-from-Motion (SfM) processing. The algorithm addresses the challenge of creating
+spatially and temporally consistent image sequences from spherical imagery.
+
+ALGORITHM OVERVIEW:
+==================
+
+1. EQUIRECTANGULAR TO CUBEMAP CONVERSION:
+   - Converts each ERP image to 6 cubemap faces (front, back, left, right, up, down)
+   - Applies optional face filtering to remove unwanted views
+   - Reconstructs filtered ERP images from modified cubemaps
+
+2. CONNECTIVE IMAGE GENERATION:
+   - Generates perspective images at multiple horizontal angles (15°, 30°, 45°, 60°)
+   - Generates perspective images at multiple vertical angles (0° to 135°)
+   - Creates images for key frames: start (0%), middle (50%), end (100%)
+   - Creates additional frames at insertion distances: 20%, 40%, 60%, 80%
+
+3. VIEW-BASED SEQUENCE ORGANIZATION:
+   - Reorganizes images by cubemap face rather than temporal sequence
+   - Creates separate directories for each view: left, front, right, back, up, down
+   - Optimizes view order for sequential SfM matching
+
+4. VIEW NODE INSERTION (SPATIAL CONSISTENCY):
+   Each view gets "node images" inserted at specific positions to improve spatial continuity:
+   
+   - LEFT VIEW (20% insertion):
+     * Uses frame at 20% position as source
+     * Inserts 16 perspective images (4 angles × 4 perspectives)
+     * Perspectives: 04→03→02→01 (reverse order)
+   
+   - BACK VIEW (40% insertion):
+     * Uses frame at 40% position as source  
+     * Reverses file order first, then adjusts insertion to 60% of reversed sequence
+     * Inserts 16 perspective images (4 angles × 4 perspectives)
+     * Perspectives: 04→01→02→03
+   
+   - RIGHT VIEW (60% insertion):
+     * Uses frame at 60% position as source
+     * Inserts 16 perspective images (4 angles × 4 perspectives) 
+     * Perspectives: 02→01→04→03 (reverse angle order)
+   
+   - FRONT VIEW (80% insertion):
+     * Uses frame at 80% position as source
+     * Reverses file order first, then adjusts insertion to 20% of reversed sequence
+     * Inserts 16 perspective images (4 angles × 4 perspectives)
+     * Perspectives: 02→03→04→01
+   
+   - UP/DOWN VIEWS:
+     * UP: Rotates images 90°, adds vertical connective images
+     * DOWN: Rotates images -90°, reverses order after processing
+
+5. CONNECTIVE IMAGE INSERTION:
+   - Adds transition images between views to improve feature matching
+   - Uses images from temporally adjacent frames (first/last)
+   - Appends to end of each view sequence
+
+6. FINAL SEQUENCE ASSEMBLY:
+   - Reorders views: Left→Front→Right→Back→Up→Down
+   - Renumbers all images sequentially (00001, 00002, etc.)
+   - Creates final optimized sequence for SfM processing
+
+SPATIAL CONSISTENCY PRINCIPLE:
+=============================
+The algorithm ensures that view nodes use source images from frames that correspond
+to their insertion position in the temporal sequence. This maintains spatial coherence:
+- 20% insertion uses 20% frame source
+- 40% insertion uses 40% frame source  
+- 60% insertion uses 60% frame source
+- 80% insertion uses 80% frame source
+
+This approach significantly improves SfM convergence by providing spatially consistent
+feature correspondences across the optimized image sequence.
+"""
 
 import os
 import re
 import cv2
-import sys
 import math
 import argparse
 import torch
@@ -34,19 +108,12 @@ from imageio.v2 import imread, imwrite
 import Equirec2Cube
 from PIL import Image
 import py360convert
-import ast
 import subprocess
 import multiprocessing
 import shutil
 import glob
 import logging
 from rich.logging import RichHandler
-
-def arg_as_list(s):
-    v = ast.literal_eval(s)                                                    
-    if type(v) is not list:                                                    
-        raise argparse.ArgumentTypeError("Argument \"%s\" is not a list" % (s))
-    return v
 
 def reverse_file_order(directory_path):
     """
@@ -60,16 +127,16 @@ def reverse_file_order(directory_path):
         # Get list of files and sort them
         files = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
         files.sort()
-        
+
         # Create temporary directory
         temp_dir = os.path.join(directory_path, 'temp_reverse')
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir)
-            
+
         # Get the total number of files and adjust for zero-based naming
         total_files = len(files) - 1  # Subtract 1 to account for starting at 0
         width = len(files[0].split('.')[0])  # Get width of number portion
-        
+
         # Rename files in reverse order to temp directory
         for i, filename in enumerate(files):
             name, ext = os.path.splitext(filename)
@@ -77,13 +144,13 @@ def reverse_file_order(directory_path):
             old_path = os.path.join(directory_path, filename)
             temp_path = os.path.join(temp_dir, new_name)
             shutil.copy2(old_path, temp_path)
-            
+
         # Move files back to original directory
         for filename in os.listdir(temp_dir):
             temp_path = os.path.join(temp_dir, filename)
             new_path = os.path.join(directory_path, filename)
             shutil.move(temp_path, new_path)
-            
+
         # Remove temporary directory
         os.rmdir(temp_dir)
     except Exception as e:
@@ -116,7 +183,7 @@ def rotate_images(path, angle):
     else:
         print(f"Error: {path} is not a valid file or directory")
         return
-    
+
     for image_path in image_files:
         print(f"Processing: {image_path}")
         img = cv2.imread(image_path)
@@ -140,6 +207,160 @@ def rotate_images(path, angle):
             print(f"Rotated: {image_path}")
         else:
             print(f"Failed to save: {os.path.basename(image_path)}")
+
+def insert_view_node(view_subfolder, node_image_paths, insertion_index, view_num_len, tail, log):
+    """Insert view node images at specified position in sequence."""
+    current_files = [f for f in os.listdir(view_subfolder) if f.endswith(tail)]
+
+    # Shift existing files after insertion point to make room
+    current_files.sort(reverse=True)
+    for existing_file in current_files:
+        file_num = int(os.path.splitext(existing_file)[0])
+        if file_num >= insertion_index:
+            old_path = os.path.join(view_subfolder, existing_file)
+            new_path = os.path.join(view_subfolder, f"{file_num + len(node_image_paths):0{view_num_len}d}{tail}")
+            shutil.move(old_path, new_path)
+
+    # Insert node images
+    for i, node_image_path in enumerate(node_image_paths):
+        if node_image_path and os.path.isfile(node_image_path):
+            destination_path = os.path.join(view_subfolder, f"{insertion_index + i:0{view_num_len}d}{tail}")
+            log.info(f"Copying {node_image_path} to {destination_path}")
+            shutil.copy(node_image_path, destination_path)
+        elif node_image_path:
+            raise RuntimeError(f"Error: {node_image_path} is not a valid file path.")
+
+def get_node_image_paths(data_dir, source_frame, angles_horiz, perspectives):
+    """Generate list of node image paths for given frame and perspectives."""
+    paths = []
+    # Generate paths in the correct order: all angles for perspective 1,
+    # then all angles for perspective 2, etc.
+    for perspective in perspectives:
+        for angle in angles_horiz:
+            paths.append(os.path.join(data_dir, source_frame, "filtered_imgs",
+                                    f"pers_imgs_{angle}_horiz",
+                                    f"{source_frame}_perspective_{perspective:02d}.png"))
+    return paths
+
+def get_oval_node_paths(data_dir, center_frame, neighbor_frames, angles_horiz, perspectives):
+    """Generate oval view node paths using center frame and neighbors for temporal translation.
+    
+    Creates an elliptical camera path by alternating between center frame and neighboring frames
+    to provide better parallax for SfM convergence.
+    
+    Args:
+        data_dir: Base data directory
+        center_frame: Primary frame at insertion position
+        neighbor_frames: List of neighboring frame names [prev, next]
+        angles_horiz: Horizontal angles list
+        perspectives: Perspective numbers list
+    
+    Returns:
+        List of image paths creating oval camera motion
+    """
+    paths = []
+    
+    # Ensure neighbor frames exist, fallback to center frame if not
+    prev_frame = neighbor_frames[0] if len(neighbor_frames) > 0 else center_frame
+    next_frame = neighbor_frames[1] if len(neighbor_frames) > 1 else center_frame
+    
+    for perspective in perspectives:
+        for i, angle in enumerate(angles_horiz):
+            # Create oval pattern: alternate between center, prev, next frames
+            # This creates temporal translation along the viewing circle
+            if i % 3 == 0:
+                frame_source = center_frame  # Primary position
+            elif i % 3 == 1:
+                frame_source = prev_frame    # Temporal offset backward
+            else:
+                frame_source = next_frame    # Temporal offset forward
+                
+            paths.append(os.path.join(data_dir, frame_source, "filtered_imgs",
+                                    f"pers_imgs_{angle}_horiz",
+                                    f"{frame_source}_perspective_{perspective:02d}.png"))
+    return paths
+
+def process_view(view, view_subfolder, data_dir, angles_horiz, angles_vert, 
+                original_file_count, view_num_len, tail, frame_names, log):
+    """Process a specific view with its node insertion and connective images."""
+    persp_image_paths = []
+    
+    if view == "left":
+        insertion_distance = 1/5  # 20%
+        insertion_index = int(original_file_count * insertion_distance)
+        if frame_names.get('use_oval', False):
+            node_paths = get_oval_node_paths(data_dir, frame_names['frame_20'], frame_names['neighbors_20'], angles_horiz[::-1], [4, 3, 2, 1])
+        else:
+            node_paths = get_node_image_paths(data_dir, frame_names['frame_20'], angles_horiz[::-1], [4, 3, 2, 1])
+        insert_view_node(view_subfolder, node_paths, insertion_index, view_num_len, tail, log)
+        # LEFT-TO-FRONT connective images
+        for angle in angles_horiz:
+            persp_image_paths.append(os.path.join(data_dir, frame_names['last'], "filtered_imgs",
+                                                f"pers_imgs_{angle}_horiz", f"{frame_names['last']}_perspective_01.png"))
+    
+    elif view == "back":
+        insertion_distance = 2/5  # 40%
+        insertion_index = int(original_file_count * insertion_distance)
+        reverse_file_order(view_subfolder)
+        # Adjust for reversed order
+        insertion_index = int(original_file_count * (1 - insertion_distance))
+        if frame_names.get('use_oval', False):
+            node_paths = get_oval_node_paths(data_dir, frame_names['frame_40'], frame_names['neighbors_40'], angles_horiz, [4, 1, 2, 3])
+        else:
+            node_paths = get_node_image_paths(data_dir, frame_names['frame_40'], angles_horiz, [4, 1, 2, 3])
+        insert_view_node(view_subfolder, node_paths, insertion_index, view_num_len, tail, log)
+        # BACK-to-UP connective images
+        rev_angles_vert = angles_vert[::-1][4:-1]
+        for angle in rev_angles_vert:
+            persp_image_paths.append(os.path.join(data_dir, frame_names['first'], "filtered_imgs",
+                                                f"pers_imgs_{angle}_vert", f"{frame_names['first']}_perspective_04.png"))
+    
+    elif view == "front":
+        insertion_distance = 4/5  # 80%
+        reverse_file_order(view_subfolder)
+        insertion_index = int(original_file_count * (1 - insertion_distance))
+        if frame_names.get('use_oval', False):
+            node_paths = get_oval_node_paths(data_dir, frame_names['frame_80'], frame_names['neighbors_80'], angles_horiz, [2, 3, 4, 1])
+        else:
+            node_paths = get_node_image_paths(data_dir, frame_names['frame_80'], angles_horiz, [2, 3, 4, 1])
+        insert_view_node(view_subfolder, node_paths, insertion_index, view_num_len, tail, log)
+        # FRONT-TO-RIGHT connective images
+        rev_angles_horiz = angles_horiz[::-1]
+        for angle in rev_angles_horiz:
+            persp_image_paths.append(os.path.join(data_dir, frame_names['first'], "filtered_imgs",
+                                                f"pers_imgs_{angle}_horiz", f"{frame_names['first']}_perspective_01.png"))
+        for angle in rev_angles_horiz:
+            persp_image_paths.append(os.path.join(data_dir, frame_names['first'], "filtered_imgs",
+                                                f"pers_imgs_{angle}_horiz", f"{frame_names['first']}_perspective_04.png"))
+        for angle in rev_angles_horiz:
+            persp_image_paths.append(os.path.join(data_dir, frame_names['first'], "filtered_imgs",
+                                                f"pers_imgs_{angle}_horiz", f"{frame_names['first']}_perspective_03.png"))
+    
+    elif view == "right":
+        insertion_distance = 0.6  # 60%
+        insertion_index = int(original_file_count * insertion_distance)
+        if frame_names.get('use_oval', False):
+            node_paths = get_oval_node_paths(data_dir, frame_names['frame_60'], frame_names['neighbors_60'], angles_horiz[::-1], [2, 1, 4, 3])
+        else:
+            node_paths = get_node_image_paths(data_dir, frame_names['frame_60'], angles_horiz[::-1], [2, 1, 4, 3])
+        insert_view_node(view_subfolder, node_paths, insertion_index, view_num_len, tail, log)
+        # RIGHT-TO-BACK connective images
+        for angle in angles_horiz:
+            persp_image_paths.append(os.path.join(data_dir, frame_names['last'], "filtered_imgs",
+                                                f"pers_imgs_{angle}_horiz", f"{frame_names['last']}_perspective_03.png"))
+    
+    elif view == "up":
+        rotate_images(view_subfolder, 90)
+        # UP-TO-DOWN connective images
+        for angle in angles_vert[1:]:
+            filename = os.path.join(data_dir, frame_names['last'], "filtered_imgs", f"pers_imgs_{angle}_vert", f"{frame_names['last']}_perspective_02.png")
+            rotate_images(filename, 180)
+            persp_image_paths.append(filename)
+    
+    elif view == "down":
+        rotate_images(view_subfolder, -90)
+    
+    return persp_image_paths
 
 if __name__ == '__main__':
     # Create Argument Parser with Rich Formatter
@@ -175,7 +396,7 @@ if __name__ == '__main__':
         action='store',
         help='Whether to enable optimization of spherical video frames to help solve SfM (default is "true")'
     )
-    
+
     parser.add_argument(
         '-gpu', '--use_gpu',
         required=False,
@@ -191,6 +412,14 @@ if __name__ == '__main__':
         action='store',
         help='Level of logs to write to stdout (default is "info", can be "error" or "debug")'
     )
+    
+    parser.add_argument(
+        '-oval', '--use_oval_nodes',
+        required=False,
+        default='false',
+        action='store',
+        help='Whether to use oval view node paths for better SfM convergence (default is "true")'
+    )
 
     args = parser.parse_args()
 
@@ -202,12 +431,8 @@ if __name__ == '__main__':
         level = logging.ERROR
     logging.basicConfig(
         level = level, 
-        format = "%(asctime)s %(message)s",
-        datefmt = "%m/%d/%Y %I:%M:%S %p",
-        handlers = [
-            RichHandler(),
-            logging.StreamHandler(sys.stdout)
-        ]
+        format = "%(message)s",
+        handlers = [RichHandler()]
     )
     log = logging.getLogger()
 
@@ -227,9 +452,14 @@ if __name__ == '__main__':
 
     # If you need to use GPU to accelerate (especially for the need of converting many images)
     USE_GPU = False
-    if str(args.use_gpu).lower == "true":
+    if str(args.use_gpu).lower() == "true":
         USE_GPU = True
     Image.MAX_IMAGE_PIXELS = 1000000000
+    
+    # Enable oval view nodes for better SfM convergence
+    use_oval_nodes = False
+    if str(args.use_oval_nodes).lower() == "true":
+        use_oval_nodes = True
 
     angles_horiz = [15, 30, 45, 60]
     angles_vert = [135, 120, 105, 90, 75, 60, 45, 30, 15, 0]
@@ -242,7 +472,12 @@ if __name__ == '__main__':
             filenames = sorted(filenames)
             start_frame_filename = filenames[0]
             stop_frame_filename = filenames[-1]
-            middle_frame_filename = filenames[int(math.floor(len(filenames)//2))]
+            middle_frame_filename = filenames[int(math.ceil(len(filenames)//2))]
+            # Additional frames for view nodes at insertion distances
+            frame_20_filename = filenames[int(len(filenames) * 0.2)]
+            frame_40_filename = filenames[int(len(filenames) * 0.4)]
+            frame_60_filename = filenames[int(len(filenames) * 0.6)]
+            frame_80_filename = filenames[int(len(filenames) * 0.8)]
             img = cv2.imread(os.path.join(data_dir, start_frame_filename))
             height, width = img.shape[:2]
             pers_dim = int(float(max(height, width))/4)
@@ -309,17 +544,17 @@ if __name__ == '__main__':
                                     img_height, img_width = int(float(dims[0])/2), int(float(dims[0])/2)
                                     n_channels = 4
                                     transparent_img = np.zeros((img_height, img_width, n_channels), dtype=np.uint8)
-                                    cubemap_face_filename = f"{new_dir}/faces/{str(remove_face).lower()}.png"
+                                    cubemap_face_filename = os.path.join(new_dir, "faces", f"{str(remove_face).lower()}.png")
                                     # Save the image for visualization
                                     cv2.imwrite(cubemap_face_filename, transparent_img)
 
                         # Cubemap image faces to Equirectangular
-                        cube_back = np.array(Image.open(f"{new_dir}/faces/back.png"))
-                        cube_down = np.array(Image.open(f"{new_dir}/faces/down.png"))
-                        cube_front = Image.open(f"{new_dir}/faces/front.png")
-                        cube_left = np.array(Image.open(f"{new_dir}/faces/left.png"))
-                        cube_right = Image.open(f"{new_dir}/faces/right.png")
-                        cube_up = Image.open(f"{new_dir}/faces/up.png")
+                        cube_back = np.array(Image.open(os.path.join(new_dir, "faces", "back.png")))
+                        cube_down = np.array(Image.open(os.path.join(new_dir, "faces", "down.png")))
+                        cube_front = Image.open(os.path.join(new_dir, "faces", "front.png"))
+                        cube_left = np.array(Image.open(os.path.join(new_dir, "faces", "left.png")))
+                        cube_right = Image.open(os.path.join(new_dir, "faces", "right.png"))
+                        cube_up = Image.open(os.path.join(new_dir, "faces", "up.png"))
 
                         # Flip faces to correspond to mapping
                         flip_cube_front = np.array(cube_front.transpose(Image.FLIP_LEFT_RIGHT))
@@ -333,16 +568,18 @@ if __name__ == '__main__':
                         except Exception as e:
                             raise RuntimeError(f"An error occurred converting cubemap to ERP: {str(e)}") from e
 
-                        filtered_img_dir = f"{new_dir}/filtered_imgs"
+                        filtered_img_dir = os.path.join(new_dir, "filtered_imgs")
                         if not os.path.isdir(filtered_img_dir):
                             os.mkdir(filtered_img_dir)
-                        Image.fromarray(erp_img.astype(np.uint8)).save(f"{filtered_img_dir}/{img_num}.png")
+                        Image.fromarray(erp_img.astype(np.uint8)).save(os.path.join(filtered_img_dir, f"{img_num}.png"))
 
                         # Generate "connective images" between change in views to increase sfm convergence
                         if optimize_seq_spherical_frames is True:
-                            if filename == start_frame_filename or filename == stop_frame_filename: # or filename == middle_frame_filename:
+                            if filename in [start_frame_filename, stop_frame_filename, middle_frame_filename, 
+                                          frame_20_filename, frame_40_filename, frame_60_filename, frame_80_filename]:
+                                # Horizontal Connective Images
                                 for angle in angles_horiz:
-                                    pers_img_dir_horiz = f"{filtered_img_dir}/pers_imgs_{str(angle)}_horiz"
+                                    pers_img_dir_horiz = os.path.join(filtered_img_dir, f"pers_imgs_{str(angle)}_horiz")
                                     if not os.path.isdir(pers_img_dir_horiz):
                                         os.mkdir(pers_img_dir_horiz)
                                     try:
@@ -361,8 +598,9 @@ if __name__ == '__main__':
                                         ], check=True)
                                     except Exception as e:
                                         raise RuntimeError(f"An error occurred converting ERP to perspective images: {str(e)}") from e
+                                # Vertical Connective Images
                                 for angle in angles_vert:
-                                    pers_img_dir_vert = f"{filtered_img_dir}/pers_imgs_{str(angle)}_vert"
+                                    pers_img_dir_vert = os.path.join(filtered_img_dir, f"pers_imgs_{str(angle)}_vert")
                                     if not os.path.isdir(pers_img_dir_vert):
                                         os.mkdir(pers_img_dir_vert)
                                     try:
@@ -432,14 +670,14 @@ if __name__ == '__main__':
                 view_path = os.path.join(data_dir, "..", "views")
                 view_subfolders = [ f.path for f in os.scandir(view_path) if f.is_dir() ]
                 view_subfolders = sorted(view_subfolders)
-                
+
                 if optimize_seq_spherical_frames is True:
                     # Optimize the views
                     # Reverse order for particular views, add supplementary images between views
-                    # Left
-                    # Front (rev)
-                    # Right
-                    # Back (rev)
+                    # Left (1/5)
+                    # Front (rev) (4/5)
+                    # Right (3/5)
+                    # Back (rev) (2/5)
                     # Up
                     # Down (rev)
                     # Index view folders, adding connective images
@@ -448,7 +686,7 @@ if __name__ == '__main__':
                     file_count = len(view_images)
                     first_filename = view_images[0]
                     last_filename = view_images[file_count-1]
-                    middle_filename = view_images[math.floor(len(view_images)//2)]
+                    middle_filename = view_images[math.ceil(len(view_images)//2)]
                     log.info(f"Middle filename: {middle_filename}")
 
                     head_first_fn, tail = os.path.splitext(first_filename)
@@ -467,81 +705,59 @@ if __name__ == '__main__':
                     middle_view =  f"{int(middle_view):0{view_num_len}d}"
                     log.info(f"Middle view: {middle_view}")
                     
-                    # Copy the images in the middle of the list
-                    file_count_ = len(view_images)
+                    # Get frame names for insertion distances
+                    def extract_frame_num(filename):
+                        base_name = os.path.splitext(filename)[0]
+                        if base_name.startswith("frame_"):
+                            return base_name.split('_')[1]
+                        return base_name
+                    
+                    frame_20_name = f"{int(extract_frame_num(frame_20_filename)):0{view_num_len}d}"
+                    frame_40_name = f"{int(extract_frame_num(frame_40_filename)):0{view_num_len}d}"
+                    frame_60_name = f"{int(extract_frame_num(frame_60_filename)):0{view_num_len}d}"
+                    frame_80_name = f"{int(extract_frame_num(frame_80_filename)):0{view_num_len}d}"
+
+                    # Calculate neighbor frames for oval view nodes
+                    def get_neighbor_frames(target_idx, total_frames, view_num_len):
+                        prev_idx = max(0, target_idx - 1)
+                        next_idx = min(total_frames - 1, target_idx + 1)
+                        prev_name = f"{int(extract_frame_num(filenames[prev_idx])):0{view_num_len}d}"
+                        next_name = f"{int(extract_frame_num(filenames[next_idx])):0{view_num_len}d}"
+                        return [prev_name, next_name]
+                    
+                    # Store original file count for consistent insertion calculations
+                    original_file_count = file_count
+                    
+                    # Prepare frame names dictionary for process_view function
+                    frame_names = {
+                        'first': first_view,
+                        'last': last_view,
+                        'middle': middle_view,
+                        'frame_20': frame_20_name,
+                        'frame_40': frame_40_name,
+                        'frame_60': frame_60_name,
+                        'frame_80': frame_80_name,
+                        'neighbors_20': get_neighbor_frames(int(len(filenames) * 0.2), len(filenames), view_num_len),
+                        'neighbors_40': get_neighbor_frames(int(len(filenames) * 0.4), len(filenames), view_num_len),
+                        'neighbors_60': get_neighbor_frames(int(len(filenames) * 0.6), len(filenames), view_num_len),
+                        'neighbors_80': get_neighbor_frames(int(len(filenames) * 0.8), len(filenames), view_num_len),
+                        'use_oval': use_oval_nodes
+                    }
+
+                    # Insert the new perspective images into the already existing view images
                     for i, view_subfolder in enumerate(view_subfolders):
                         # Remove views that have been configured to be removed
                         if os.path.basename(view_subfolder) in remove_face_list:
                             shutil.rmtree(view_subfolder)
                         else:
-                            #persp_image_path = ""
                             view = os.path.basename(os.path.normpath(view_subfolder))
-                            #angles_horiz = [15, 30, 45, 60]
-                            #angles_vert = [135, 120, 105, 90, 75, 60, 45, 30, 15, 0]
-                            persp_image_paths = []
-                            node_image_paths = []
-                            #f"{filtered_img_dir}/pers_imgs_{str(angle)}_horiz"
-                            if view == "up":
-                                rotate_images(view_subfolder, 90)
-                                # UP-TO-DOWN IMAGES
-                                cropped_angles_vert = angles_vert[1:]
-                                for angle in cropped_angles_vert:
-                                    # Rotate the image 180 degree
-                                    filename = os.path.join(data_dir, last_view, "filtered_imgs", f"pers_imgs_{angle}_vert", f"{last_view}_perspective_02.png")
-                                    rotate_images(filename, 180)
-                                    persp_image_paths.append(filename)
-                            elif view == "back":
-                                reverse_file_order(view_subfolder)
-                                # BACK-to-UP IMAGES
-                                rev_angles_vert = angles_vert[::-1] #reverse order
-                                del rev_angles_vert[0:4]
-                                rev_angles_vert.pop()
-                                for angle in rev_angles_vert:
-                                    persp_image_paths.append(os.path.join(data_dir, first_view, "filtered_imgs", f"pers_imgs_{angle}_vert", f"{first_view}_perspective_04.png"))
-                            elif view == "front":
-                                # Insert a connection node halfway from start to finish
-                                # First get list of image paths to insert
-                                """
-                                for angle in angles_horiz:
-                                    node_image_paths.append(os.path.join(data_dir, middle_view, "filtered_imgs", f"pers_imgs_{angle}_horiz", f"{middle_view}_perspective_01.png"))
-                                for angle in angles_horiz:
-                                    node_image_paths.append(os.path.join(data_dir, middle_view, "filtered_imgs", f"pers_imgs_{angle}_horiz", f"{middle_view}_perspective_04.png"))
-                                for angle in angles_horiz:
-                                    node_image_paths.append(os.path.join(data_dir, middle_view, "filtered_imgs", f"pers_imgs_{angle}_horiz", f"{middle_view}_perspective_03.png"))
-                                for angle in angles_horiz:
-                                    node_image_paths.append(os.path.join(data_dir, middle_view, "filtered_imgs", f"pers_imgs_{angle}_horiz", f"{middle_view}_perspective_02.png"))
 
-                                for node_image_path in node_image_paths:
-                                    if node_image_path != "":
-                                        if os.path.isfile(node_image_path):
-                                            destination_path = os.path.join(view_subfolder, f"{file_count_:0{view_num_len}d}{tail}")
-                                            log.info(f"Copying {node_image_path} to {destination_path}")
-                                            shutil.copy(node_image_path, destination_path)
-                                            file_count = file_count + 1
-                                        else:
-                                            raise RuntimeError(f"Error: {node_image_path} is not a valid file path.")
-                                """
-                                reverse_file_order(view_subfolder)
+                            # Process view using refactored function
+                            persp_image_paths = process_view(view, view_subfolder, data_dir, angles_horiz, angles_vert,
+                                                           original_file_count, view_num_len, tail, frame_names, log)
 
-                                # FRONT-TO-RIGHT LOOP IMAGES
-                                rev_angles_horiz = angles_horiz[::-1] #reverse order
-                                for angle in rev_angles_horiz:
-                                    persp_image_paths.append(os.path.join(data_dir, first_view, "filtered_imgs", f"pers_imgs_{angle}_horiz", f"{first_view}_perspective_01.png"))
-                                for angle in rev_angles_horiz:
-                                    persp_image_paths.append(os.path.join(data_dir, first_view, "filtered_imgs", f"pers_imgs_{angle}_horiz", f"{first_view}_perspective_04.png"))
-                                for angle in rev_angles_horiz:
-                                    persp_image_paths.append(os.path.join(data_dir, first_view, "filtered_imgs", f"pers_imgs_{angle}_horiz", f"{first_view}_perspective_03.png"))
-                            elif view == "left":
-                                # LEFT-TO-FRONT IMAGES
-                                for angle in angles_horiz:
-                                    persp_image_paths.append(os.path.join(data_dir, last_view, "filtered_imgs", f"pers_imgs_{angle}_horiz", f"{last_view}_perspective_01.png"))
-                            elif view == "right":
-                                # RIGHT-TO-BACK IMAGES
-                                for angle in angles_horiz:
-                                    persp_image_paths.append(os.path.join(data_dir, last_view, "filtered_imgs", f"pers_imgs_{angle}_horiz", f"{last_view}_perspective_03.png"))
-                            elif view == "down":
-                                rotate_images(view_subfolder, -90)
-                                reverse_file_order(view_subfolder)
+                            # Update file count after processing
+                            file_count = len([f for f in os.listdir(view_subfolder) if f.endswith(tail)])
 
                             # Copy connective images over to view folder
                             for persp_image_path in persp_image_paths:
@@ -554,6 +770,10 @@ if __name__ == '__main__':
                                     else:
                                         raise RuntimeError(f"Error: {persp_image_path} is not a valid file path.")
 
+                            # Apply reverse_file_order to down view after all processing
+                            if view == "down":
+                                reverse_file_order(view_subfolder)
+
                 # Only get subfolders in the view directory                # .../views/back
                 view_path = os.path.join(data_dir, "..", "views")
                 view_subfolders = [ f.path for f in os.scandir(view_path) if f.is_dir() ]
@@ -563,7 +783,6 @@ if __name__ == '__main__':
                 shutil.rmtree(data_dir)
                 os.mkdir(data_dir)
 
-                # VIEW ORDER = Front -> Right -> Back -> Left -> Up -> Down
                 # VIEW ORDER = Left -> Front (rev) -> Right -> Back (rev) -> Up -> Down (rev)
                 # Reorder the view path to coordinate with optimal view pattern
                 for view_dir_path in view_subfolders:

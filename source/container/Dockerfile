@@ -306,4 +306,3 @@ RUN make install
 RUN ln -sf ${CODE_PATH}/post_processing/spz/src/build/splat_converter /usr/local/bin/splat_converter
 
 WORKDIR ${CODE_PATH}
-EXPOSE 29500

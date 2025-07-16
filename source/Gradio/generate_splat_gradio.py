@@ -35,7 +35,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 class SharedState:
     def __init__(self):
-        self.s3_bucket = ""
+        self.s3_bucket = "3dgs-bucket-bqmst2"
         self.s3_input = "workflow-input"
         self.s3_output = "workflow-output"
         self.media_input = "media-input"
@@ -570,10 +570,10 @@ def create_aws_configuration_tab():
                     choices=[
                         "ml.g5.4xlarge",
                         "ml.g5.8xlarge",
-                        "ml.g5.12xlarge",
+                        #"ml.g5.12xlarge",
                         "ml.g6e.4xlarge",
-                        "ml.g6e.8xlarge",
-                        "ml.g6e.12xlarge"],
+                        "ml.g6e.8xlarge"],
+                        #"ml.g6e.12xlarge"],
                     value="ml.g5.4xlarge"
                 )
 
@@ -719,11 +719,11 @@ def create_advanced_settings_tab():
                     ],
                     value="splatfacto"
                 )
-                enable_multi_gpu = gr.Radio(
-                    label="Enable Multi-GPU",
-                    choices=["true", "false"],
-                    value="false"
-                )
+                #enable_multi_gpu = gr.Radio(
+                #    label="Enable Multi-GPU",
+                #    choices=["true", "false"],
+                #    value="false"
+                #)
                 rotate_splat = gr.Radio(
                     label="Rotate Splat for Gradio Viewer",
                     choices=["true", "false"],
@@ -757,7 +757,8 @@ def create_advanced_settings_tab():
                      shared_state.enhanced_feature, shared_state.matching_method,
                      shared_state.use_colmap_model, shared_state.use_transform_json,
                      shared_state.training_enable, shared_state.max_steps,
-                     shared_state.enable_multi_gpu, shared_state.spherical_enable,
+                     #shared_state.enable_multi_gpu,
+                     shared_state.spherical_enable,
                      shared_state.remove_bg, shared_state.remove_human,
                      shared_state.source_coordinate, shared_state.pose_world_to_cam,
                      shared_state.log_verbosity, shared_state.mask_threshold,
@@ -769,7 +770,8 @@ def create_advanced_settings_tab():
                     sfm, model, faces, optimize, bg_model, filter_blurry,
                     max_images, sfm_enable, enhanced_feature, matching_method,
                     use_colmap_model, use_transform_json, training_enable,
-                    max_steps, enable_multi_gpu, spherical_enable, remove_bg,
+                    max_steps, #enable_multi_gpu,
+                    spherical_enable, remove_bg,
                     remove_human, source_coordinate, pose_world_to_cam,
                     log_verbosity, mask_threshold, rotate_splat
                 ]

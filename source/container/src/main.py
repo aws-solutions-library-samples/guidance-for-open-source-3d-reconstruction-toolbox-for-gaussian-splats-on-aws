@@ -670,18 +670,16 @@ if __name__ == "__main__":
             faces_to_remove = config['SPHERICAL_CUBE_FACES_TO_REMOVE'].strip()
             if faces_to_remove and faces_to_remove != '[]':
                 try:
-                    # Try to parse as JSON first
+                    # Try to parse as JSON/list first
                     import ast
                     faces_list = ast.literal_eval(faces_to_remove)
                     if isinstance(faces_list, list) and faces_list:
-                        # Pass as comma-separated string
+                        # Convert list to comma-separated string
                         faces_str = ','.join(faces_list)
                         args.extend(["-rf", faces_str])
                 except (ValueError, SyntaxError):
-                    # If parsing fails, try to extract face names manually
-                    # Handle patterns like "down" or "back,down" or malformed lists
+                    # If parsing fails, assume it's already comma-separated or single value
                     cleaned_faces = faces_to_remove.strip("'\"[]")
-                    # Remove any remaining quotes around individual items
                     cleaned_faces = cleaned_faces.replace('"', '').replace("'", '')
                     if cleaned_faces:
                         args.extend(["-rf", cleaned_faces])

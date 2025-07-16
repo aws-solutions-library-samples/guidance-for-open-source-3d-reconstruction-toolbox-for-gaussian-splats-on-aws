@@ -61,8 +61,12 @@ if os.path.isdir(path):
             print(f"Sparse Path: {sparse_path}")
             print(f"PLY Filename: {ply_path}")
             colmap_to_json(recon_dir=Path(sparse_path), output_dir=Path(path), ply_filename=ply_path)
-        except RuntimeError as e:
-            raise RuntimeError(f"Script failed to complete successfully: {e}") from e
+        except Exception as e:
+            error_str = str(e).lower()
+            if "einsum" in error_str or "subscripts" in error_str or "dimensions" in error_str:
+                raise RuntimeError(f"SfM failed to converge - insufficient 3D points generated. This usually indicates poor image quality, insufficient overlap, or challenging scene conditions. Try using more images with better overlap or improving image quality.") from e
+            else:
+                raise RuntimeError(f"Script failed to complete successfully: {e}") from e
     else:
         print(f"Sparse path does not currently exist: {sparse_path}")
 else:
