@@ -8,7 +8,8 @@
 4. [Deployment and User Guide](#deployment-and-user-guide)
 5. [Cost](#cost)
 6. [Next Steps](#next-steps)
-7. [Authors](#authors)
+7. [License](#license)
+8. [Authors](#authors)
 
 ## Overview
 
