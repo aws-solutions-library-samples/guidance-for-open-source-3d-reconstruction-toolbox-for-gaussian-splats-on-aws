@@ -102,7 +102,7 @@ The list of open source libraries that make this project possible include:
 
 ### AWS account requirements
 
-An active AWS Account with IAM user or role with elevated permissions to deploy resources is required to deploy this guidance, along with either a local computer with appropriate AWS credentials to deploy the CDK or Terraform solution, or utilize an AWS EC2 workstation to build and deploy the CDK or Terraform solution. Please refer to the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.
+An active AWS Account with IAM user or role with elevated permissions to deploy resources is required to deploy this guidance, along with either a local computer with appropriate AWS credentials to deploy the CDK or Terraform solution, or utilize an AWS EC2 workstation to build and deploy the CDK or Terraform solution. Please refer to the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.
 
 - EC2 (if choosing not to deploy infrastructure from your local computer)
 - IAM roles with permissions
@@ -113,7 +113,7 @@ An active AWS Account with IAM user or role with elevated permissions to deploy 
 - Lambda Functions
 - SageMaker Training Jobs
 - Step Functions State Machine
-- CDK (Please refer to the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.)
+- CDK (Please refer to the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.)
 
 ### Service limits
 
@@ -163,7 +163,7 @@ At the time of publishing, the codebase was scanned using Semgrep, Bandit, Check
 ## Deployment and User Guide
 
 **TO DO: update with Live link when published**
-For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
+For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
 
 ## Next Steps
 
