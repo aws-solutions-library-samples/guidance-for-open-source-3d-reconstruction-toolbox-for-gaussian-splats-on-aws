@@ -145,10 +145,6 @@ The following table provides a sample cost breakdown for deploying this Guidance
 | Amazon CloudWatch  | Metrics, 1GB                                                                     | $0.50/month       |
 | **TOTAL**          | (est. 100 requests)                                                              | **$278.33/month** |
 
-## Deployment and User Guide
-
-**TO DO: update with Live link when published**
-For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
 
 ## Security
 **Considerations**
@@ -162,6 +158,10 @@ At the time of publishing, the codebase was scanned using Semgrep, Bandit, Check
 | Error   | False Positive  | Semgrep      | 98 sqlalchemy-execute-raw-query     | Avoiding SQL string concatenation: untrusted input concatenated with raw SQL query can result in SQL Injection | The query is already validated with proper table name escaping, making it safe from SQL injection attacks.                                                                                                                               |
 | Error   | False Positive  | Semgrep      | 93 sqlalchemy-execute-raw-query     | Avoiding SQL string concatenation: untrusted input concatenated with raw SQL query can result in SQL Injection | The query is already validated with proper table name escaping and validation, making it safe from SQL injection attacks.                                                                                                                   |
 | Error   | False Positive  | Gitleaks     | 54 generic-api-key : fingerprint    | API Key found | This is not an API key but just a random prefix for the project components                                                                                                                                                               |
+## Deployment and User Guide
+
+**TO DO: update with Live link when published**
+For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://implementationguides.kits.eventoutfitters.aws.dev/open-3drt-0403/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
 
 ## Next Steps
 
@@ -169,9 +169,14 @@ This robust framework for 3D reconstruction serves as a fundamental building blo
 
 By leveraging other AWS services, you can further enhance your workflow to scale, share, and optimize your 3D reconstruction needs, whatever they might be.
 
+## License
+
+This library is licensed under the MIT-0 License. See the LICENSE file.
+
 ## Authors
 
 - Eric Cornwell, Sr. Spatial Compute SA
+- Daniel Zilberman, Sr. Specialist SA, Technical Guidances
 - Dario Macangano, Sr. Worldwide Visual Compute SA
 - Stanford Lee, Technical Account Manager (Spatial Computing TFC)
-- Daniel Zilberman, Sr. SA AWS Technical Guidances
+
