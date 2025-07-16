@@ -5,11 +5,12 @@
 1. [Overview](#overview)
 2. [Architecture](#architecture)
 3. [Prerequisites](#prerequisites)
-4. [Deployment and User Guide](#deployment-and-user-guide)
-5. [Cost](#cost)
-6. [Next Steps](#next-steps)
-7. [License](#license)
-8. [Authors](#authors)
+4. [Cost](#cost)
+5. [Security](#security)
+6. [Deployment and User Guide](#deployment-and-user-guide)
+7. [Next Steps](#next-steps)
+8. [License](#license)
+9. [Authors](#authors)
 
 ## Overview
 
