@@ -162,7 +162,6 @@ At the time of publishing, the codebase was scanned using Semgrep, Bandit, Check
 | Error   | False Positive  | Gitleaks     | 54 generic-api-key : fingerprint    | API Key found | This is not an API key but just a random prefix for the project components                                                                                                                                                               |
 ## Deployment and User Guide
 
-**TO DO: update with Live link when published**
 For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
 
 ## Next Steps
