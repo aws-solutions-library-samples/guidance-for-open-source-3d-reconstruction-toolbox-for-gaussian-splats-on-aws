@@ -177,7 +177,7 @@ This library is licensed under the MIT-0 License. See the [LICENSE](./LICENSE) f
 ## Authors
 
 - Eric Cornwell, Sr. Spatial Compute SA
-- Daniel Zilberman, Sr. Specialist SA, Technical Guidances
 - Dario Macangano, Sr. Worldwide Visual Compute SA
 - Stanford Lee, Technical Account Manager (Spatial Computing TFC)
+- Daniel Zilberman, Sr. Specialist SA, Technical Guidances
 
