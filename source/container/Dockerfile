@@ -231,6 +231,14 @@ RUN pip install git+https://github.com/nerfstudio-project/gsplat.git
 RUN git clone https://github.com/KevinXu02/splatfacto-w
 RUN pip install git+https://github.com/KevinXu02/splatfacto-w
 
+# Pre-download AlexNet model
+RUN mkdir -p /root/.cache/torch/hub/checkpoints && \
+    wget -O /root/.cache/torch/hub/checkpoints/alexnet-owt-7be5be79.pth \
+    https://download.pytorch.org/models/alexnet-owt-7be5be79.pth
+
+RUN wget -O /root/.cache/torch/hub/checkpoints/fasterrcnn_resnet50_fpn_coco-258fb6c6.pth \
+https://download.pytorch.org/models/fasterrcnn_resnet50_fpn_coco-258fb6c6.pth
+
 # Install AWS CLI v2 latest
 RUN wget "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -O "awscliv2.zip" && \
     unzip awscliv2.zip && \
@@ -242,7 +250,24 @@ RUN pip install --no-cache-dir scipy 'numpy<2.0.0' Pillow>=10.3.0 timm einops om
 
 # Install the Background Removal Classic Tool
 RUN git clone https://github.com/nadermx/backgroundremover.git
+# Comment out print statement "DEBUG: path to be checked: /root/.u2net/u2net.pth"
+RUN sed -i '53s/^        print/        #print/' ${CODE_PATH}/backgroundremover/backgroundremover/u2net/detect.py
 RUN pip install -r ${CODE_PATH}/backgroundremover/requirements.txt
+
+# Download U2NET models
+RUN mkdir -p /root/.u2net && \
+    cd /root/.u2net && \
+    wget -O u2net.pth.part1 https://github.com/nadermx/backgroundremover/raw/main/models/u2aa && \
+    wget -O u2net.pth.part2 https://github.com/nadermx/backgroundremover/raw/main/models/u2ab && \
+    wget -O u2net.pth.part3 https://github.com/nadermx/backgroundremover/raw/main/models/u2ac && \
+    wget -O u2net.pth.part4 https://github.com/nadermx/backgroundremover/raw/main/models/u2ad && \
+    cat u2net.pth.part* > u2net.pth && \
+    rm u2net.pth.part* && \
+    wget -O u2netp.pth https://github.com/nadermx/backgroundremover/raw/main/models/u2netp.pth
+
+# Set environment variables for the models
+ENV U2NET_PATH=/root/.u2net/u2net.pth
+ENV U2NETP_PATH=/root/.u2net/u2netp.pth
 
 # Install the SAM2 Segmentation Model and Code
 RUN git clone https://github.com/facebookresearch/sam2.git
@@ -256,7 +281,9 @@ RUN sed -i 's/"torch>=2.5.1",/#"torch>=2.5.1",/' setup.py && \
     sed -i 's/"hydra-core>=1.3.2",/"hydra-core==1.3.2",/' setup.py
 
 # Install SAM2 dependencies
-RUN pip install -e .
+#RUN pip install -e .
+RUN pip install --no-deps -e . && \
+    pip install hydra-core==1.3.2 cog>=0.14.12 opencv-python matplotlib
 WORKDIR ${CODE_PATH}
 
 # Build NVIDIA 3DGRUT

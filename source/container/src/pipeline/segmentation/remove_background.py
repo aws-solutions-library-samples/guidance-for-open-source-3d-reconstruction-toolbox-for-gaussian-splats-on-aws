@@ -26,7 +26,6 @@ import sys
 import argparse
 import subprocess
 import shutil
-import shlex
 
 def copy_images_to_temp(original_dir, temp_dir):
     """
@@ -240,6 +239,34 @@ if __name__ == '__main__':
     has_alpha = has_alpha_channel(os.path.join(input_dir_path, files[0]))
     print(f"Has_alpha:{has_alpha}")
     try:
+        # Validate model parameter
+        allowed_models = ["u2net", "u2net_human_seg", "sam2"]
+        if model not in allowed_models:
+            raise ValueError(f"Invalid model: {model}")
+        
+        # Validate numeric parameters
+        if num_threads and not str(num_threads).isdigit():
+            raise ValueError(f"Invalid num_threads: {num_threads}")
+        if num_gpus and not str(num_gpus).isdigit():
+            raise ValueError(f"Invalid num_gpus: {num_gpus}")
+        
+        # Build command arguments - input validation above prevents injection
+        args = [
+            sys.executable, "-m", 
+            "backgroundremover.backgroundremover.cmd.cli",
+            "-wn", str(num_threads) if num_threads else "1",
+            "-gb", str(num_gpus) if num_gpus else "0",
+            "-m", model,
+            "-if", input_dir_path,
+            "-of", output_dir_path
+        ]
+
+        # Improve the mask if alpha channel exists
+        if has_alpha is True:
+            args.extend(["-a", "-ae", "15"])
+
+        subprocess.run(args, check=True)  # nosemgrep: dangerous-subprocess-use-audit,dangerous-subprocess-use-tainted-env-args
+        """
         for i, file in enumerate(files):
             # Validate and sanitize inputs
             if not isinstance(file, str) or '..' in file or '/' in file or '\\' in file:
@@ -274,6 +301,6 @@ if __name__ == '__main__':
             subprocess.run(args, check=True)  # nosemgrep: dangerous-subprocess-use-audit,dangerous-subprocess-use-tainted-env-args
         if temp_path is not None:
             shutil.rmtree(temp_path, ignore_errors=True)
-
+        """
     except Exception as e:
         raise RuntimeError(f"Error running background removal component: {e}") from e

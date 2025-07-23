@@ -92,7 +92,7 @@ def validate_config(config: dict):
     body = None
     for key in dict_keys:
         if key not in config:
-            raise RuntimeError(f"Required configuration property {prop} was not found.")
+            raise RuntimeError(f"Required configuration property {key} was not found.")
     print("Input validation passed...")
 
 def lambda_handler(event, context):
@@ -135,7 +135,7 @@ def lambda_handler(event, context):
             try:
                 result = table.get_item(Key=key)
             except ClientError as e:
-                status = (310, f"Error trying to get the item using UUID. Error:  {e}")
+                status = (310, f"Error trying to get the item using UUID. Error: {e}")
                 print(status)
                 errorObj = {
                     "statusCode": status[0],
@@ -219,7 +219,7 @@ def lambda_handler(event, context):
 
             inputObj = {
                 "stateMachine" : {
-                    "timeout": 14400,
+                    "timeout": 28800,
                     "instanceCount": 1,
                     "volumeSizeInGB": 25,
                     "ecrImageArn": os.environ["ECR_IMAGE_URI"],

@@ -236,10 +236,8 @@ def obj_to_glb(obj_path: str, glb_path: str)->None:
     )
     rot = trimesh.transformations.rotation_matrix(-np.pi / 2, [1, 0, 0])
     mesh = mesh.apply_transform(rot)
-    trimesh.load(
-        file_obj=mesh,
-        file_type='obj'
-    ).export(glb_path, file_type='glb')
+    # Export directly without trying to load again
+    mesh.export(glb_path, file_type='glb')
 
 def count_up_to(n):
     """
@@ -760,11 +758,7 @@ if __name__ == "__main__":
                         "--SiftExtraction.estimate_affine_shape", "1",
                         "--SiftExtraction.domain_size_pooling", "1"
                     ])
-                if config['SPHERICAL_CAMERA'].lower() == "true":
-                    args.extend([
-                        "--SiftExtraction.first_octave", "0",
-                        "--SiftExtraction.max_num_orientations", "3"
-                    ])
+
                 if config['LOG_VERBOSITY'].lower() == "error":
                     args.extend([
                         "--log_level", "1"
@@ -814,19 +808,13 @@ if __name__ == "__main__":
                         "--SequentialMatching.quadratic_overlap", "1",
                         "--SiftMatching.guided_matching", "0"
                     ]
-                    if config['SPHERICAL_CAMERA'].lower() == "true":
-                        args.extend([
-                            "--SequentialMatching.overlap", "10",
-                            "--SequentialMatching.loop_detection", "0"
-                        ])   
-                    else:
-                        args.extend([
-                            "--SequentialMatching.overlap", "10",
-                            "--SequentialMatching.loop_detection", "1",
-                            "--SequentialMatching.loop_detection_period", config['MAX_NUM_IMAGES'],
-                            "--SequentialMatching.loop_detection_num_images", config['MAX_NUM_IMAGES'],
-                            "--SequentialMatching.vocab_tree_path", f"{config['CODE_PATH']}/vocab_tree_flickr100K_words32K.bin"
-                        ])
+                    args.extend([
+                        "--SequentialMatching.overlap", "10",
+                        "--SequentialMatching.loop_detection", "1",
+                        "--SequentialMatching.loop_detection_period", config['MAX_NUM_IMAGES'],
+                        "--SequentialMatching.loop_detection_num_images", config['MAX_NUM_IMAGES'],
+                        "--SequentialMatching.vocab_tree_path", f"{config['CODE_PATH']}/vocab_tree_flickr100K_words32K.bin"
+                    ])
                 elif config['MATCHING_METHOD'].lower() == "spatial":
                     args = [
                         "spatial_matcher",
@@ -923,10 +911,7 @@ if __name__ == "__main__":
                             "--image_path", image_path,
                             "--output_path", sparse_path
                         ]
-                        #if config['LOG_VERBOSITY'].lower() == "error":
-                        #    args.extend([
-                        #        "--log_level", "1"
-                        #    ])
+
                         pipeline.create_component(
                             name="GlomapSfM-Mapper",
                             comp_type=ComponentType.transform,
@@ -1036,7 +1021,7 @@ if __name__ == "__main__":
                 str(config['MODEL']).lower() != "3dgut" and \
                 str(config['MODEL']).lower() != "3dgrt":
                 args = [
-                    config['MODEL'],
+                    str(config['MODEL']).lower(),
                     "--timestamp", "train-stage-1",
                     "--viewer.quit-on-train-completion=True"
                 ]
@@ -1045,19 +1030,19 @@ if __name__ == "__main__":
                         "--logging.local-writer.enable", "False",
                         "--logging.profiler", "none"
                     ])
-                if config['MODEL'] == "nerfacto":
+                if str(config['MODEL']).lower() == "nerfacto":
                     args.extend([
                         "--pipeline.model.predict-normals", "True",
                         "--max-num-iterations", str(config['MAX_STEPS']),
                     ])
-                elif config['MODEL'] == "splatfacto" or \
-                    config['MODEL'] == "splatfacto-big" or \
-                    config['MODEL'] == "splatfacto-mcmc":
+                elif str(config['MODEL']).lower() == "splatfacto" or \
+                    str(config['MODEL']).lower() == "splatfacto-big" or \
+                    str(config['MODEL']).lower() == "splatfacto-mcmc":
                     args.extend([
                         "--pipeline.model.use_scale_regularization=True",
                         "--max-num-iterations", str(int(int(config['MAX_STEPS'])))
                     ])
-                elif config['MODEL'] == "splatfacto-w-light":
+                elif str(config['MODEL']).lower() == "splatfacto-w-light":
                     args.extend([
                         "--pipeline.model.enable-bg-model=True",
                         "--pipeline.model.enable-alpha-loss=True",
@@ -1089,7 +1074,7 @@ if __name__ == "__main__":
                 #multi-gpu, use gsplat training strategy
                 batch_size = 1  # Keep batch size small for memory efficiency
                 step_scaler = float(1/(int(pipeline.config.num_gpus)*batch_size))
-                if config['MODEL'] == "splatfacto-mcmc":
+                if str(config['MODEL']).lower() == "splatfacto-mcmc":
                     model = "mcmc"
                 else:
                     model = "default"
@@ -1127,7 +1112,7 @@ if __name__ == "__main__":
                     "optimizer.type=selective_adam",
                     "export_ply.enabled=true"
                 ]
-                if config['LOG_VERBOSITY'].lower() == "error":
+                if config['LOG_VERBOSITY'].lower() != "error":
                     args.append("model.print_stats=true")
                 else:
                     args.append("model.print_stats=false")
@@ -1173,11 +1158,12 @@ if __name__ == "__main__":
                     requires_gpu=False
                 )
             else:
-                if config['MODEL'] == "nerfacto":
+                config_path = f"outputs/unnamed/{str(config['MODEL']).lower()}/train-stage-1/config.yml"
+                if str(config['MODEL']).lower() == "nerfacto":
                     # Geometry
                     args = [
                         "poisson",
-                        "--load-config", "outputs/train/nerfacto/train-stage-1/config.yml",
+                        "--load-config", config_path, #"outputs/unnamed/nerfacto/train-stage-1/config.yml",
                         "--output-dir", output_path
                     ]
                     pipeline.create_component(
@@ -1191,7 +1177,7 @@ if __name__ == "__main__":
                     )
                     # Texture
                     args = [
-                        "--load-config", "outputs/train/nerfacto/train-stage-1/config.yml",
+                        "--load-config", config_path, #"outputs/unnamed/nerfacto/train-stage-1/config.yml",
                         "--input-mesh-filename", os.path.join(output_path, "poisson_mesh.ply"),
                         "--output-dir", os.path.join(output_path, "textured")
                     ]
@@ -1204,9 +1190,9 @@ if __name__ == "__main__":
                         cwd=current_dir_path,
                         requires_gpu=True
                     )
-                elif config['MODEL'] == "splatfacto-w-light":
+                elif str(config['MODEL']).lower() == "splatfacto-w-light":
                     args = [
-                        "--load_config", "outputs/unnamed/splatfacto-w-light/train-stage-1/config.yml",
+                        "--load_config", config_path, #"outputs/unnamed/splatfacto-w-light/train-stage-1/config.yml",
                         "--output_dir", output_path,
                         "--camera_idx", "0" #str(math.ceil(float(config['MAX_NUM_IMAGES'])/2))
                     ]
@@ -1222,7 +1208,7 @@ if __name__ == "__main__":
                 else:
                     args = [
                         "gaussian-splat",
-                        "--load-config", "outputs/unnamed/splatfacto/train-stage-1/config.yml",
+                        "--load-config", config_path, #"outputs/unnamed/splatfacto/train-stage-1/config.yml",
                         "--output-dir", output_path
                     ]
                     pipeline.create_component(
@@ -1246,7 +1232,7 @@ if __name__ == "__main__":
     ##################################
     try:
         # Apply pre-rotation if configured
-        if str(config['ROTATE_SPLAT']).lower() == "true":
+        if str(config['ROTATE_SPLAT']).lower() == "true" and str(config['MODEL']).lower() != "nerfacto":
             args = [
                 "-i", os.path.join(output_path, "splat.ply"),
                 "--rotations"
@@ -1275,10 +1261,7 @@ if __name__ == "__main__":
     # Mirror splat - pre-SPZ (SPZ module has built in mirror around X-Y)
     ##################################
     try:
-        if str(config['ROTATE_SPLAT']).lower() == "true":
-            #if str(config['MODEL']).lower() == "3dgut" or \
-                #str(config['MODEL']).lower() == "3dgrt":
-                # Create a component to mirror the PLY file for 3dgrt/3dgut models
+        if str(config['ROTATE_SPLAT']).lower() == "true" and str(config['MODEL']).lower() != "nerfacto":
             args = [
                 "--input", os.path.join(output_path, "splat.ply"),
                 "--axis", "x"  # Mirror along X-axis to compensate for SPZ built-in flip
@@ -1301,7 +1284,7 @@ if __name__ == "__main__":
     # Export compressed SPZ splat file
     ##################################
     try:
-        if config['MODEL'] != "nerfacto":
+        if str(config['MODEL']).lower() != "nerfacto":
             args = [
                 os.path.join(output_path, 'splat.ply')
             ]
@@ -1324,7 +1307,7 @@ if __name__ == "__main__":
     ##################################
     try:
         # Apply post-rotation if configured
-        if str(config['ROTATE_SPLAT']).lower() == "true":
+        if str(config['ROTATE_SPLAT']).lower() == "true" and str(config['MODEL']).lower() != "nerfacto":
             args = [
                 "-i", os.path.join(output_path, "splat.ply"),
                 "--rotations", "x:180,y:180,z:0"
@@ -1347,10 +1330,7 @@ if __name__ == "__main__":
     # Mirror splat - post-SPZ (SPZ module has built in mirror around X-Y)
     ##################################
     try:
-        if str(config['ROTATE_SPLAT']).lower() == "true":
-            #if str(config['MODEL']).lower() == "3dgut" or \
-                #str(config['MODEL']).lower() == "3dgrt":
-                # Create a component to mirror the PLY file for 3dgrt/3dgut models
+        if str(config['ROTATE_SPLAT']).lower() == "true" and str(config['MODEL']).lower() != "nerfacto":
             args = [
                 "--input", os.path.join(output_path, "splat.ply"),
                 "--axis", "x"  # Mirror along X-axis to compensate for SPZ built-in flip
@@ -1373,9 +1353,9 @@ if __name__ == "__main__":
     # Export SPZ to S3
     ##################################
     try:
-        if config['GENERATE_SPLAT'].lower() == "true":
+        if config['GENERATE_SPLAT'].lower() == "true" and str(config['MODEL']).lower() != "nerfacto":
             args = ["s3", "cp"]
-            if config['MODEL'] != "nerfacto":
+            if str(config['MODEL']).lower() != "nerfacto":
                 args.extend([
                     os.path.join(output_path, "splat.spz"),
                     f"{config['S3_OUTPUT']}/{config['UUID']}/{str(os.path.splitext(config['FILENAME'])[0]).lower()}.spz"
@@ -1405,7 +1385,7 @@ if __name__ == "__main__":
     try:
         if config['GENERATE_SPLAT'].lower() == "true":
             args = ["s3", "cp"]
-            if config['MODEL'] == "nerfacto":
+            if str(config['MODEL']).lower() == "nerfacto":
                 args.extend([
                     os.path.join(output_path, "textured", f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.glb"),
                     f"{config['S3_OUTPUT']}/{config['UUID']}/{str(os.path.splitext(config['FILENAME'])[0]).lower()}.glb"
@@ -1542,8 +1522,6 @@ if __name__ == "__main__":
                     # This ensures colmap-to-nerfstudio creates fresh transforms.json from updated COLMAP data
                     if (str(config['USE_POSE_PRIOR_TRANSFORM_JSON']).lower() == 'true' or \
                         str(config['USE_POSE_PRIOR_COLMAP_MODEL_FILES']).lower() == 'true'):
-                        #transforms_path = os.path.join(config['DATASET_PATH'], "transforms.json")
-                        #transforms_in_path = os.path.join(config['DATASET_PATH'], "transforms-in.json")
                         if os.path.exists(transforms_out_path):
                             log.info(f"Moving {transforms_out_path} to {transforms_in_path} to preserve original")
                             shutil.move(transforms_out_path, transforms_in_path)
@@ -1562,12 +1540,16 @@ if __name__ == "__main__":
                             shutil.move(sparse_path, sparse_path_out)
                             
                             # Set the image cache to disk if there are a lot of images to prevent OOM
-                            num_images = len(os.listdir(image_path))
-                            if num_images > GPU_MAX_IMAGES:
-                                index = component.args.index("colmap")
+                            # Set the max number of thread workers to 1 to prevent dataloader worker_indices[] index out of range
+                            if str(config['MODEL']).lower() != "nerfacto":
+                                num_images = len(os.listdir(image_path))
+                                if num_images > GPU_MAX_IMAGES:
+                                    index = component.args.index("colmap")
                                 if index != -1:
                                     component.args.insert(index, "disk")
                                     component.args.insert(index, "--pipeline.datamanager.cache-images")
+                                    component.args.insert(index, "1")
+                                    component.args.insert(index, "--pipeline.datamanager.max-thread-workers")
                     else:
                         # Preprocess 3dgrut images if they have a mask
                         if str(config['MODEL']).lower() == "3dgut" or \
@@ -1575,6 +1557,41 @@ if __name__ == "__main__":
                             if has_alpha_channel(os.path.join(image_path, os.listdir(image_path)[0])):
                                 process_images(image_path)
                     pipeline.run_component(i)
+
+                    # Move the output checkpoint over to where we expect it
+                    if str(config['ENABLE_MULTI_GPU']).lower() != "true":
+                        if str(config['MODEL']).lower() == "splatfacto" or str(config['MODEL']).lower() == "splatfacto-mcmc" or \
+                            str(config['MODEL']).lower() == "splatfacto-big":
+                            dest_dir = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
+                            os.makedirs(dest_dir, exist_ok=True)
+                            # Config file
+                            shutil.copy("outputs/unnamed/splatfacto/train-stage-1/config.yml", dest_dir)
+                            # Checkpoint directory
+                            #shutil.copytree("outputs/unnamed/splatfacto/train-stage-1/nerfstudio_models", config['DATASET_PATH']
+                            shutil.copytree("outputs/unnamed/splatfacto/train-stage-1/nerfstudio_models", dest_dir, dirs_exist_ok=True)
+                        elif str(config['MODEL']).lower() == "splatfacto-w-light":
+                            dest_dir = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
+                            os.makedirs(dest_dir, exist_ok=True)
+                            # Config file
+                            shutil.copy("outputs/unnamed/splatfacto-w-light/train-stage-1/config.yml", dest_dir)
+                            # Checkpoint directory
+                            #shutil.copytree("outputs/unnamed/splatfacto-w-light/train-stage-1/nerfstudio_models", config['DATASET_PATH'])
+                            shutil.copytree("outputs/unnamed/splatfacto-w-light/train-stage-1/nerfstudio_models", dest_dir, dirs_exist_ok=True)
+                        elif str(config['MODEL']).lower() == "nerfacto":
+                            dest_dir = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
+                            os.makedirs(dest_dir, exist_ok=True)
+                            # Config file
+                            shutil.copy("outputs/unnamed/nerfacto/train-stage-1/config.yml", dest_dir)
+                            # Checkpoint directory
+                            #shutil.copytree("outputs/unnamed/nerfacto/train-stage-1/nerfstudio_models", config['DATASET_PATH'])
+                            shutil.copytree("outputs/unnamed/nerfacto/train-stage-1/nerfstudio_models", dest_dir, dirs_exist_ok=True)
+                        elif str(config['MODEL']).lower() == "3dgut" or str(config['MODEL']).lower() == "3dgrt":
+                            dest_dir = os.path.join(config['DATASET_PATH'], "3dgrut_models")
+                            src_dir = os.path.join(config['DATASET_PATH'], os.listdir(os.path.join(config['DATASET_PATH'], 'exports', 'train-stage-1')[0]))
+                            print(f"SOURCE_DIR={src_dir}")
+                            os.makedirs(dest_dir, exist_ok=True)
+                            shutil.copytree(src_dir, dest_dir, dirs_exist_ok=True)
+                        # TODO MULTIGPU
                 case "Nerfstudio-Export":
                     # NERFSTUDIO EXPORT CONDITIONAL COMPONENT
                     pipeline.run_component(i)
@@ -1615,7 +1632,6 @@ if __name__ == "__main__":
                     else:
                         log.warning(f"No image files found in {image_path}")
                     
-    
                     # If the images are portrait, rotate the splat
                     if height > width: # portrait, rotate -90 deg on y
                         # Assuming 'args' is your list containing the rotation string

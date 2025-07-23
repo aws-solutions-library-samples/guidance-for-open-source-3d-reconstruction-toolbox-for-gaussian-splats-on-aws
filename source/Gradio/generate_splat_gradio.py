@@ -30,8 +30,6 @@ import gradio as gr
 import boto3.s3.transfer
 
 print(f"Gradio Version: {gr.__version__}")
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 class SharedState:
     def __init__(self):
@@ -182,8 +180,10 @@ def refresh_s3_contents():
                 if item['Key'].endswith('/'):
                     continue
                 
-                # Check if file is .ply or .spz
-                if not (item['Key'].lower().endswith('.ply') or item['Key'].lower().endswith('.spz')):
+                # Check if file is .ply, .spz, or .glb
+                if not (item['Key'].lower().endswith('.ply') or 
+                        item['Key'].lower().endswith('.spz') or 
+                        item['Key'].lower().endswith('.glb')):
                     continue
                     
                 # Get the job ID from the path
@@ -715,7 +715,8 @@ def create_advanced_settings_tab():
                         "splatfacto-mcmc",
                         "splatfacto-w-light",
                         "3dgut",
-                        "3dgrt"
+                        "3dgrt",
+                        "nerfacto"
                     ],
                     value="splatfacto"
                 )
@@ -807,11 +808,11 @@ def on_select(evt: gr.SelectData, data):
             gr.update(interactive=False)
         ]
 
-def handle_view(selected_row):
-    """Handle view button click"""
+def handle_view_with_progress(selected_row):
+    """Handle view button click with progress bar"""
     try:
         if not selected_row:
-            return gr.update(value=None), "No file selected"
+            return gr.update(value=None), "No file selected", ""
         
         bucket_name = shared_state.s3_bucket
         output_prefix = shared_state.s3_output or "workflow-output"
@@ -820,8 +821,17 @@ def handle_view(selected_row):
         filename = selected_row[1]
         file_key = f"{output_prefix}/{job_id}/{filename}"
         
+        # Check if this is the currently loaded model
+        current_url = getattr(shared_state, 'current_model_url', None)
+        current_key = getattr(shared_state, 'current_model_key', None)
+        
+        if current_key == file_key:
+            # Model is already loaded, don't show progress bar
+            return gr.update(value=current_url), f"Already loaded: {filename}", ""
+        
         # Get file size information
         file_size_mb = None
+        size_info = ""
         try:
             s3_client = boto3.client('s3')
             response = s3_client.head_object(Bucket=bucket_name, Key=file_key)
@@ -830,25 +840,114 @@ def handle_view(selected_row):
             size_info = f" ({file_size_mb:.1f} MB)"
         except Exception as e:
             print(f"Error getting file size: {str(e)}")
-            size_info = ""
-        
-        # Note: Removed artificial delay as it's not necessary for functionality
         
         # Generate a presigned URL for the file
         presigned_url = generate_presigned_url(bucket_name, file_key)
         
         if not presigned_url:
-            return gr.update(value=None), "Error generating URL"
+            return gr.update(value=None), "Error generating URL", ""
+            
+        # Store current model info
+        shared_state.current_model_url = presigned_url
+        shared_state.current_model_key = file_key
         
-        # Return the URL for the Model3D component
-        return gr.update(value=presigned_url), f"Loading {filename}{size_info}..."
+        # Estimate loading time based on file size
+        estimated_time = file_size_mb * 0.5 if file_size_mb else 25
+        
+        # Create a unique ID for this model
+        model_id = f"{job_id}_{filename.replace('.', '_')}"
+        
+        # Track loaded models in shared state
+        if not hasattr(shared_state, 'loaded_models'):
+            shared_state.loaded_models = set()
+            
+        # Only show progress bar for models not yet loaded
+        if file_key not in shared_state.loaded_models:
+            shared_state.loaded_models.add(file_key)
+            
+            # Create progress bar HTML
+            progress_html = f"""
+            <div style="margin: 10px 0;">
+                <div style="background: #f0f0f0; border-radius: 10px; overflow: hidden; height: 20px;">
+                    <div style="background: linear-gradient(90deg, #4CAF50, #45a049); height: 100%; width: 0%; animation: loading {estimated_time}s ease-out forwards;"></div>
+                </div>
+                <div style="text-align: center; margin-top: 5px; font-size: 14px;">Loading {filename}{size_info}... (~{estimated_time:.0f}s estimated)</div>
+            </div>
+            <style>
+            @keyframes loading {{
+                0% {{ width: 0%; }}
+                30% {{ width: 40%; }}
+                60% {{ width: 70%; }}
+                90% {{ width: 90%; }}
+                100% {{ width: 100%; }}
+            }}
+            </style>
+            """
+        else:
+            # Empty progress HTML if already loaded
+            progress_html = ""
+        
+        # Estimate loading time based on file size  
+        # Model based on actual loading times:
+        # 12MB=6sec, 31MB=9sec, 180MB=75sec, 236MB=105sec, 448MB=220sec
+        if file_size_mb is None:
+            estimated_time = 10
+        else:
+            # Quadratic model: time = 0.001x² + 0.3x + 3
+            estimated_time = 0.001 * (file_size_mb ** 2) + 0.3 * file_size_mb + 3
+            
+        # Only show progress bar when the View button is clicked
+        # Check if we're navigating between tabs by looking at the referrer
+        progress_html = f"""
+        <div style="margin: 10px 0;">
+            <div style="background: #f0f0f0; border-radius: 10px; overflow: hidden; height: 20px;">
+                <div style="background: linear-gradient(90deg, #4CAF50, #45a049); height: 100%; width: 0%; animation: loading {estimated_time}s ease-out forwards;"></div>
+            </div>
+            <div style="text-align: center; margin-top: 5px; font-size: 14px;">Loading {filename}{size_info}... (~{estimated_time:.0f}s estimated)</div>
+        </div>
+        <style>
+        @keyframes loading {{
+            0% {{ width: 0%; }}
+            30% {{ width: 40%; }}
+            60% {{ width: 70%; }}
+            90% {{ width: 90%; }}
+            100% {{ width: 100%; }}
+        }}
+        </style>
+        <script>
+        (function() {{
+            // Check if this is a tab navigation by looking at document.referrer
+            const isTabNavigation = document.referrer.includes(window.location.origin);
+            
+            // If this is tab navigation, hide the progress bar
+            if (isTabNavigation) {{
+                // Find all progress bars and hide them
+                const progressBars = document.querySelectorAll('div[style*="margin: 10px 0;"]');
+                progressBars.forEach(bar => {{
+                    bar.style.display = 'none';
+                }});
+            }}
+        }})();
+        </script>
+        """
+        
+        # Create a unique ID for this model
+        model_id = f"{job_id}_{filename.replace('.', '_')}"
+        
+        # Return all three required outputs
+        return gr.update(value=presigned_url), f"Loading {filename}...", progress_html
         
     except Exception as e:
         error_msg = f"Error viewing file: {str(e)}"
-        print(f"[DEBUG] Error in handle_view: {error_msg}")
+        print(f"[DEBUG] Error in handle_view_with_progress: {error_msg}")
         import traceback
         traceback.print_exc()
-        return gr.update(value=None), error_msg
+        return gr.update(value=None), error_msg, ""
+
+def handle_view(selected_row):
+    """Handle view button click"""
+    result = handle_view_with_progress(selected_row)
+    return result[0], result[1]
 
 def add_to_favorites(selected_data):
     """Add currently selected item to favorites"""
@@ -1194,6 +1293,12 @@ def create_s3_browser_tab():
         with favorites_container:
             update_favorites_ui()
 
+        # Progress bar HTML component - always visible
+        progress_bar = gr.HTML(
+            value="",
+            visible=True
+        )
+
         # Now render the viewer
         viewer.render()
         viewer_status.render()
@@ -1365,11 +1470,94 @@ def create_s3_browser_tab():
             outputs=[download_iframe]
         )
         
+        # Add a JavaScript function to track loaded models
+        tracking_js = gr.HTML("""
+        <script>
+        // Make sure we have the global tracking object
+        if (typeof window.loadedModels === 'undefined') {
+            window.loadedModels = {};
+        }
+        </script>
+        """)
+        
+        # Simplest approach - directly implement the progress bar
+        def handle_view_with_progress(selected_row):
+            try:
+                if not selected_row:
+                    return gr.update(value=None), "No file selected", ""
+                
+                bucket_name = shared_state.s3_bucket
+                output_prefix = shared_state.s3_output or "workflow-output"
+                
+                job_id = selected_row[0]
+                filename = selected_row[1]
+                file_key = f"{output_prefix}/{job_id}/{filename}"
+                
+                # Check if this is the currently loaded model
+                current_url = getattr(shared_state, 'current_model_url', None)
+                current_key = getattr(shared_state, 'current_model_key', None)
+                
+                if current_key == file_key:
+                    # Model is already loaded, don't show progress bar
+                    return gr.update(value=current_url), f"Already loaded: {filename}", ""
+                
+                # Get file size information
+                file_size_mb = None
+                size_info = ""
+                try:
+                    s3_client = boto3.client('s3')
+                    response = s3_client.head_object(Bucket=bucket_name, Key=file_key)
+                    file_size = response['ContentLength']
+                    file_size_mb = file_size / (1024 * 1024)
+                    size_info = f" ({file_size_mb:.1f} MB)"
+                except Exception as e:
+                    print(f"Error getting file size: {str(e)}")
+                
+                # Generate a presigned URL for the file
+                presigned_url = generate_presigned_url(bucket_name, file_key)
+                
+                if not presigned_url:
+                    return gr.update(value=None), "Error generating URL", ""
+                    
+                # Store current model info
+                shared_state.current_model_url = presigned_url
+                shared_state.current_model_key = file_key
+                
+                # Estimate loading time based on file size
+                estimated_time = file_size_mb * 0.5 if file_size_mb else 25
+                
+                # Create progress bar HTML
+                progress_html = f"""
+                <div style="margin: 10px 0;">
+                    <div style="background: #f0f0f0; border-radius: 10px; overflow: hidden; height: 20px;">
+                        <div style="background: linear-gradient(90deg, #4CAF50, #45a049); height: 100%; width: 0%; animation: loading {estimated_time}s ease-out forwards;"></div>
+                    </div>
+                    <div style="text-align: center; margin-top: 5px; font-size: 14px;">Loading {filename}{size_info}... (~{estimated_time:.0f}s estimated)</div>
+                </div>
+                <style>
+                @keyframes loading {{
+                    0% {{ width: 0%; }}
+                    30% {{ width: 40%; }}
+                    60% {{ width: 70%; }}
+                    90% {{ width: 90%; }}
+                    100% {{ width: 100%; }}
+                }}
+                </style>
+                """
+                
+                return gr.update(value=presigned_url), f"Loading {filename}...", progress_html
+                
+            except Exception as e:
+                error_msg = f"Error viewing file: {str(e)}"
+                print(f"[DEBUG] Error in handle_view_with_progress: {error_msg}")
+                import traceback
+                traceback.print_exc()
+                return gr.update(value=None), error_msg, ""
+            
         view_btn.click(
-            fn=handle_view,
+            fn=handle_view_with_progress,
             inputs=[selected_data],
-            outputs=[viewer, viewer_status],
-            show_progress="full"  # Show full progress animation
+            outputs=[viewer, viewer_status, progress_bar]
         )
         
         # Update this to use the new function that updates the UI
@@ -1566,6 +1754,11 @@ def load_favorites():
 def create_interface():
     # Create the main Gradio interface
     with gr.Blocks(title="Open Source 3D Reconstruction Toolbox for Gaussian Splats on AWS", theme=gr.themes.Ocean(), css="""
+        /* Add global tracking script */
+        <script>
+        // Global variable to track loaded models
+        window.loadedModels = {};
+        </script>
         #viewer-container {
             width: 100%;
             height: 600px;
