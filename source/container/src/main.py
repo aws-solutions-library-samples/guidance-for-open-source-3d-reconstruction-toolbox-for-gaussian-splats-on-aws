@@ -1158,12 +1158,11 @@ if __name__ == "__main__":
                     requires_gpu=False
                 )
             else:
-                config_path = f"outputs/unnamed/{str(config['MODEL']).lower()}/train-stage-1/config.yml"
                 if str(config['MODEL']).lower() == "nerfacto":
                     # Geometry
                     args = [
                         "poisson",
-                        "--load-config", config_path, #"outputs/unnamed/nerfacto/train-stage-1/config.yml",
+                        "--load-config", "outputs/unnamed/nerfacto/train-stage-1/config.yml",
                         "--output-dir", output_path
                     ]
                     pipeline.create_component(
@@ -1177,7 +1176,7 @@ if __name__ == "__main__":
                     )
                     # Texture
                     args = [
-                        "--load-config", config_path, #"outputs/unnamed/nerfacto/train-stage-1/config.yml",
+                        "--load-config", "outputs/unnamed/nerfacto/train-stage-1/config.yml",
                         "--input-mesh-filename", os.path.join(output_path, "poisson_mesh.ply"),
                         "--output-dir", os.path.join(output_path, "textured")
                     ]
@@ -1192,7 +1191,7 @@ if __name__ == "__main__":
                     )
                 elif str(config['MODEL']).lower() == "splatfacto-w-light":
                     args = [
-                        "--load_config", config_path, #"outputs/unnamed/splatfacto-w-light/train-stage-1/config.yml",
+                        "--load_config", "outputs/unnamed/splatfacto-w-light/train-stage-1/config.yml",
                         "--output_dir", output_path,
                         "--camera_idx", "0" #str(math.ceil(float(config['MAX_NUM_IMAGES'])/2))
                     ]
@@ -1208,7 +1207,7 @@ if __name__ == "__main__":
                 else:
                     args = [
                         "gaussian-splat",
-                        "--load-config", config_path, #"outputs/unnamed/splatfacto/train-stage-1/config.yml",
+                        "--load-config", "outputs/unnamed/splatfacto/train-stage-1/config.yml",
                         "--output-dir", output_path
                     ]
                     pipeline.create_component(
