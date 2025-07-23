@@ -1545,11 +1545,11 @@ if __name__ == "__main__":
                                 num_images = len(os.listdir(image_path))
                                 if num_images > GPU_MAX_IMAGES:
                                     index = component.args.index("colmap")
-                                if index != -1:
-                                    component.args.insert(index, "disk")
-                                    component.args.insert(index, "--pipeline.datamanager.cache-images")
-                                    component.args.insert(index, "1")
-                                    component.args.insert(index, "--pipeline.datamanager.max-thread-workers")
+                                    if index != -1:
+                                        component.args.insert(index, "disk")
+                                        component.args.insert(index, "--pipeline.datamanager.cache-images")
+                                        component.args.insert(index, "1")
+                                        component.args.insert(index, "--pipeline.datamanager.max-thread-workers")
                     else:
                         # Preprocess 3dgrut images if they have a mask
                         if str(config['MODEL']).lower() == "3dgut" or \
@@ -1564,26 +1564,17 @@ if __name__ == "__main__":
                             str(config['MODEL']).lower() == "splatfacto-big":
                             dest_dir = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
                             os.makedirs(dest_dir, exist_ok=True)
-                            # Config file
                             shutil.copy("outputs/unnamed/splatfacto/train-stage-1/config.yml", dest_dir)
-                            # Checkpoint directory
-                            #shutil.copytree("outputs/unnamed/splatfacto/train-stage-1/nerfstudio_models", config['DATASET_PATH']
                             shutil.copytree("outputs/unnamed/splatfacto/train-stage-1/nerfstudio_models", dest_dir, dirs_exist_ok=True)
                         elif str(config['MODEL']).lower() == "splatfacto-w-light":
                             dest_dir = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
                             os.makedirs(dest_dir, exist_ok=True)
-                            # Config file
                             shutil.copy("outputs/unnamed/splatfacto-w-light/train-stage-1/config.yml", dest_dir)
-                            # Checkpoint directory
-                            #shutil.copytree("outputs/unnamed/splatfacto-w-light/train-stage-1/nerfstudio_models", config['DATASET_PATH'])
                             shutil.copytree("outputs/unnamed/splatfacto-w-light/train-stage-1/nerfstudio_models", dest_dir, dirs_exist_ok=True)
                         elif str(config['MODEL']).lower() == "nerfacto":
                             dest_dir = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
                             os.makedirs(dest_dir, exist_ok=True)
-                            # Config file
                             shutil.copy("outputs/unnamed/nerfacto/train-stage-1/config.yml", dest_dir)
-                            # Checkpoint directory
-                            #shutil.copytree("outputs/unnamed/nerfacto/train-stage-1/nerfstudio_models", config['DATASET_PATH'])
                             shutil.copytree("outputs/unnamed/nerfacto/train-stage-1/nerfstudio_models", dest_dir, dirs_exist_ok=True)
                         elif str(config['MODEL']).lower() == "3dgut" or str(config['MODEL']).lower() == "3dgrt":
                             dest_dir = os.path.join(config['DATASET_PATH'], "3dgrut_models")
