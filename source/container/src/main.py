@@ -1577,7 +1577,8 @@ if __name__ == "__main__":
                             shutil.copytree("outputs/unnamed/nerfacto/train-stage-1/nerfstudio_models", dest_dir, dirs_exist_ok=True)
                         elif str(config['MODEL']).lower() == "3dgut" or str(config['MODEL']).lower() == "3dgrt":
                             dest_dir = os.path.join(config['DATASET_PATH'], "3dgrut_models")
-                            src_dir = os.path.join(config['DATASET_PATH'], os.listdir(os.path.join(config['DATASET_PATH'], 'exports', 'train-stage-1')[0]))
+                            base_dir = os.path.join(config['DATASET_PATH'], 'exports', 'train-stage-1')
+                            src_dir = os.path.join(base_dir, os.listdir(base_dir)[0])
                             print(f"SOURCE_DIR={src_dir}")
                             os.makedirs(dest_dir, exist_ok=True)
                             shutil.copytree(src_dir, dest_dir, dirs_exist_ok=True)
