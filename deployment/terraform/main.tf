@@ -22,7 +22,7 @@ terraform {
   required_providers {
     aws = {
       source = "hashicorp/aws"
-      version = "~> 5.99.1"
+      version = "~> 6.12.0"
     }
     random = {
       source  = "hashicorp/random"
@@ -34,7 +34,7 @@ terraform {
     }
     docker = {
       source  = "kreuzwerker/docker"
-      version = "3.6.1"
+      version = "~> 3.6.2"
     } 
   }
 }
@@ -55,6 +55,11 @@ resource "random_string" "tf_random_suffix" {
   lower  = true
   numeric = true  # gitleaks:allow - not an API key, just a boolean flag
   special = false # gitleaks:allow
+  
+  #keepers = {
+  # Change this value to force new random suffix
+  #  version = "v1"
+  #}
 }
 
 # Base infrastructure deployment
@@ -69,6 +74,20 @@ module "infra" {
   tf_random_suffix = random_string.tf_random_suffix.result
   maintain_s3_objects_on_stack_deletion = var.maintain_s3_objects_on_stack_deletion
   count = var.deployment_phase == "base" ? 1 : 0
+}
+
+# Generate outputs.json for post-deployment
+resource "local_file" "outputs_json" {
+  count = var.deployment_phase == "base" ? 1 : 0
+  filename = "${path.module}/outputs.json"
+  content = jsonencode({
+    "${var.project_prefix}-${random_string.tf_random_suffix.result}" = {
+      BucketName = module.infra[0].s3_bucket_name_workflow
+      ContainerRole = module.infra[0].container_role_name
+      ECRRepo = module.infra[0].ecr_repo_url
+      Region = var.region
+    }
+  })
 }
 
 # Post-deployment for Docker container and model deployment
@@ -91,4 +110,10 @@ resource "aws_cloudformation_stack" "guidance_deployment_metrics" {
       }
     }
   })
+}
+
+# Output DynamoDB table name
+output "dynamodb_table_name" {
+  description = "Name of the DynamoDB table"
+  value = var.deployment_phase == "base" ? module.infra[0].dynamodb_table_name : null
 }

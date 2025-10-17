@@ -20,7 +20,7 @@
 
 # Create logging bucket first
 resource "aws_s3_bucket" "log_bucket" {
-  bucket = "${var.project_prefix}-logs-${var.region}-${var.tf_random_suffix}"
+  bucket = "${var.project_prefix}-logs-${var.tf_random_suffix}"
   force_destroy = var.maintain_s3_objects_on_stack_deletion != "true"
   lifecycle {
     prevent_destroy = false
@@ -64,7 +64,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "log_bucket_lifecycle" {
 
 # Main bucket
 resource "aws_s3_bucket" "s3_bucket" {
-  bucket        = "${var.project_prefix}-bucket-${var.region}-${var.tf_random_suffix}"
+  bucket        = "${var.project_prefix}-bucket-${var.tf_random_suffix}"
   force_destroy = var.maintain_s3_objects_on_stack_deletion != "true"
   lifecycle {
     prevent_destroy = false

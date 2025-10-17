@@ -429,7 +429,8 @@ data "aws_iam_policy_document" "iam_policy_invoke_lambda" {
       "lambda:InvokeFunction"
     ]
     resources = [
-      "${aws_lambda_function.lambda_workflow_complete.arn}"
+      "${aws_lambda_function.lambda_workflow_complete.arn}",
+      "${aws_lambda_function.job_definition_selector.arn}"
       ]
   }
 }
@@ -452,7 +453,9 @@ data "aws_iam_policy_document" "iam_policy_cloudwatch_lambda" {
       "arn:aws:logs:*:*:log-group:/aws/lambda/${var.project_prefix}-*",
       "arn:aws:logs:*:*:log-group:/aws/lambda/${var.project_prefix}-*:*",
       "arn:aws:logs:*:*:log-group:/aws/sagemaker/TrainingJobs",
-      "arn:aws:logs:*:*:log-group:/aws/sagemaker/TrainingJobs:*"
+      "arn:aws:logs:*:*:log-group:/aws/sagemaker/TrainingJobs:*",
+      "arn:aws:logs:*:*:log-group:/aws/batch/job",
+      "arn:aws:logs:*:*:log-group:/aws/batch/job:*"
       ]
   }
 }
@@ -461,6 +464,63 @@ data "aws_iam_policy_document" "iam_policy_cloudwatch_lambda" {
 resource "aws_iam_policy" "iam_policy_cloudwatch_lambda" {
   name = "${var.project_prefix}-policy-cloudwatch-lambda-${var.tf_random_suffix}"
   policy = data.aws_iam_policy_document.iam_policy_cloudwatch_lambda.json
+}
+
+# Create data block for Batch permissions
+data "aws_iam_policy_document" "iam_policy_batch" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "batch:SubmitJob",
+      "batch:TerminateJob",
+      "batch:ListJobs"
+    ]
+    resources = [
+      "arn:aws:batch:*:*:job-queue/*",
+      "arn:aws:batch:*:*:job-definition/*",
+      "arn:aws:batch:*:*:job/*"
+    ]
+  }
+  statement {
+    effect = "Allow"
+    actions = [
+      "batch:DescribeJobs",
+      "batch:DescribeJobQueues",
+      "batch:DescribeComputeEnvironments"
+    ]
+    resources = ["*"]
+  }
+  statement {
+    effect = "Allow"
+    actions = [
+      "events:PutRule",
+      "events:PutTargets",
+      "events:DeleteRule",
+      "events:RemoveTargets",
+      "events:DescribeRule"
+    ]
+    resources = [
+      "arn:aws:events:*:*:rule/StepFunctionsGetEventForBatchJobsRule"
+    ]
+  }
+  statement {
+    effect = "Allow"
+    actions = [
+      "logs:DescribeLogStreams",
+      "logs:GetLogEvents",
+      "logs:DescribeLogGroups"
+    ]
+    resources = [
+      "arn:aws:logs:*:*:log-group:/aws/batch/job",
+      "arn:aws:logs:*:*:log-group:/aws/batch/job:*"
+    ]
+  }
+}
+
+# IAM policy for Batch permissions
+resource "aws_iam_policy" "iam_policy_batch" {
+  name = "${var.project_prefix}-policy-batch-${var.tf_random_suffix}"
+  policy = data.aws_iam_policy_document.iam_policy_batch.json
 }
 
 # Create data block for AWS managed policy for basic lambda permissions for logging
@@ -483,7 +543,8 @@ locals {
         dynamodb = "${aws_iam_policy.iam_policy_dynamodb.arn}",
         sns = "${aws_iam_policy.iam_policy_sns.arn}",
         sagemaker = "${aws_iam_policy.sagemaker_policy.arn}",
-        cloudwatch = "${aws_iam_policy.iam_policy_cloudwatch_lambda.arn}"
+        cloudwatch = "${aws_iam_policy.iam_policy_cloudwatch_lambda.arn}",
+        batch = "${aws_iam_policy.iam_policy_batch.arn}"
     }
     stepfunctions_policies = {
         basic_log = "${data.aws_iam_policy.AWSLambdaBasicExecutionRole_policy.arn}",
@@ -491,7 +552,8 @@ locals {
         sagemaker = "${data.aws_iam_policy.AmazonSageMakerFullAccess_policy.arn}",
         event_bridge = "${aws_iam_policy.iam_policy_eventbridge.arn}",
         sfn_logs = "${aws_iam_policy.iam_policy_step_functions_logs.arn}",
-        lambda = "${aws_iam_policy.iam_policy_invoke_lambda.arn}"
+        lambda = "${aws_iam_policy.iam_policy_invoke_lambda.arn}",
+        batch = "${aws_iam_policy.iam_policy_batch.arn}"
     }
     container_policies = {
         sagemaker = "${data.aws_iam_policy.AmazonSageMakerFullAccess_policy.arn}",

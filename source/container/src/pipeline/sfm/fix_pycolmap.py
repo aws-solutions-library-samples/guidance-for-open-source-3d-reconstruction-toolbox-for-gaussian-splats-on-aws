@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # MIT License
 #
 # Copyright (c) 2025 Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -18,25 +19,30 @@
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY
 
-terraform {
-  required_providers {
-    docker = {
-      source  = "kreuzwerker/docker"
-      version = "~> 3.6.2"
-    } 
-  }
-}
+"""
+Fix pycolmap compatibility issue with camera_image_id attribute.
+"""
 
-# Create output file for container build script
-resource "local_file" "save_output_file" {
-  filename = "${path.module}/../../outputs.json"
-  content  = jsonencode({
-      "${var.project_prefix}-${var.tf_random_suffix}":{
-        "BucketName" = "${aws_s3_bucket.s3_bucket.id}"
-        "Region" = "${var.region}"
-        "ECRRepo" = "${aws_ecr_repository.ecr_repo.repository_url}"
-        "ContainerRole" = "${aws_iam_role.container_role.name}"
-      }
-    }
-  )
-}
+import sys
+
+def main():
+    try:
+        import pycolmap
+        
+        # Add missing camera_image_id attribute to Camera class
+        if not hasattr(pycolmap._core.Camera, 'camera_image_id'):
+            def get_camera_image_id(self):
+                return getattr(self, 'image_id', 0)
+            
+            pycolmap._core.Camera.camera_image_id = property(get_camera_image_id)
+            print("Applied pycolmap Camera.camera_image_id compatibility fix")
+        else:
+            print("pycolmap Camera.camera_image_id already exists")
+            
+    except Exception as e:
+        print(f"Warning: Could not apply pycolmap fix: {e}")
+        # Don't fail the pipeline for this fix
+        pass
+
+if __name__ == "__main__":
+    main()

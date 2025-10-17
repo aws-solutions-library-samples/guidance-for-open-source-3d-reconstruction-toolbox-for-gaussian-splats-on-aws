@@ -39,12 +39,16 @@ resource "aws_lambda_function" "lambda_workflow_trigger" {
  role = aws_iam_role.lambda_role.arn
  handler = "workflow_trigger.lambda_handler"
  filename = "${path.module}/../../../../source/lambda/workflow_trigger/workflow_trigger.zip"
- reserved_concurrent_executions = 100
+ # Removed reserved_concurrent_executions setting to prevent account concurrency limit error
 
  # Enable X-Ray tracing
  tracing_config {
   mode = "Active"
  }
+
+ depends_on = [
+   aws_lambda_function.job_definition_selector
+ ]
 
  environment {
   variables = {
@@ -54,7 +58,11 @@ resource "aws_lambda_function" "lambda_workflow_trigger" {
     LAMBDA_COMPLETE_NAME = aws_lambda_function.lambda_workflow_complete.arn,
     DDB_TABLE_NAME = aws_dynamodb_table.ddb_table.name,
     ECR_IMAGE_URI = aws_ecr_repository.ecr_repo.repository_url,
-    CONTAINER_ROLE_NAME = aws_iam_role.container_role.name
+    CONTAINER_ROLE_NAME = aws_iam_role.container_role.name,
+    BATCH_JOB_QUEUE = aws_batch_job_queue.batch_job_queue.arn,
+    BATCH_JOB_DEFINITION = aws_batch_job_definition.batch_job_definition.arn,
+    JOB_DEFINITION_SELECTOR_LAMBDA_NAME = aws_lambda_function.job_definition_selector.function_name
+
     }
   }
 }
@@ -67,7 +75,7 @@ resource "aws_lambda_function" "lambda_workflow_complete" {
  role = aws_iam_role.lambda_role.arn
  handler = "workflow_complete.lambda_handler"
  filename = "${path.module}/../../../../source/lambda/workflow_complete/workflow_complete.zip"
- reserved_concurrent_executions = 100
+ # Removed reserved_concurrent_executions setting to prevent account concurrency limit error
 
  # Enable X-Ray tracing
  tracing_config {

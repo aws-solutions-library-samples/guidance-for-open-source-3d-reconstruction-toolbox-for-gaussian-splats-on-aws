@@ -38,6 +38,7 @@ from aws_cdk import (
 from constructs import Construct
 import os
 import json
+import time
 
 class GSWorkflowPostDeployStack(Stack):
     """Class for Post Deploy Infrastructure Stack"""
@@ -155,11 +156,14 @@ class GSWorkflowPostDeployStack(Stack):
                 self,
                 "ModelDeploymentLambda",
                 runtime=lambda_.Runtime.PYTHON_3_9,
-                handler="index.handler",
+                handler="model_deployment.handler",
                 timeout=Duration.minutes(15),
                 memory_size=3072,  # Increased memory for large model download
                 ephemeral_storage_size=Size.gibibytes(10),  # Add more storage for the large model file
-                code=lambda_.Code.from_asset(lambda_code_path)
+                code=lambda_.Code.from_asset(lambda_code_path),
+                environment={
+                    "S3_BUCKET_NAME": output_data['GSWorkflowBaseStack']['S3BucketName']
+                }
             )
 
             # Grant S3 permissions to the Lambda
@@ -184,8 +188,9 @@ class GSWorkflowPostDeployStack(Stack):
                 service_token=provider.service_token,
                 properties={
                     "BucketName": output_data['GSWorkflowBaseStack']['S3BucketName'],
-                    "Timestamp": str(os.path.getmtime(__file__)),  # Force update on code change
-                    "DeploymentId": f"{id}-{env.account}-{env.region}"  # Ensure uniqueness
+                    "Timestamp": str(int(time.time())),  # Force update on each deployment
+                    "DeploymentId": f"{id}-{env.account}-{env.region}",  # Ensure uniqueness
+                    "ForceUpdate": "true"  # Additional property to force update
                 }
             )
 

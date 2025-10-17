@@ -126,7 +126,7 @@ def reduce_images_to_target(image_dir: str, target_count: int) -> int:
                 os.remove(file_path)
                 removed_count += 1
             except Exception as e:
-                print(f"Error removing {filename}: {str(e)}")
+                _LOGGER.error(f"Error removing {filename}: {str(e)}")
     
     return removed_count
 
@@ -161,7 +161,7 @@ def rotate_images_in_directory(input_dir, degrees=90):
                 img = cv2.imread(input_path)
                 
                 if img is None:
-                    print(f"Warning: Could not read image {filename}")
+                    _LOGGER.warning(f"Could not read image {filename}")
                     continue
                 
                 # Rotate the image 90 degrees clockwise
@@ -170,12 +170,12 @@ def rotate_images_in_directory(input_dir, degrees=90):
                 # Save the rotated image, overwriting the original
                 cv2.imwrite(input_path, rotated_img)
                 success_count += 1
-                print(f"Rotated and overwritten: {filename}")
+                _LOGGER.info(f"Rotated and overwritten: {filename}")
                 
             except Exception as e:
-                print(f"Error processing {filename}: {str(e)}")
+                _LOGGER.error(f"Error processing {filename}: {str(e)}")
     
-    print(f"Successfully rotated {success_count} images")
+    _LOGGER.info(f"Successfully rotated {success_count} images")
     return success_count
 
 
@@ -951,13 +951,23 @@ def main(args=None):
         action="store_true",
         help="Preserve original image names instead of renaming with frame pattern.",
     )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Set logging level",
+    )
 
     args = parser.parse_args(args)
 
-    if args.verbose:
+    # Set logging level based on arguments
+    if hasattr(args, 'log_level'):
+        logging_level = getattr(logging, args.log_level)
+    elif args.verbose:
         logging_level = logging.INFO
     else:
         logging_level = logging.WARNING
+    
     logging.basicConfig(
         format="[%(asctime)s] p%(process)s {%(pathname)s:%(lineno)d} %(levelname)s - %(message)s",
         level=logging_level,
@@ -984,19 +994,19 @@ def main(args=None):
         string_sort = args.string_sort
     temp_path = None
     if input_is_images:
-        print(f"Input is a directory: {video_path}")
+        _LOGGER.info(f"Input is a directory: {video_path}")
         if frame_rate is None:
             parser.error("--frame-rate must be specified when video_path is a directory")
         if video_path == image_dir:
             temp_path = os.path.join(os.path.dirname(video_path), "temp_images")
             os.makedirs(temp_path, exist_ok=True)
-            print(f"Moving {video_path} to {temp_path}...")
+            _LOGGER.info(f"Moving {video_path} to {temp_path}...")
             os.rename(video_path, temp_path)
             video_path = temp_path
         video_path = [
             f for f in Path(temp_path).iterdir() if f.name[0] != "." and f.suffix in IMAGE_SUFFIXES
         ]  # ignore hidden files
-        print(f"Number of images: {len(video_path)}")
+        _LOGGER.info(f"Number of images: {len(video_path)}")
 
         if string_sort:
             video_path = sorted(video_path)
@@ -1066,7 +1076,7 @@ def main(args=None):
     else:
         extract_frames_opencv(video_path=video_path, image_dir=image_dir, frames=frames)
     removed = reduce_images_to_target(image_dir, num_frames_target)
-    print(f"Removed {removed} images to maintain image count of {str(num_frames_target)}")
+    _LOGGER.info(f"Removed {removed} images to maintain image count of {str(num_frames_target)}")
     if temp_path is not None:
         shutil.rmtree(temp_path, ignore_errors=True)
     logging.info("Done!")

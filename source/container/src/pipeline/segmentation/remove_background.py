@@ -18,14 +18,17 @@
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY
 
-""" Remove the background of images given a directory of images """
+""" Remove the background of images given a directory of images using BackgroundRemover """
 
 import os
 import cv2
 import sys
+import io
 import argparse
 import subprocess
 import shutil
+import numpy as np
+from PIL import Image
 
 def copy_images_to_temp(original_dir, temp_dir):
     """
@@ -89,11 +92,104 @@ def has_alpha_channel(image_path):
         print(f"Error processing image {image_path}: {e}")
         return False
 
+def segment_human_rembg(image_path, session):
+    """Segment human using rembg library with enhanced processing"""
+    # Load image
+    with open(image_path, 'rb') as f:
+        input_data = f.read()
+    
+    # Remove background
+    from rembg import remove
+    output_data = remove(input_data, session=session)
+    
+    # Convert to PIL images
+    original_image = Image.open(image_path).convert('RGB')
+    segmented_image = Image.open(io.BytesIO(output_data)).convert('RGBA')
+    
+    # Extract mask from alpha channel
+    mask = np.array(segmented_image)[:, :, 3] / 255.0
+    
+    return mask, original_image, segmented_image
+
+def apply_enhanced_mask(image, mask, threshold=0.05):
+    """Apply enhanced mask processing for better human segmentation"""
+    img_array = np.array(image)
+    
+    # Normalize mask to 0-255 range
+    mask_uint8 = (mask * 255).astype(np.uint8)
+    
+    # Apply closing to fill small gaps
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask_closed = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel_close)
+    
+    # Apply dilation to expand the mask slightly
+    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask_dilated = cv2.dilate(mask_closed, kernel_dilate, iterations=1)
+    
+    # Apply Gaussian blur for smoother edges
+    mask_blurred = cv2.GaussianBlur(mask_dilated, (3, 3), 0)
+    
+    # Convert back to 0-1 range
+    enhanced_mask = mask_blurred / 255.0
+    
+    # Create RGBA image with enhanced mask
+    result = np.zeros((img_array.shape[0], img_array.shape[1], 4), dtype=np.uint8)
+    result[:, :, :3] = img_array
+    result[:, :, 3] = (enhanced_mask * 255).astype(np.uint8)
+    
+    return Image.fromarray(result, 'RGBA')
+
+def process_human_segmentation(input_dir, output_dir):
+    """Process images using enhanced human segmentation"""
+    try:
+        from rembg import remove, new_session
+        session = new_session('u2net_human_seg')
+    except ImportError:
+        raise RuntimeError("rembg library not available. Please install with: pip install rembg")
+    
+    # Make remove function available in the scope
+    global remove_func
+    remove_func = remove
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get image files
+    image_extensions = ('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')
+    image_files = [
+        f for f in os.listdir(input_dir)
+        if os.path.isfile(os.path.join(input_dir, f))
+        and any(f.lower().endswith(ext) for ext in image_extensions)
+    ]
+    
+    processed_count = 0
+    for image_file in image_files:
+        input_path = os.path.join(input_dir, image_file)
+        base_name = os.path.splitext(image_file)[0]
+        output_path = os.path.join(output_dir, f"{base_name}.png")
+        
+        try:
+            # Segment human
+            mask, original_image, segmented_image = segment_human_rembg(input_path, session)
+            
+            # Apply enhanced processing
+            enhanced_image = apply_enhanced_mask(original_image, mask)
+            
+            # Save result
+            enhanced_image.save(output_path)
+            processed_count += 1
+            
+        except Exception as e:
+            print(f"Error processing {image_file}: {e}")
+            continue
+    
+    return processed_count
+
 if __name__ == '__main__':
     # Create Argument Parser
     parser = argparse.ArgumentParser(
-        prog='',
-        description=''
+        prog='background-remover',
+        description='Remove background from a directory of images'
     )
 
     # Define the Arguments
@@ -105,7 +201,6 @@ if __name__ == '__main__':
         help='Target data directory for the images'
     )
 
-    # Define the Arguments
     parser.add_argument(
         '-o', '--output_dir',
         required=True,
@@ -119,7 +214,7 @@ if __name__ == '__main__':
         required=False,
         default="u2net",
         action='store',
-        help='The name of the background model to use (u2net of u2net_human_seg)'
+        help='The name of the background model to use (u2net, u2net_human_seg for enhanced human segmentation)'
     )
 
     parser.add_argument(
@@ -240,43 +335,17 @@ if __name__ == '__main__':
     print(f"Has_alpha:{has_alpha}")
     try:
         # Validate model parameter
-        allowed_models = ["u2net", "u2net_human_seg", "sam2"]
+        allowed_models = ["u2net", "u2net_human_seg"]
         if model not in allowed_models:
             raise ValueError(f"Invalid model: {model}")
         
-        # Validate numeric parameters
-        if num_threads and not str(num_threads).isdigit():
-            raise ValueError(f"Invalid num_threads: {num_threads}")
-        if num_gpus and not str(num_gpus).isdigit():
-            raise ValueError(f"Invalid num_gpus: {num_gpus}")
-        
-        # Build command arguments - input validation above prevents injection
-        args = [
-            sys.executable, "-m", 
-            "backgroundremover.backgroundremover.cmd.cli",
-            "-wn", str(num_threads) if num_threads else "1",
-            "-gb", str(num_gpus) if num_gpus else "0",
-            "-m", model,
-            "-if", input_dir_path,
-            "-of", output_dir_path
-        ]
-
-        # Improve the mask if alpha channel exists
-        if has_alpha is True:
-            args.extend(["-a", "-ae", "15"])
-
-        subprocess.run(args, check=True)  # nosemgrep: dangerous-subprocess-use-audit,dangerous-subprocess-use-tainted-env-args
-        """
-        for i, file in enumerate(files):
-            # Validate and sanitize inputs
-            if not isinstance(file, str) or '..' in file or '/' in file or '\\' in file:
-                raise ValueError(f"Invalid filename: {file}")
-            
-            # Validate model parameter
-            allowed_models = ["u2net", "u2net_human_seg", "sam2"]
-            if model not in allowed_models:
-                raise ValueError(f"Invalid model: {model}")
-            
+        # Use enhanced human segmentation for 'human' model
+        if model == "u2net_human_seg":
+            print("Using enhanced human segmentation...")
+            processed_count = process_human_segmentation(input_dir_path, output_dir_path)
+            print(f"Processed {processed_count} images with enhanced human segmentation")
+        else:
+            # Use original backgroundremover for other models
             # Validate numeric parameters
             if num_threads and not str(num_threads).isdigit():
                 raise ValueError(f"Invalid num_threads: {num_threads}")
@@ -290,17 +359,15 @@ if __name__ == '__main__':
                 "-wn", str(num_threads) if num_threads else "1",
                 "-gb", str(num_gpus) if num_gpus else "0",
                 "-m", model,
-                "-i", os.path.join(input_dir_path, file),
-                "-o", os.path.join(output_dir_path, file)
+                "-if", input_dir_path,
+                "-of", output_dir_path
             ]
 
-            # Improve the mask if alpha channel exists
-            if has_alpha is True:
+            # Improve the mask if alpha channel exists, but skip alpha matting for human segmentation
+            if has_alpha is True and model != "u2net_human_seg":
                 args.extend(["-a", "-ae", "15"])
 
             subprocess.run(args, check=True)  # nosemgrep: dangerous-subprocess-use-audit,dangerous-subprocess-use-tainted-env-args
-        if temp_path is not None:
-            shutil.rmtree(temp_path, ignore_errors=True)
-        """
+
     except Exception as e:
         raise RuntimeError(f"Error running background removal component: {e}") from e

@@ -28,7 +28,19 @@ resource "aws_cloudwatch_log_group" "step_functions_log_group" {
 resource "aws_sfn_state_machine" "sfn_state_machine" {
   name = "${var.project_prefix}-state-machine-${var.tf_random_suffix}"
   role_arn = aws_iam_role.step_functions_role.arn
-  definition = templatefile("${path.module}/../../../../source/state-machines/ASLdefinition.json", {})
+  definition = templatefile("${path.module}/../../../../source/state-machines/ASLdefinition.json", {
+    batch_job_queue = aws_batch_job_queue.batch_job_queue.arn
+    batch_job_definition = aws_batch_job_definition.batch_job_definition.arn
+    complete_lambda_name = aws_lambda_function.lambda_workflow_complete.function_name
+    job_definition_selector_function_name = aws_lambda_function.job_definition_selector.function_name
+  })
+  
+  # Set timeout to 72 hours (259200 seconds)
+  timeouts {
+    create = "5m"
+    update = "5m"
+    delete = "5m"
+  }
   logging_configuration {
     include_execution_data = true
     level                  = "ALL"
@@ -40,6 +52,8 @@ resource "aws_sfn_state_machine" "sfn_state_machine" {
   depends_on = [
     aws_iam_role_policy_attachment.attach_iam_policy_step_function_role,
     aws_lambda_function.lambda_workflow_complete,
+    aws_batch_job_queue.batch_job_queue,
+    aws_batch_job_definition.batch_job_definition
   ]
 }
 

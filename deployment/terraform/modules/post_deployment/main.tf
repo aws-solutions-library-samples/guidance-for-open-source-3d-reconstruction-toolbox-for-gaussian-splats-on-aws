@@ -28,7 +28,7 @@ terraform {
     }
     aws = {
       source = "hashicorp/aws"
-      version = "~> 5.99.1"
+      version = "~> 6.12.0"
     }
     archive = {
       source  = "hashicorp/archive"
@@ -50,6 +50,8 @@ locals {
   repo_name = split("/", local.ecr_repo_url)[1]
   tf_random_suffix = split("-", local.project_key)[1]
 }
+
+
 
 # Write updated outputs.json with project prefix for scripts to use
 resource "local_file" "updated_outputs" {
@@ -126,7 +128,7 @@ resource "aws_iam_role_policy" "lambda_s3_access" {
 # Zip the Lambda code
 data "archive_file" "lambda_zip" {
   type        = "zip"
-  source_dir = "${path.module}/../../../../source/lambda/model_deployment/"
+  source_file = "${path.module}/../../../../source/lambda/model_deployment/model_deployment.py"
   output_path = "${path.module}/../../../../source/lambda/model_deployment/model_deployment.zip"
 }
 

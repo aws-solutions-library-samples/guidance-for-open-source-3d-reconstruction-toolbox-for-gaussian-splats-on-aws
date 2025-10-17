@@ -26,6 +26,32 @@ from pathlib import Path
 import numpy as np
 from typing import Union, Optional
 import argparse
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import logging
+
+def extract_frame_worker(args):
+    """Worker function for extracting a single frame"""
+    video_path, frame_idx, output_path, resize_width, resize_height = args
+    
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return False
+    
+    # Enable auto-rotation to preserve original orientation
+    cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
+    
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ret, frame = cap.read()
+    cap.release()
+    
+    if not ret:
+        return False
+    
+    if resize_width and resize_height:
+        frame = cv2.resize(frame, (resize_width, resize_height), interpolation=cv2.INTER_AREA)
+    
+    return cv2.imwrite(str(output_path), frame)
 
 def extract_frames(
     video_path: Union[str, Path], 
@@ -35,6 +61,7 @@ def extract_frames(
     resize_height: Optional[int] = None,
     start_time: float = 0.0,
     end_time: Optional[float] = None,
+    num_workers: int = 1,
 ) -> bool:
     """
     Extract frames uniformly distributed across a video and save as PNG images.
@@ -73,6 +100,12 @@ def extract_frames(
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames / fps
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Check for rotation metadata
+        rotation = cap.get(cv2.CAP_PROP_ORIENTATION_META)
+        logging.info(f"Video rotation metadata: {rotation}")
 
         # Calculate frame range based on time constraints
         start_frame = int(start_time * fps)
@@ -81,47 +114,50 @@ def extract_frames(
         if start_frame >= end_frame:
             raise ValueError("Start time must be less than end time")
 
-        print(f"Video info:")
-        print(f"Total frames: {total_frames}")
-        print(f"FPS: {fps:.2f}")
-        print(f"Duration: {duration:.2f} seconds")
-        print(f"Processing range: {start_time:.2f}s to {end_time if end_time else duration:.2f}s")
+        logging.info(f"Video info:")
+        logging.info(f"Resolution: {width}x{height}")
+        logging.info(f"Total frames: {total_frames}")
+        logging.info(f"FPS: {fps:.2f}")
+        logging.info(f"Duration: {duration:.2f} seconds")
+        logging.info(f"Processing range: {start_time:.2f}s to {end_time if end_time else duration:.2f}s")
+        logging.info(f"Video orientation: {'Portrait' if height > width else 'Landscape'}")
 
         # Calculate frame indices to extract
         frame_indices = np.linspace(start_frame, end_frame-1, num_frames, dtype=int)
-
-        for i, frame_idx in enumerate(frame_indices):
-            # Set video to desired frame
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-
-            # Read frame
-            ret, frame = cap.read()
-            if not ret:
-                print(f"Warning: Could not read frame {frame_idx}")
-                continue
-
-            # Resize if specified
-            if resize_width and resize_height:
-                frame = cv2.resize(
-                    frame,
-                    (resize_width, resize_height),
-                    interpolation=cv2.INTER_AREA
-                )
-
-            # Generate output filename with padding
-            output_path = output_dir / f"frame_{i:04d}.png"
-
-            # Save frame as PNG
-            cv2.imwrite(str(output_path), frame)
-
-            # Print progress
-            if (i + 1) % 10 == 0:
-                print(f"Processed {i + 1}/{num_frames} frames")
-
-        # Release video capture
+        
+        # Release the initial video capture
         cap.release()
+        
+        # Prepare arguments for multiprocessing
+        worker_args = []
+        for i, frame_idx in enumerate(frame_indices):
+            output_path = output_dir / f"frame_{i:04d}.png"
+            worker_args.append((video_path, frame_idx, output_path, resize_width, resize_height))
+        
+        # Extract frames using multiprocessing
+        if num_workers > 1:
+            logging.info(f"Using {num_workers} workers for frame extraction")
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                futures = [executor.submit(extract_frame_worker, args) for args in worker_args]
+                
+                completed = 0
+                for future in as_completed(futures):
+                    success = future.result()
+                    if not success:
+                        logging.warning(f"Failed to extract frame")
+                    completed += 1
+                    if completed % 10 == 0:
+                        logging.info(f"Processed {completed}/{num_frames} frames")
+        else:
+            # Single-threaded extraction
+            for i, args in enumerate(worker_args):
+                success = extract_frame_worker(args)
+                if not success:
+                    logging.warning(f"Failed to extract frame {i}")
+                if (i + 1) % 10 == 0:
+                    logging.info(f"Processed {i + 1}/{num_frames} frames")
 
-        print(f"Successfully extracted {num_frames} frames to {output_dir}")
+        logging.info(f"Successfully extracted {num_frames} frames to {output_dir}")
         return True
 
     except Exception as e:
@@ -219,8 +255,27 @@ if __name__ == "__main__":
         type=float,
         help='End time in seconds (default: end of video)'
     )
+    parser.add_argument(
+        '-nw', '--num-workers',
+        type=int,
+        default=1,
+        help='Number of worker processes for frame extraction (default: 1)'
+    )
+    parser.add_argument(
+        '-ll', '--log-level',
+        type=str,
+        default='INFO',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        help='Logging level (default: INFO)'
+    )
 
     args = parser.parse_args()
+    
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper()),
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
 
     # Validate resize arguments
     if (args.resize_width is None) != (args.resize_height is None):
@@ -230,6 +285,12 @@ if __name__ == "__main__":
     if args.num_frames <= 0:
         parser.error("Number of frames must be positive")
 
+    # Validate time range
+    if args.start_time < 0:
+        args.start_time = 0.0
+    if args.end_time is not None and args.end_time <= 0:
+        args.end_time = None
+
     # Extract frames
     success = extract_frames(
         video_path=args.video_path,
@@ -238,7 +299,8 @@ if __name__ == "__main__":
         resize_width=args.resize_width,
         resize_height=args.resize_height,
         start_time=args.start_time,
-        end_time=args.end_time
+        end_time=args.end_time,
+        num_workers=args.num_workers
     )
 
     if not success:

@@ -122,13 +122,32 @@ def check_for_timeout(training_job_name):
         print(f"Error checking for timeout: {str(e)}")
         return False, None
 
+def is_cuda_oom_failure(message):
+    """Check if the message indicates a CUDA Out of Memory error or CUDA assertion failure."""
+    oom_patterns = [
+        'CUDA out of memory',
+        'OutOfMemoryError',
+        'torch.OutOfMemoryError',
+        'CUDA error: device-side assert triggered',
+        'IndexKernel.cu',
+        'index out of bounds',
+        'device-side assertions',
+        'gsplat/strategy/ops.py',
+        'torch.where(mask)[0]',
+        'RuntimeError: CUDA error',
+        '3dgrut_wrapper.py' and 'failed with return code -11',
+        'Command \'/usr/local/bin/python 3dgrut_wrapper.py\'' and 'failed with return code -11'
+    ]
+    
+    if any(pattern in message for pattern in oom_patterns):
+        print(f"CUDA failure detected in message: {message[:100]}...")  # Debug log
+        return True
+    return False
+
 def is_sfm_failure(message):
     """Check if the message indicates an SFM reconstruction failure."""
-    # Check for various SFM failure patterns
+    # Check for various SFM failure patterns - exclude gsplat errors which are training issues
     sfm_patterns = [
-        'torch.multinomial',
-        'gsplat/strategy/ops.py',
-        '_multinomial_sample',
         'glomap::ViewGraph::KeepLargestConnectedComponents',
         'Command \'glomap mapper\'' and 'failed with return code -11'
     ]
@@ -138,14 +157,34 @@ def is_sfm_failure(message):
         return True
     return False
 
-def get_cloudwatch_logs(training_job_name):
+def get_cloudwatch_logs(training_job_name, is_batch_job=False, log_stream_name=None):
     logs_client = boto3.client('logs')
     
     try:
-        response = logs_client.describe_log_streams(
-            logGroupName='/aws/sagemaker/TrainingJobs',
-            logStreamNamePrefix=training_job_name
-        )
+        if is_batch_job and log_stream_name:
+            # For Batch jobs, use the provided log stream name
+            log_group_name = '/aws/batch/job'
+            print(f"Looking for Batch logs in group: {log_group_name}, stream: {log_stream_name}")
+            
+            # Try to get the exact log stream first
+            try:
+                response = logs_client.describe_log_streams(
+                    logGroupName=log_group_name,
+                    logStreamNamePrefix=log_stream_name
+                )
+                print(f"Found {len(response.get('logStreams', []))} log streams")
+            except Exception as e:
+                print(f"Error accessing Batch log group {log_group_name}: {e}")
+                return {
+                    'status': 'ERROR',
+                    'message': f"Unable to access Batch logs: {str(e)}"
+                }
+        else:
+            # For SageMaker jobs, use the original logic
+            response = logs_client.describe_log_streams(
+                logGroupName='/aws/sagemaker/TrainingJobs',
+                logStreamNamePrefix=training_job_name
+            )
 
         error_messages = []
         found_error = False
@@ -160,10 +199,12 @@ def get_cloudwatch_logs(training_job_name):
             'Traceback',
             'terminate called',
             'failed',
-            'Failed'
+            'Failed',
+            'OutOfMemoryError',
+            'CUDA out of memory'
         ]
         
-        # Messages to ignore (false positives)
+            # Messages to ignore (false positives)
         ignore_messages = [
             'TensorFloat32 tensor cores',
             'libio_e57.so',
@@ -223,7 +264,9 @@ def get_cloudwatch_logs(training_job_name):
             'torch.multinomial',
             'TORCH_USE_CUDA_DSA',
             'device-side assertions',
-            'glomap::ViewGraph::KeepLargestConnectedComponents'
+            'glomap::ViewGraph::KeepLargestConnectedComponents',
+            'Failed to extract frame',
+            'mean_reprojection_error'
         ]
         
         def should_ignore_message(message):
@@ -264,9 +307,11 @@ def get_cloudwatch_logs(training_job_name):
         
             return False
         
+        log_group_name = '/aws/batch/job' if is_batch_job else '/aws/sagemaker/TrainingJobs'
+        
         for stream in response.get('logStreams', []):
             events = logs_client.get_log_events(
-                logGroupName='/aws/sagemaker/TrainingJobs',
+                logGroupName=log_group_name,
                 logStreamName=stream['logStreamName'],
                 startFromHead=False
             )
@@ -274,7 +319,94 @@ def get_cloudwatch_logs(training_job_name):
             for event in events['events']:
                 message = event['message']
                 
-                # Check for SFM failure first
+                # Check for CUDA OOM failure first
+                if is_cuda_oom_failure(message):
+                    # Determine if it's a memory issue or assertion failure
+                    if 'CUDA out of memory' in message or 'OutOfMemoryError' in message:
+                        cuda_error_message = """
+            ❌ CUDA Out of Memory Error
+
+            The training process ran out of GPU memory during execution. This typically occurs when:
+
+            1. Dataset Issues:
+            - Too many high-resolution images
+            - Images are too large for the selected GPU
+            - Video resolution is too high
+
+            2. Model Configuration:
+            - Training steps set too high for available memory
+            - Model complexity exceeds GPU capacity
+            - Batch size too large
+
+            3. Instance Type:
+            - Selected instance has insufficient GPU memory
+            - Multiple processes competing for GPU memory
+
+            Recommendations:
+            1. Reduce Dataset Size:
+            - Limit max images to 200-300
+            - Use lower resolution input (1080p or less)
+            - Consider cropping or downscaling images
+
+            2. Adjust Training Parameters:
+            - Reduce max training steps
+            - Use a simpler model (splatfacto instead of 3dgrt)
+            - Enable background removal to reduce scene complexity
+
+            3. Upgrade Instance:
+            - Use ml.g5.8xlarge (32GB GPU memory)
+            - Use ml.g6.8xlarge for newer GPU architecture
+            - Consider ml.g6e.4xlarge for cost-effective option
+
+            Technical Details:
+            - Error: CUDA OutOfMemoryError during training
+            - GPU Memory: Insufficient for current workload
+            - Status: Process terminated due to memory exhaustion"""
+                    else:
+                        cuda_error_message = """
+            ❌ CUDA Memory/Indexing Error
+
+            The training process encountered a CUDA error during model execution. This typically occurs when:
+
+            1. GPU Memory Issues:
+            - Insufficient GPU memory for the model complexity
+            - Memory fragmentation during training
+            - Competing processes using GPU memory
+
+            2. Model/Data Compatibility:
+            - Dataset too complex for available GPU memory
+            - Model requires more memory than available
+            - Indexing errors due to memory constraints
+
+            3. Instance Limitations:
+            - Current GPU instance insufficient for training
+            - Memory allocation failures during optimization
+
+            Recommendations:
+            1. Reduce Model Complexity:
+            - Use simpler model (splatfacto instead of 3dgrt)
+            - Reduce max training steps (try 15000-20000)
+            - Enable background removal to simplify scene
+
+            2. Optimize Dataset:
+            - Limit max images to 200-250
+            - Use lower resolution input (1080p or less)
+            - Remove complex/cluttered scenes
+
+            3. Upgrade Instance:
+            - Use ml.g5.8xlarge (32GB GPU memory)
+            - Use ml.g6.8xlarge for newer architecture
+            - Consider ml.g6e.4xlarge for better memory handling
+
+            Technical Details:
+            - Error: CUDA device-side assertion failure
+            - Component: Gaussian Splat training optimization
+            - Status: Process terminated due to GPU memory/indexing error"""
+                    error_messages.append(cuda_error_message)
+                    found_error = True
+                    break
+                
+                # Check for SFM failure
                 if is_sfm_failure(message):
                     sfm_error_message = """
             ❌ Structure from Motion (SFM) Reconstruction Failed
@@ -481,44 +613,181 @@ def lambda_handler(event, context):
         # Check if there was an error in the previous state
         error = event.get('error', None)
         training_job_name = str(event['envVars']['UUID'])
+        
+        # Check if this is a Batch job
+        is_batch_job = event.get('result', {}).get('JobId') is not None or event.get('envVars', {}).get('COMPUTE_TYPE') == 'batch'
+        
+        # For successful Batch jobs, skip error checking
+        if is_batch_job and event.get('status') == 'SUCCESS' and event.get('result', {}).get('Status') == 'SUCCEEDED':
+            # Get timing information from Batch job
+            batch_result = event.get('result', {})
+            started_at = batch_result.get('StartedAt', 0)
+            stopped_at = batch_result.get('StoppedAt', 0)
+            submitted_at = batch_result.get('SubmittedAt', 0)
+            
+            # Calculate durations
+            if started_at and stopped_at:
+                compute_time = int((stopped_at - started_at) / 1000)  # Convert ms to seconds
+                compute_minutes = compute_time // 60
+                compute_seconds = compute_time % 60
+                compute_time_str = f"{compute_minutes}m {compute_seconds}s"
+            else:
+                compute_time_str = "Unknown"
+                
+            if submitted_at and started_at:
+                queue_time = int((started_at - submitted_at) / 1000)  # Convert ms to seconds
+                queue_minutes = queue_time // 60
+                queue_seconds = queue_time % 60
+                queue_time_str = f"{queue_minutes}m {queue_seconds}s"
+            else:
+                queue_time_str = "Unknown"
+            
+            # Update DynamoDB status
+            update_expression = 'SET uuidStatus = :uuidStatus'
+            expression_attribute_values = {':uuidStatus': 'Complete'}
+            update_ddb_item_value(table, key, update_expression, expression_attribute_values)
+            
+            # Get additional job details from DynamoDB
+            result_workflow = get_ddb_item_value(table, key)
+            workflow_item = result_workflow.get("Item", {})
+            
+            # Extract model from training config
+            model = "N/A"
+            if 'training' in workflow_item and 'model' in workflow_item['training']:
+                model = workflow_item['training']['model']
+            elif 'model' in workflow_item:
+                model = workflow_item['model']
+            
+            # Extract s3Input
+            s3_input = workflow_item.get('s3Input', 'N/A')
+            
+            # Extract instanceType
+            instance_type = workflow_item.get('instanceType', 'N/A')
+            
+            # Determine if this is a refine job (runSfm == false)
+            sfm_config = workflow_item.get('sfm', {})
+            run_sfm = sfm_config.get('enable', True) if isinstance(sfm_config, dict) else True
+            refine_job = not run_sfm
+            
+            # Send success notification
+            message_text = f"""✅ Splat Processing Complete
+            
+File Processed Successfully: {event['envVars']['FILENAME']}
 
-        # Check for timeout first
-        is_timeout, timeout_message = check_for_timeout(training_job_name)
-        if is_timeout:
-            # Handle timeout as a failure
-            error_message = f"""
-    ❌ Training Job Timeout
+📂 Output Location:
+{event['envVars']['S3_OUTPUT']}/{event['envVars']['UUID']}
 
-    Your 3D Gaussian Splat job has timed out.
+💻 Compute Method: AWS Batch (Spot Instances)
 
-    {timeout_message}
+📋 Job Details:
+• Model: {model}
+• S3 Input: {s3_input}
+• Instance Type: {instance_type}
 
-    Possible reasons:
-    1. The job exceeded the maximum allowed runtime
-    2. The instance may have run out of memory
-    3. The dataset might be too large for the selected instance type
+⏱️ Timing Details:
+• Queue Time: {queue_time_str}
+• Compute Time: {compute_time_str}
+• Total Time: {queue_time_str} + {compute_time_str}
 
-    Recommendations:
-    1. Try using a larger instance type
-    2. Reduce the number of input images
-    3. Decrease the maximum number of steps
-    4. Check if your input media has any issues
-    """
-            # Send notification about timeout
-            send_sns_notification(training_job_name, error_message, is_error=True)
+------------------------------------------
+This is an automated message from the Splat Processing System"""
+
+            sns_client.publish(
+                TargetArn=sns_topic_arn,
+                Message=message_text,
+                Subject=f"✅ Splat Processing Complete: {event['envVars']['UUID']}",
+            )
+            
             return {
                 'statusCode': 200,
-                'body': json.dumps('Timeout detected and notification sent')
+                'body': {
+                    'status': 'Completed',
+                    'computeMethod': 'AWS Batch',
+                    'queueTime': queue_time_str,
+                    'computeTime': compute_time_str
+                }
             }
 
-        # Get the training job details
-        sagemaker_client = boto3.client('sagemaker')
-        response = sagemaker_client.describe_training_job(
-            TrainingJobName=training_job_name
-        )
+        # Skip timeout check for Batch jobs (handled differently)
+        if not is_batch_job:
+            # Check for timeout first
+            is_timeout, timeout_message = check_for_timeout(training_job_name)
+            if is_timeout:
+                # Handle timeout as a failure
+                error_message = f"""
+        ❌ Training Job Timeout
 
-        # Get container logs first
-        container_logs = get_cloudwatch_logs(training_job_name)
+        Your 3D Gaussian Splat job has timed out.
+
+        {timeout_message}
+
+        Possible reasons:
+        1. The job exceeded the maximum allowed runtime
+        2. The instance may have run out of memory
+        3. The dataset might be too large for the selected instance type
+
+        Recommendations:
+        1. Try using a larger instance type
+        2. Reduce the number of input images
+        3. Decrease the maximum number of steps
+        4. Check if your input media has any issues
+        """
+                # Send notification about timeout
+                send_sns_notification(training_job_name, error_message, is_error=True)
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps('Timeout detected and notification sent')
+                }
+
+        # Only get SageMaker job details for non-Batch jobs
+        if not is_batch_job:
+            # Get the training job details
+            sagemaker_client = boto3.client('sagemaker')
+            response = sagemaker_client.describe_training_job(
+                TrainingJobName=training_job_name
+            )
+
+            # Get container logs first
+            container_logs = get_cloudwatch_logs(training_job_name)
+        else:
+            # For Batch jobs that reach here, they failed
+            # Extract log stream name from the error details if available
+            log_stream_name = None
+            print(f"Batch job failed. Error: {error}")
+            
+            if error:
+                try:
+                    # Handle different error formats
+                    if isinstance(error, dict) and 'Cause' in error:
+                        cause_str = error['Cause']
+                    elif hasattr(error, 'get') and error.get('Cause'):
+                        cause_str = error.get('Cause')
+                    else:
+                        cause_str = str(error)
+                    
+                    print(f"Parsing cause for logs: {cause_str[:500]}...")
+                    
+                    # Parse the JSON cause
+                    if isinstance(cause_str, str) and cause_str.startswith('{'):
+                        cause_data = json.loads(cause_str)
+                        # Look for log stream in different locations
+                        if 'Container' in cause_data and 'LogStreamName' in cause_data['Container']:
+                            log_stream_name = cause_data['Container']['LogStreamName']
+                        elif 'Attempts' in cause_data and len(cause_data['Attempts']) > 0:
+                            attempt = cause_data['Attempts'][0]
+                            if 'Container' in attempt and 'LogStreamName' in attempt['Container']:
+                                log_stream_name = attempt['Container']['LogStreamName']
+                    
+                    print(f"Extracted log stream: {log_stream_name}")
+                except Exception as parse_error:
+                    print(f"Error parsing batch error for logs: {parse_error}")
+            
+            # Try to get Batch job logs
+            if log_stream_name:
+                container_logs = get_cloudwatch_logs(training_job_name, is_batch_job=True, log_stream_name=log_stream_name)
+            else:
+                container_logs = {'status': 'ERROR', 'message': 'Batch job failed - unable to retrieve logs (no log stream found)'}
+            response = None
 
         # Check if container logs indicate an error
         if container_logs.get('status') == 'ERROR':
@@ -546,6 +815,31 @@ def lambda_handler(event, context):
         expression_attribute_values = {':uuidStatus': 'Complete'}
         update_ddb_item_value(table, key, update_expression, expression_attribute_values)
 
+        # Get additional job details from DynamoDB
+        result_workflow = get_ddb_item_value(table, key)
+        workflow_item = result_workflow.get("Item", {})
+        
+        # Extract model from training config
+        model = "N/A"
+        if 'training' in workflow_item and 'model' in workflow_item['training']:
+            model = workflow_item['training']['model']
+        elif 'model' in workflow_item:
+            model = workflow_item['model']
+        
+        # Extract s3Input
+        s3_input = workflow_item.get('s3Input', 'N/A')
+        
+        # Extract instanceType
+        instance_type = workflow_item.get('instanceType', 'N/A')
+        
+        # Determine if this is a refine job (runSfm == false)
+        sfm_config = workflow_item.get('sfm', {})
+        run_sfm = sfm_config.get('enable', True) if isinstance(sfm_config, dict) else True
+        refine_job = not run_sfm
+        
+        # Determine compute type
+        compute_type = "SageMaker (On-Demand)"
+        
         # Format success message
         message_text = f"""✅ Splat Processing Complete
         
@@ -553,6 +847,13 @@ File Processed Successfully: {event['envVars']['FILENAME']}
 
 📂 Output Location:
 {event['envVars']['S3_OUTPUT']}/{event['envVars']['UUID']}
+
+💻 Compute Method: {compute_type}
+
+📋 Job Details:
+• Model: {model}
+• S3 Input: {s3_input}
+• Instance Type: {instance_type}
 
 📊 Processing Details:
 {json.dumps(output, indent=2)}
@@ -576,7 +877,48 @@ This is an automated message from the Splat Processing System"""
         update_ddb_item_value(table, key, update_expression, expression_attribute_values)
 
         # Always try to get container logs first
-        container_logs = get_cloudwatch_logs(training_job_name)
+        # Check if this is a Batch job error
+        is_batch_error = event.get('result', {}).get('JobId') is not None or event.get('envVars', {}).get('COMPUTE_TYPE') == 'batch'
+        
+        if is_batch_error:
+            # Extract log stream name from the error details if available
+            log_stream_name = None
+            print(f"Batch error detected. Error object: {error}")
+            
+            if error:
+                try:
+                    # Handle different error formats
+                    if isinstance(error, dict) and 'Cause' in error:
+                        cause_str = error['Cause']
+                    elif hasattr(error, 'get') and error.get('Cause'):
+                        cause_str = error.get('Cause')
+                    else:
+                        cause_str = str(error)
+                    
+                    print(f"Parsing cause string: {cause_str[:500]}...")
+                    
+                    # Parse the JSON cause
+                    if isinstance(cause_str, str) and cause_str.startswith('{'):
+                        cause_data = json.loads(cause_str)
+                        # Look for log stream in different locations
+                        if 'Container' in cause_data and 'LogStreamName' in cause_data['Container']:
+                            log_stream_name = cause_data['Container']['LogStreamName']
+                        elif 'Attempts' in cause_data and len(cause_data['Attempts']) > 0:
+                            attempt = cause_data['Attempts'][0]
+                            if 'Container' in attempt and 'LogStreamName' in attempt['Container']:
+                                log_stream_name = attempt['Container']['LogStreamName']
+                    
+                    print(f"Extracted log stream name: {log_stream_name}")
+                except Exception as parse_error:
+                    print(f"Error parsing batch error details: {parse_error}")
+            
+            # Try to get Batch job logs
+            if log_stream_name:
+                container_logs = get_cloudwatch_logs(training_job_name, is_batch_job=True, log_stream_name=log_stream_name)
+            else:
+                container_logs = {'status': 'ERROR', 'message': 'Batch job failed - unable to retrieve logs (no log stream found)'}
+        else:
+            container_logs = get_cloudwatch_logs(training_job_name)
         
         error_message = container_logs.get('message', '')
         

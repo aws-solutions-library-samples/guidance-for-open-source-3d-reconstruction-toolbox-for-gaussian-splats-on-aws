@@ -32,6 +32,3 @@ variable "project_prefix" {
   description = "The project prefix to add to resource names."
   type        = string
 }
-
-# These variables are no longer needed as we're reading from outputs.json
-# Keeping the file for reference

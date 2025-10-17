@@ -39,6 +39,7 @@ def validate_config(config: dict):
     required_dict_props = {
         "uuid": None,
         "instanceType": None,
+        "useSpotInstance": None,
         "logVerbosity": None,
         "s3": {
             "bucketName": None,
@@ -48,6 +49,8 @@ def validate_config(config: dict):
         },
         "videoProcessing": {
             "maxNumImages": None,
+            "videoStartTime": None,
+            "videoStopTime": None
         },
         "imageProcessing": {
             "filterBlurryImages": None
@@ -69,20 +72,30 @@ def validate_config(config: dict):
         "training": {
             "enable": None,
             "maxSteps": None,
-            "model": None,
-            "enableMultiGpu": None,
-            "rotateSplat": None
+            "model": None
+        },
+        "postProcessing": {
+            "rotateSplat": None,
+            "refineOutputBounds": None,
+            "refinementMode": None,
+            "enableSpz": None,
+            "enableSogs": None
         },
         "sphericalCamera": {
             "enable": None,
-            "cubeFacesToRemove": None,
-            "optimizeSequentialFrameOrder": None
+            "cubeFacesToRemove": None
         },
         "segmentation": {
-            "removeBackground": None,
-            "backgroundRemovalModel": None,
-            "maskThreshold": None,
-            "removeHumanSubject": None
+            "backgroundRemoval": {
+                "enable": None,
+                "model": None,
+                "maskThreshold": None
+            },
+            "objectRemoval": {
+                "enable": None,
+                "action": None,
+                "objects": None
+            }
         }
     }
 
@@ -146,8 +159,8 @@ def lambda_handler(event, context):
 
             if 'Item' in result:
                 # update uuid status if found
-                update_expression = 'SET uuidStatus = :uuidStatus'
-                expression_attribute_values = {':uuidStatus': 'In-Progress'}
+                update_expression = 'SET uuidStatus = :status'
+                expression_attribute_values = {':status': 'In-Progress'}
                 try:
                     update_result = table.update_item(
                         Key=key,
@@ -173,14 +186,17 @@ def lambda_handler(event, context):
 
                 item = {
                     'uuid':  json_content["uuid"],
-                    'status': 'In-Progress',
+                    'uuidStatus': 'In-Progress',
                     'startTimestamp': datestamp,
                     'instanceType': str(json_content['instanceType']),
+                    'useSpotInstance': str(json_content['useSpotInstance']),
                     "logVerbosity": str(json_content['logVerbosity']),
                     "s3Input": f"s3://{json_content["s3"]["bucketName"]}/{json_content["s3"]["inputPrefix"]}/{json_content["s3"]["inputKey"]}",
                     "s3Output": f"s3://{json_content["s3"]["bucketName"]}/{json_content["s3"]["outputPrefix"]}",
                     "filename": str(json_content["s3"]["inputKey"]),
                     "maxNumImages": str(json_content["videoProcessing"]["maxNumImages"]),
+                    "videoStartTime": str(json_content["videoProcessing"]["videoStartTime"]),
+                    "videoStopTime": str(json_content["videoProcessing"]["videoStopTime"]),
                     "filterBlurryImages": str(json_content["imageProcessing"]["filterBlurryImages"]),
                     "runSfm": str(json_content["sfm"]["enable"]),
                     "sfmSoftwareName": str(json_content["sfm"]["softwareName"]),
@@ -193,15 +209,19 @@ def lambda_handler(event, context):
                     "runTrain": str(json_content["training"]["enable"]),
                     "model": str(json_content["training"]["model"]),
                     "maxSteps": str(json_content["training"]["maxSteps"]),
-                    "enableMultiGpu": str(json_content["training"]["enableMultiGpu"]),
-                    "rotateSplat": str(json_content["training"]["rotateSplat"]),
+                    "rotateSplat": str(json_content["postProcessing"]["rotateSplat"]),
+                    "refineOutputBounds": str(json_content["postProcessing"]["refineOutputBounds"]),
+                    "refinementMode": str(json_content["postProcessing"]["refinementMode"]),
+                    "enableSpz": str(json_content["postProcessing"]["enableSpz"]),
+                    "enableSogs": str(json_content["postProcessing"]["enableSogs"]),
                     "sphericalCamera": str(json_content["sphericalCamera"]["enable"]),
                     "sphericalCubeFacesToRemove": str(json_content["sphericalCamera"]["cubeFacesToRemove"]),
-                    "optimizeSequentialSphericalFrameOrder": str(json_content["sphericalCamera"]["optimizeSequentialFrameOrder"]),
-                    "removeBackground": str(json_content["segmentation"]["removeBackground"]),
-                    "backgroundRemovalModel": str(json_content["segmentation"]["backgroundRemovalModel"]),
-                    "maskThreshold": str(json_content["segmentation"]["maskThreshold"]),
-                    "removeHumanSubject": str(json_content["segmentation"]["removeHumanSubject"])
+                    "removeBackground": str(json_content["segmentation"]["backgroundRemoval"]["enable"]),
+                    "backgroundRemovalModel": str(json_content["segmentation"]["backgroundRemoval"]["model"]),
+                    "maskThreshold": str(json_content["segmentation"]["backgroundRemoval"]["maskThreshold"]),
+                    "removeObject": str(json_content["segmentation"]["objectRemoval"]["enable"]),
+                    "objectRemovalAction": str(json_content["segmentation"]["objectRemoval"]["action"]),
+                    "objectRemovalObjects": str(json_content["segmentation"]["objectRemoval"]["objects"])
                 }
 
                 try:
@@ -219,14 +239,18 @@ def lambda_handler(event, context):
 
             inputObj = {
                 "stateMachine" : {
-                    "timeout": 28800,
+                    "timeout": 259200,
                     "instanceCount": 1,
-                    "volumeSizeInGB": 25,
+                    "volumeSizeInGB": 30,
                     "ecrImageArn": os.environ["ECR_IMAGE_URI"],
                     "containerEntryPoint": ["python"],
                     "containerArgs": ["/opt/ml/code/main.py"],
                     "containerRoleArn": f"arn:aws:iam::{account_id}:role/{os.environ["CONTAINER_ROLE_NAME"]}",
                     "completeLambdaName": os.environ['LAMBDA_COMPLETE_NAME'],
+                    "jobDefinitionSelectorLambdaName": os.environ.get('JOB_DEFINITION_SELECTOR_LAMBDA_NAME', ''),
+                    "batchJobQueue": os.environ.get('BATCH_JOB_QUEUE', ''),
+                    "batchJobDefinition": os.environ.get('BATCH_JOB_DEFINITION', ''),
+
                     "startTimestamp": datestamp
                 },
                 "envVars": {
@@ -237,8 +261,12 @@ def lambda_handler(event, context):
                     "S3_OUTPUT": f"s3://{json_content["s3"]["bucketName"]}/{json_content["s3"]["outputPrefix"]}",
                     "FILENAME": str(json_content["s3"]["inputKey"]),
                     "INSTANCE_TYPE": str(json_content["instanceType"]),
+                    "USE_SPOT_INSTANCE": str(json_content["useSpotInstance"]),
+                    "COMPUTE_TYPE": "batch" if str(json_content["useSpotInstance"]) == "true" else "sagemaker",
                     "LOG_VERBOSITY": str(json_content["logVerbosity"]),
                     "MAX_NUM_IMAGES": str(json_content["videoProcessing"]["maxNumImages"]),
+                    "VIDEO_START_TIME": str(json_content["videoProcessing"]["videoStartTime"]),
+                    "VIDEO_STOP_TIME": str(json_content["videoProcessing"]["videoStopTime"]),
                     "FILTER_BLURRY_IMAGES": str(json_content["imageProcessing"]["filterBlurryImages"]),
                     "RUN_SFM": str(json_content["sfm"]["enable"]),
                     "SFM_SOFTWARE_NAME": str(json_content["sfm"]["softwareName"]),
@@ -251,15 +279,21 @@ def lambda_handler(event, context):
                     "RUN_TRAIN": str(json_content["training"]["enable"]),
                     "MODEL": str(json_content["training"]["model"]),
                     "MAX_STEPS": str(json_content["training"]["maxSteps"]),
-                    "ENABLE_MULTI_GPU": str(json_content["training"]["enableMultiGpu"]),
-                    "ROTATE_SPLAT": str(json_content["training"]["rotateSplat"]),
+                    "ROTATE_SPLAT": str(json_content["postProcessing"]["rotateSplat"]),
+                    "REFINE_OUTPUT_BOUNDS": str(json_content["postProcessing"]["refineOutputBounds"]),
+                    "REFINEMENT_MODE": str(json_content["postProcessing"]["refinementMode"]),
+                    "ENABLE_SPZ": str(json_content["postProcessing"]["enableSpz"]),
+                    "ENABLE_SOGS": str(json_content["postProcessing"]["enableSogs"]),
+                    "ENABLE_SPZ": str(json_content["postProcessing"]["enableSpz"]),
+                    "ENABLE_SOGS": str(json_content["postProcessing"]["enableSogs"]),
                     "SPHERICAL_CAMERA": str(json_content["sphericalCamera"]["enable"]),
                     "SPHERICAL_CUBE_FACES_TO_REMOVE": str(json_content["sphericalCamera"]["cubeFacesToRemove"]),
-                    "OPTIMIZE_SEQUENTIAL_SPHERICAL_FRAME_ORDER": str(json_content["sphericalCamera"]["optimizeSequentialFrameOrder"]),
-                    "REMOVE_BACKGROUND": str(json_content["segmentation"]["removeBackground"]),
-                    "BACKGROUND_REMOVAL_MODEL": str(json_content["segmentation"]["backgroundRemovalModel"]),
-                    "MASK_THRESHOLD": str(json_content["segmentation"]["maskThreshold"]),
-                    "REMOVE_HUMAN_SUBJECT": str(json_content["segmentation"]["removeHumanSubject"])
+                    "REMOVE_BACKGROUND": str(json_content["segmentation"]["backgroundRemoval"]["enable"]),
+                    "BACKGROUND_REMOVAL_MODEL": str(json_content["segmentation"]["backgroundRemoval"]["model"]),
+                    "MASK_THRESHOLD": str(json_content["segmentation"]["backgroundRemoval"]["maskThreshold"]),
+                    "REMOVE_OBJECT": str(json_content["segmentation"]["objectRemoval"]["enable"]),
+                    "OBJECT_REMOVAL_ACTION": str(json_content["segmentation"]["objectRemoval"]["action"]),
+                    "OBJECT_REMOVAL_OBJECTS": str(json_content["segmentation"]["objectRemoval"]["objects"])
                 },
                 "sns": {
                     "topicArn": os.environ["SNS_TOPIC_ARN"],
@@ -284,8 +318,6 @@ def lambda_handler(event, context):
         except Exception as e:
             status = f"Error starting the step function workflow: {traceback.format_exc()}"
             raise Exception(status)
-
-
         return {
             'statusCode': 200,
             'body': json.dumps(inputObj)

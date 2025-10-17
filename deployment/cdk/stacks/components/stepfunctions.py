@@ -26,6 +26,7 @@ from aws_cdk import (
     aws_stepfunctions as sfn,
     Environment,
     aws_logs as logs,
+    Duration,
 )
 from constructs import Construct
 
@@ -40,8 +41,12 @@ class Sfn(Construct):
             asl_code_path: str,
             workflow_trigger_lambda_arn: str,
             workflow_complete_lambda_arn: str,
+            job_definition_selector_lambda_arn: str,
             ecr_repo_name: str,
-            container_role_name: str, **kwargs) -> None:
+            container_role_name: str,
+            batch_job_queue_arn: str = None,
+            batch_job_definition_arn: str = None,
+            **kwargs) -> None:
         super().__init__(scope, id, **kwargs)
 
         self.current_path = os.path.dirname(os.path.realpath(__file__))
@@ -51,8 +56,11 @@ class Sfn(Construct):
             asl_code_path,
             workflow_trigger_lambda_arn,
             workflow_complete_lambda_arn,
+            job_definition_selector_lambda_arn,
             ecr_repo_name,
-            container_role_name
+            container_role_name,
+            batch_job_queue_arn,
+            batch_job_definition_arn
         )
 
     def create_state_machine(
@@ -62,8 +70,11 @@ class Sfn(Construct):
             asl_code_path,
             workflow_trigger_lambda_arn,
             workflow_complete_lambda_arn,
+            job_definition_selector_lambda_arn,
             ecr_repo_name,
-            container_role_name) -> sfn.StateMachine:
+            container_role_name,
+            batch_job_queue_arn,
+            batch_job_definition_arn) -> sfn.StateMachine:
         """Function to create the State Machine component"""
 
         # Define the state machine
@@ -75,10 +86,14 @@ class Sfn(Construct):
                 env,
                 workflow_trigger_lambda_arn,
                 workflow_complete_lambda_arn,
+                job_definition_selector_lambda_arn,
                 ecr_repo_name,
                 container_role_name,
-                state_machine_name
+                state_machine_name,
+                batch_job_queue_arn,
+                batch_job_definition_arn
             ),
+            timeout=Duration.hours(72),  # 72 hours timeout
             tracing_enabled=True,
             logs=sfn.LogOptions(
                 destination=logs.LogGroup(self, state_machine_name),  # Creates a new log group
@@ -93,9 +108,12 @@ class Sfn(Construct):
             env,
             workflow_trigger_lambda_arn,
             workflow_complete_lambda_arn,
+            job_definition_selector_lambda_arn,
             ecr_repo_name,
             container_role_name,
-            state_machine_name) -> iam.Role:
+            state_machine_name,
+            batch_job_queue_arn,
+            batch_job_definition_arn) -> iam.Role:
         """Function to create the State Machine Iam Role"""
         # Define the Lambda Invoke IAM policy document
         lambda_invoke_statement = iam.PolicyStatement(
@@ -103,7 +121,8 @@ class Sfn(Construct):
             actions=["lambda:InvokeFunction"],
             resources=[
                 workflow_trigger_lambda_arn,
-                workflow_complete_lambda_arn
+                workflow_complete_lambda_arn,
+                job_definition_selector_lambda_arn
             ]
         )
 
@@ -208,6 +227,57 @@ class Sfn(Construct):
             resources=[f"arn:aws:states:{env.region}:{env.account}:stateMachine:*"]
         )
 
+        # Add Batch permissions if Batch resources are provided
+        batch_statements = []
+        if batch_job_queue_arn and batch_job_definition_arn:
+            batch_statements.extend([
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "batch:SubmitJob",
+                        "batch:DescribeJobs",
+                        "batch:TerminateJob",
+                        "batch:ListJobs"
+                    ],
+                    resources=[
+                        f"arn:aws:batch:{env.region}:{env.account}:job-queue/*",
+                        f"arn:aws:batch:{env.region}:{env.account}:job-definition/*",
+                        f"arn:aws:batch:{env.region}:{env.account}:job/*"
+                    ]
+                ),
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "events:PutRule",
+                        "events:PutTargets",
+                        "events:DeleteRule",
+                        "events:RemoveTargets",
+                        "events:DescribeRule"
+                    ],
+                    resources=[
+                        f"arn:aws:events:{env.region}:{env.account}:rule/StepFunctionsGetEventForBatchJobsRule"
+                    ]
+                )
+            ])
+        else:
+            # Add basic Batch permissions even if resources aren't provided
+            batch_statements.append(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "batch:SubmitJob",
+                        "batch:DescribeJobs",
+                        "batch:TerminateJob",
+                        "batch:ListJobs"
+                    ],
+                    resources=[
+                        f"arn:aws:batch:{env.region}:{env.account}:job-queue/*",
+                        f"arn:aws:batch:{env.region}:{env.account}:job-definition/*",
+                        f"arn:aws:batch:{env.region}:{env.account}:job/*"
+                    ]
+                )
+            )
+
         # Create the IAM role for the state machine
         role = iam.Role(
             self, "StateMachineExecutionRole",
@@ -235,19 +305,24 @@ class Sfn(Construct):
             )
         )
 
+        # Create policy statements list
+        policy_statements = [
+            sagemaker_training_statement,
+            sagemaker_pass_role_statement,
+            sagemaker_eventbridge_statement,
+            ecr_statement,
+            iam_statement,
+            step_functions_statement
+        ]
+        
+        # Add Batch statements if available
+        policy_statements.extend(batch_statements)
+        
         role.attach_inline_policy(
             iam.Policy(
-            self, "SageMakerTrainingPolicy",
-            policy_name="SageMakerTrainingPolicy",
-            statements=[
-                sagemaker_training_statement,
-                #sagemaker_tags_statement,
-                sagemaker_pass_role_statement,
-                sagemaker_eventbridge_statement,
-                ecr_statement,
-                iam_statement,
-                step_functions_statement
-                ]
+            self, "WorkflowExecutionPolicy",
+            policy_name="WorkflowExecutionPolicy",
+            statements=policy_statements
             )
         )
 

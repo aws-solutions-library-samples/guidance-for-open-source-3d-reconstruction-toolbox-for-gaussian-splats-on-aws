@@ -33,3 +33,31 @@ output "ecr_repo_url" {
 output "container_role_name" {
   value = aws_iam_role.container_role.name
 }
+
+output "dynamodb_table_name" {
+  value = aws_dynamodb_table.ddb_table.name
+}
+
+output "batch_job_definition_small" {
+  value = aws_batch_job_definition.batch_job_definition_small.name
+}
+
+output "batch_job_definition_medium" {
+  value = aws_batch_job_definition.batch_job_definition_medium.name
+}
+
+output "batch_job_definition_large" {
+  value = aws_batch_job_definition.batch_job_definition.name
+}
+
+output "batch_job_definition_xlarge" {
+  value = aws_batch_job_definition.batch_job_definition_xlarge.name
+}
+
+output "batch_job_queue" {
+  value = aws_batch_job_queue.batch_job_queue.name
+}
+
+output "job_definition_selector_function_name" {
+  value = aws_lambda_function.job_definition_selector.function_name
+}

@@ -117,8 +117,25 @@ def rotate_gaussians(gaussian_data, rotation_matrix):
     # Convert to scipy Rotation objects and compose
     rotated_quats = []
     for q in existing_quats:
+        # Validate quaternion components for NaN or inf
+        if np.any(np.isnan(q)) or np.any(np.isinf(q)):
+            q = np.array([1.0, 0.0, 0.0, 0.0])
+        else:
+            # Validate and normalize quaternion
+            q_norm = np.linalg.norm(q)
+            if q_norm == 0 or np.isnan(q_norm) or q_norm < 1e-8:
+                # Use identity quaternion if invalid
+                q = np.array([1.0, 0.0, 0.0, 0.0])
+            else:
+                q = q / q_norm
+        
         # Convert from scalar-first to scalar-last if needed
         q_scipy_format = np.array([q[1], q[2], q[3], q[0]])
+        
+        # Validate scipy format quaternion
+        if np.any(np.isnan(q_scipy_format)) or np.linalg.norm(q_scipy_format) < 1e-8:
+            q_scipy_format = np.array([0.0, 0.0, 0.0, 1.0])  # Identity in scipy format
+        
         existing_rot = Rotation.from_quat(q_scipy_format)
         new_rot = rot * existing_rot
         new_quat = new_rot.as_quat()  # x, y, z, w format

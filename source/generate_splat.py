@@ -28,7 +28,7 @@ s3_input_prefix = "media-input"
 
 s3_output_prefix = "workflow-output"
 media_filename = ""
-instance_type = "ml.g6e.4xlarge" 
+instance_type = "ml.g6.4xlarge" 
 
 """
 !!! Change the input parameters for each option below !!!
@@ -48,6 +48,7 @@ instance_type = "ml.g6e.4xlarge"
 file_contents = {
     "uuid": str(unique_uuid),
     "instanceType": instance_type,
+    "useSpotInstance": "false",
     "logVerbosity": "info",
     "s3": {
         "bucketName": s3_bucket_name,
@@ -80,7 +81,11 @@ file_contents = {
         "maxSteps": "15000",
         "model": "splatfacto",
         "enableMultiGpu": "false",
-        "rotateSplat": "true"
+    },
+    "postProcessing": {
+        "rotateSplat": "true",
+        "refineOutputBounds": "true",
+        "refinementMode": "environment"
     },
     "sphericalCamera": {
         "enable": "false",
@@ -88,10 +93,16 @@ file_contents = {
         "optimizeSequentialFrameOrder": "true"
     },
     "segmentation": {
-        "removeBackground": "false",
-        "backgroundRemovalModel": "u2net", #"u2net", "u2net-human","sam2"
-        "maskThreshold": "0.6", #0.6 #0.38
-        "removeHumanSubject": "false"
+        "backgroundRemoval": {
+            "enable": "false",
+            "model": "u2net", #"u2net", "sam2"
+            "maskThreshold": "0.6",
+        },
+        "objectRemoval": {
+            "enable": "false",
+            "action": "erase", #remove
+            "objects": "['human']",
+        }
     }
 }
 

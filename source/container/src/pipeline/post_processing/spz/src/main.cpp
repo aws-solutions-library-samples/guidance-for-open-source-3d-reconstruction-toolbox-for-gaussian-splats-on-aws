@@ -3,12 +3,12 @@
 #include <filesystem>
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
+    if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <input_file>" << std::endl;
         return 1;
     }
 
-    std::string inputFile = argv[1];
+    std::string inputFile = argv[argc-1]; // Last argument is the file
     std::filesystem::path inputPath(inputFile);
     if (!std::filesystem::exists(inputPath)) {
         std::cerr << "Error: File does not exist: " << inputFile << std::endl;
