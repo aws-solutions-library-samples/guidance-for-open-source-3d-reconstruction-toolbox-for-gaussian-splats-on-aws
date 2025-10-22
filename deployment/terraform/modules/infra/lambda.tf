@@ -23,12 +23,14 @@ data "archive_file" "archive_lambda_job_trigger" {
  type = "zip"
  source_dir = "${path.module}/../../../../source/lambda/workflow_trigger"
  output_path = "${path.module}/../../../../source/lambda/workflow_trigger/workflow_trigger.zip"
+ excludes = ["workflow_trigger.zip"]
 }
 
 data "archive_file" "archive_lambda_job_complete" {
  type = "zip"
  source_dir = "${path.module}/../../../../source/lambda/workflow_complete"
  output_path = "${path.module}/../../../../source/lambda/workflow_complete/workflow_complete.zip"
+ excludes = ["workflow_complete.zip"]
 }
 
 # "workflowTrigger" Lambda Function
@@ -88,6 +90,13 @@ resource "aws_lambda_function" "lambda_workflow_complete" {
     DDB_TABLE_NAME = aws_dynamodb_table.ddb_table.name
     }
   }
+
+  depends_on = [
+    aws_iam_role.lambda_role,
+    aws_iam_role_policy_attachment.attach_iam_policy_s3_role,
+    aws_sns_topic.sns_topic,
+    aws_dynamodb_table.ddb_table
+  ]
 }
 
 # Workflow trigger log group

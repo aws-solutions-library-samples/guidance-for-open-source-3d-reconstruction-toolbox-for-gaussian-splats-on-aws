@@ -98,10 +98,11 @@ resource "aws_iam_role_policy_attachment" "batch_service_ecs_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonECS_FullAccess"
 }
 
-# Additional policy to ensure batch service role has all required permissions
-resource "aws_iam_policy" "batch_service_additional_ecs_policy" {
-  name        = "${var.project_prefix}-batch-service-additional-ecs-policy-${var.tf_random_suffix}"
-  description = "Additional ECS permissions required by AWS Batch service role"
+
+
+resource "aws_iam_role_policy" "batch_service_additional_ecs_policy_inline" {
+  name = "BatchServiceAdditionalECSPolicy"
+  role = aws_iam_role.batch_service_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -127,11 +128,6 @@ resource "aws_iam_policy" "batch_service_additional_ecs_policy" {
       }
     ]
   })
-}
-
-resource "aws_iam_role_policy_attachment" "batch_service_additional_ecs_policy" {
-  role       = aws_iam_role.batch_service_role.name
-  policy_arn = aws_iam_policy.batch_service_additional_ecs_policy.arn
 }
 
 # Instance role for Batch instances
@@ -251,7 +247,7 @@ resource "aws_batch_compute_environment" "spot_compute_env" {
     min_vcpus          = 0
     max_vcpus          = 512
     desired_vcpus      = 0
-    instance_type      = ["g5.4xlarge", "g5.2xlarge", "g6.4xlarge", "g6.2xlarge"]
+    instance_type      = ["g5.4xlarge", "g5.8xlarge", "g6.4xlarge", "g6.8xlarge", "g6e.4xlarge"]
     
     bid_percentage     = 50
 
@@ -271,6 +267,8 @@ resource "aws_batch_compute_environment" "spot_compute_env" {
 
   depends_on = [
     aws_iam_role_policy_attachment.batch_service_role_policy,
+    aws_iam_role_policy_attachment.batch_service_ecs_policy,
+    aws_iam_role_policy.batch_service_additional_ecs_policy_inline,
     aws_iam_role_policy_attachment.spot_fleet_role_policy
   ]
 }
@@ -292,7 +290,7 @@ resource "aws_batch_compute_environment" "on_demand_compute_env" {
     min_vcpus          = 0
     max_vcpus          = 128
     desired_vcpus      = 0
-    instance_type      = ["g5.4xlarge", "g5.2xlarge", "g6.4xlarge", "g6.2xlarge"]
+    instance_type      = ["g5.4xlarge", "g5.8xlarge", "g6.4xlarge", "g6.8xlarge", "g6e.4xlarge"]
 
     ec2_configuration {
       image_type = "ECS_AL2"
@@ -308,7 +306,11 @@ resource "aws_batch_compute_environment" "on_demand_compute_env" {
     }
   }
 
-  depends_on = [aws_iam_role_policy_attachment.batch_service_role_policy]
+  depends_on = [
+    aws_iam_role_policy_attachment.batch_service_role_policy,
+    aws_iam_role_policy_attachment.batch_service_ecs_policy,
+    aws_iam_role_policy.batch_service_additional_ecs_policy_inline
+  ]
 }
 
 # Job queue
@@ -614,7 +616,7 @@ resource "aws_batch_job_definition" "batch_job_definition_xlarge" {
   }
 }
 
-# G5.4xlarge specific job definition as regular container job
+# G5.4xlarge specific job definition
 resource "aws_batch_job_definition" "batch_job_definition_g5_4xlarge" {
   name = "${var.project_prefix}-job-definition-g5-4xlarge-${var.tf_random_suffix}"
   type = "container"
@@ -684,4 +686,212 @@ resource "aws_batch_job_definition" "batch_job_definition_g5_4xlarge" {
   }
 }
 
-# Removed duplicate policy (already defined above)
+# G5.8xlarge job definition
+resource "aws_batch_job_definition" "batch_job_definition_g5_8xlarge" {
+  name = "${var.project_prefix}-job-definition-g5-8xlarge-${var.tf_random_suffix}"
+  type = "container"
+
+  container_properties = jsonencode({
+    image  = aws_ecr_repository.ecr_repo.repository_url
+    vcpus  = 32
+    memory = 120000
+    jobRoleArn = aws_iam_role.batch_task_role.arn
+    command = ["python", "/opt/ml/code/main.py"]
+    
+    resourceRequirements = [
+      {
+        type  = "GPU"
+        value = "1"
+      }
+    ]
+    
+    mountPoints = [
+      {
+        sourceVolume  = "workspace"
+        containerPath = "/tmp"
+        readOnly      = false
+      },
+      {
+        sourceVolume  = "shm"
+        containerPath = "/dev/shm"
+        readOnly      = false
+      }
+    ]
+    
+    volumes = [
+      {
+        name = "workspace"
+        host = {
+          sourcePath = "/mnt/workspace"
+        }
+      },
+      {
+        name = "shm"
+        host = {
+          sourcePath = "/dev/shm"
+        }
+      }
+    ]
+    
+    ulimits = [
+      {
+        name      = "memlock"
+        softLimit = -1
+        hardLimit = -1
+      },
+      {
+        name      = "stack"
+        softLimit = 67108864
+        hardLimit = 67108864
+      }
+    ]
+  })
+
+  retry_strategy {
+    attempts = 1
+  }
+
+  timeout {
+    attempt_duration_seconds = 259200
+  }
+}
+
+# G6.4xlarge job definition
+resource "aws_batch_job_definition" "batch_job_definition_g6_4xlarge" {
+  name = "${var.project_prefix}-job-definition-g6-4xlarge-${var.tf_random_suffix}"
+  type = "container"
+
+  container_properties = jsonencode({
+    image  = aws_ecr_repository.ecr_repo.repository_url
+    vcpus  = 16
+    memory = 60000
+    jobRoleArn = aws_iam_role.batch_task_role.arn
+    command = ["python", "/opt/ml/code/main.py"]
+    
+    resourceRequirements = [
+      {
+        type  = "GPU"
+        value = "1"
+      }
+    ]
+    
+    mountPoints = [
+      {
+        sourceVolume  = "workspace"
+        containerPath = "/tmp"
+        readOnly      = false
+      },
+      {
+        sourceVolume  = "shm"
+        containerPath = "/dev/shm"
+        readOnly      = false
+      }
+    ]
+    
+    volumes = [
+      {
+        name = "workspace"
+        host = {
+          sourcePath = "/mnt/workspace"
+        }
+      },
+      {
+        name = "shm"
+        host = {
+          sourcePath = "/dev/shm"
+        }
+      }
+    ]
+    
+    ulimits = [
+      {
+        name      = "memlock"
+        softLimit = -1
+        hardLimit = -1
+      },
+      {
+        name      = "stack"
+        softLimit = 67108864
+        hardLimit = 67108864
+      }
+    ]
+  })
+
+  retry_strategy {
+    attempts = 1
+  }
+
+  timeout {
+    attempt_duration_seconds = 259200
+  }
+}
+
+# G6.8xlarge job definition
+resource "aws_batch_job_definition" "batch_job_definition_g6_8xlarge" {
+  name = "${var.project_prefix}-job-definition-g6-8xlarge-${var.tf_random_suffix}"
+  type = "container"
+
+  container_properties = jsonencode({
+    image  = aws_ecr_repository.ecr_repo.repository_url
+    vcpus  = 32
+    memory = 120000
+    jobRoleArn = aws_iam_role.batch_task_role.arn
+    command = ["python", "/opt/ml/code/main.py"]
+    
+    resourceRequirements = [
+      {
+        type  = "GPU"
+        value = "1"
+      }
+    ]
+    
+    mountPoints = [
+      {
+        sourceVolume  = "workspace"
+        containerPath = "/tmp"
+        readOnly      = false
+      },
+      {
+        sourceVolume  = "shm"
+        containerPath = "/dev/shm"
+        readOnly      = false
+      }
+    ]
+    
+    volumes = [
+      {
+        name = "workspace"
+        host = {
+          sourcePath = "/mnt/workspace"
+        }
+      },
+      {
+        name = "shm"
+        host = {
+          sourcePath = "/dev/shm"
+        }
+      }
+    ]
+    
+    ulimits = [
+      {
+        name      = "memlock"
+        softLimit = -1
+        hardLimit = -1
+      },
+      {
+        name      = "stack"
+        softLimit = 67108864
+        hardLimit = 67108864
+      }
+    ]
+  })
+
+  retry_strategy {
+    attempts = 1
+  }
+
+  timeout {
+    attempt_duration_seconds = 259200
+  }
+}

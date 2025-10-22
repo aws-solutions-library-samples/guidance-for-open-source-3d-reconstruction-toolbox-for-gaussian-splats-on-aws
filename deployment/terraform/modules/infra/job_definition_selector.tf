@@ -25,6 +25,14 @@ resource "aws_lambda_function" "job_definition_selector" {
       BATCH_JOB_DEFINITION_LARGE     = aws_batch_job_definition.batch_job_definition.name
       BATCH_JOB_DEFINITION_XLARGE    = aws_batch_job_definition.batch_job_definition_xlarge.name
       BATCH_JOB_DEFINITION_G5_4XLARGE = aws_batch_job_definition.batch_job_definition_g5_4xlarge.name
+      BATCH_JOB_DEFINITION_G5_8XLARGE = aws_batch_job_definition.batch_job_definition_g5_8xlarge.name
+      BATCH_JOB_DEFINITION_G6_4XLARGE = aws_batch_job_definition.batch_job_definition_g6_4xlarge.name
+      BATCH_JOB_DEFINITION_G6_8XLARGE = aws_batch_job_definition.batch_job_definition_g6_8xlarge.name
     }
   }
+
+  depends_on = [
+    aws_iam_role.lambda_role,
+    aws_iam_role_policy_attachment.attach_iam_policy_s3_role
+  ]
 }

@@ -35,7 +35,7 @@ print(f"Gradio Version: {gr.__version__}")
 class SharedState:
     def __init__(self):
         self.aws_region = "us-east-1"
-        self.stack_unique_id = "xwnbp1"
+        self.stack_unique_id = ""
         self.s3_bucket = f"3dgs-bucket-{self.stack_unique_id}"
         self.ddb_table_name = f"3dgs-table-{self.stack_unique_id}"
         self.s3_input = "workflow-input"
