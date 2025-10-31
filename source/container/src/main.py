@@ -52,8 +52,8 @@ ERROR CODES
 730, "Issue creating background removal component"
 735, "Issue creating spherical image component"
 740, "Issue creating human subject removal component"
-745, "SfM Software name given not implemented"
-750, "Issue creating the SfM component"
+745, "Reconstruction Software name given not implemented"
+750, "Issue creating the reconstruction component"
 755, "Issue creating the Colmap to Nerfstudio component"
 760, "Trainer specified does not match proper configuration"
 765, "Issue running the training session stage"
@@ -68,6 +68,7 @@ ERROR CODES
 783, "Issue converting ply to SOGS"
 784, "Issue mirroring the splat"
 785, "Issue creating compressed spz splat"
+786, "Issue converting ply to USDZ"
 790, "Issue uploading asset to S3"
 795, "General error running the pipeline"
 """
@@ -272,12 +273,21 @@ if __name__ == "__main__":
     log.info(f"System Information:")
     log.info(f"  Python: {sys.version.split()[0]}")
     log.info(f"  PyTorch: {torch.__version__}")
+    try:
+        import pycolmap
+        log.info(f"  pycolmap: {pycolmap.__version__}")
+    except:
+        log.info(f"  pycolmap: Not available")
     log.info(f"  CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
+        vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        USE_BA = False
+        if int(vram) > 25:
+            USE_BA = True
         log.info(f"  GPU: {torch.cuda.get_device_name()}")
-        log.info(f"  GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
+        log.info(f"  GPU memory: {vram}GB")
     log.info(f"  Model: {config['MODEL']}")
-    log.info(f"  Resume training: {config['RUN_SFM'] == 'false'}")
+    log.info(f"  Resume training: {config['RUN_RECON'] == 'false'}")
 
     # Ensure we have an /images directory in dataset path for Colmap/Glomap
     image_path = os.path.join(config['DATASET_PATH'], "images")
@@ -333,6 +343,7 @@ if __name__ == "__main__":
     ply_path = os.path.join(output_path, "splat.ply")
     sog_path = os.path.join(output_path, "splat.sog")
     spz_path = os.path.join(output_path, "splat.spz")
+    usdz_path = os.path.join(output_path, "splat.usdz")
 
     # For spherical, will have 6 views per 360 image using cube faces so will be 6x images
     config['MAX_NUM_IMAGES'] = str(int(config['MAX_NUM_IMAGES']))
@@ -604,12 +615,12 @@ if __name__ == "__main__":
 
     ##################################
     # TRANSFORM COMPONENT:
-    # Pose Transform for SfM
+    # Pose Transform for Reconstruction
     #################################
     try:
         if config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'true' and \
             config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true' and \
-            config['RUN_SFM'] == 'true':
+            config['RUN_RECON'] == 'true':
             raise RuntimeError(
                 pipeline.report_error(
                     705,
@@ -618,7 +629,7 @@ if __name__ == "__main__":
                 )
             )
         if (config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'true' or \
-            config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true') and config['RUN_SFM'] == 'true':
+            config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true') and config['RUN_RECON'] == 'true':
             if VIDEO is False and input_filename_extension.lower() == ".zip":
                 if config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'true':
                     use_transforms = "true"
@@ -633,7 +644,7 @@ if __name__ == "__main__":
                     name="ExtractPosesImgs",
                     comp_type=ComponentType.transform,
                     comp_environ=ComponentEnvironment.python,
-                    command="sfm/extract_poses_imgs.py",
+                    command="reconstruction/extract_poses_imgs.py",
                     args=args,
                     cwd=current_dir_path,
                     requires_gpu=False
@@ -656,7 +667,7 @@ if __name__ == "__main__":
     ##################################
     try:
         if VIDEO is True and config['REMOVE_BACKGROUND'] == "true" and \
-                config['BACKGROUND_REMOVAL_MODEL'] == "sam2" and config['RUN_SFM'] == 'true':
+                config['BACKGROUND_REMOVAL_MODEL'] == "sam2" and config['RUN_RECON'] == 'true':
                 # SAM2 BACKGROUND REMOVAL COMPONENT
                 args = [
                     "-i", input_file_path,
@@ -674,7 +685,7 @@ if __name__ == "__main__":
                     requires_gpu=True
                 )
         elif VIDEO is False and config['BACKGROUND_REMOVAL_MODEL'] == "sam2" and \
-            config['REMOVE_BACKGROUND']=="true" and config['RUN_SFM'] == 'true':
+            config['REMOVE_BACKGROUND']=="true" and config['RUN_RECON'] == 'true':
             sys.exit("Error: SAM2 Background removal is only supported for video input")
         else: # Just extract the frames, remove background later
             args = [
@@ -722,7 +733,7 @@ if __name__ == "__main__":
         if config['FILTER_BLURRY_IMAGES'] == "true" and \
            config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'false' and \
            config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'false' and \
-           config['RUN_SFM'] == 'true':
+           config['RUN_RECON'] == 'true':
             # For zip archives, count images and use a percentage-based approach
             if VIDEO is False and input_filename_extension.lower() == ".zip":
                 # Count the number of images in the directory
@@ -782,7 +793,7 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['REMOVE_BACKGROUND'] == "true" and config['BACKGROUND_REMOVAL_MODEL'] != "sam2" and \
-            config['RUN_SFM'] == "true":
+            config['RUN_RECON'] == "true":
             model = "u2net"
 
             args = [
@@ -811,7 +822,7 @@ if __name__ == "__main__":
     # Spherical Image Processing
     ##################################
     try:
-        if config['SPHERICAL_CAMERA'] == "true" and config['RUN_SFM'] == "true":
+        if config['SPHERICAL_CAMERA'] == "true" and config['RUN_RECON'] == "true":
             if config['MATCHING_METHOD'] == "vocab":
                 method = "vocabtree"
             else:
@@ -863,7 +874,7 @@ if __name__ == "__main__":
     # Remove Objects
     ##################################
     try:
-        if config['REMOVE_OBJECT'] == "true" and config['RUN_SFM'] == "true":
+        if config['REMOVE_OBJECT'] == "true" and config['RUN_RECON'] == "true":
             model = None
             # OBJECT REMOVAL COMPONENT FOR HUMAN
             try:
@@ -934,10 +945,10 @@ if __name__ == "__main__":
     # Images to Point Cloud
     ##################################
     try:
-        if config['RUN_SFM'] == "true":
+        if config['RUN_RECON'] == "true":
             if config['SPHERICAL_CAMERA'] == "true":
                 log.info("Using spherical camera processing with panorama_sfm.py")
-            elif config['SFM_SOFTWARE_NAME'] == "colmap" or config['SFM_SOFTWARE_NAME'] == "glomap":
+            elif config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap":
                 # FEATURE EXTRACTOR COMPONENT
                 args = [
                     "feature_extractor",
@@ -991,7 +1002,7 @@ if __name__ == "__main__":
                         name="ProcessPoseTransforms",
                         comp_type=ComponentType.transform,
                         comp_environ=ComponentEnvironment.python,
-                        command="sfm/process_pose_transforms.py",
+                        command="reconstruction/process_pose_transforms.py",
                         args=args,
                         cwd=current_dir_path,
                         requires_gpu=False
@@ -1082,7 +1093,7 @@ if __name__ == "__main__":
                     )
                 else:
                     # MAPPER COMPONENT
-                    if config['SFM_SOFTWARE_NAME'] == "colmap" :
+                    if config['RECON_SOFTWARE_NAME'] == "colmap" :
                         args = [
                             "mapper",
                             "--database_path", colmap_db_path,
@@ -1159,34 +1170,49 @@ if __name__ == "__main__":
                             name="UpdateCameraModel",
                             comp_type=ComponentType.transform,
                             comp_environ=ComponentEnvironment.python,
-                            command="sfm/update_camera_model.py",
+                            command="reconstruction/update_camera_model.py",
                             args=args,
                             cwd=current_dir_path,
                             requires_gpu=False
                         )
-            elif config['SFM_SOFTWARE_NAME'] == "vggt":
+            elif config['RECON_SOFTWARE_NAME'] == "vggt":
                 args = [
                     "--input_dir", config['DATASET_PATH']
                 ]
+                if USE_BA:
+                    args.append("--use_ba")
                 pipeline.create_component(
                     name="Vggt-Ba",
                     comp_type=ComponentType.transform,
                     comp_environ=ComponentEnvironment.python,
-                    command="sfm/run_vggt.py",
+                    command="reconstruction/run_vggt.py",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=True
+                )
+            elif config['RECON_SOFTWARE_NAME'] == "map_anything":
+                args = [
+                    "--scene_dir", config['DATASET_PATH']
+                ]
+                if USE_BA:
+                    args.append("--use_ba")
+                pipeline.create_component(
+                    name="Map-Anything",
+                    comp_type=ComponentType.transform,
+                    comp_environ=ComponentEnvironment.python,
+                    command="reconstruction/run_map_anything.py",
                     args=args,
                     cwd=current_dir_path,
                     requires_gpu=True
                 )
             else:
-                raise RuntimeError(
-                    pipeline.report_error(
-                        745, f"SfM Software not implemented yet:{config['SFM_SOFTWARE_NAME']}"
-                    )
+                pipeline.report_error(
+                    745, f"Reconstruction software not implemented yet:{config['RECON_SOFTWARE_NAME']}"
                 )
         else:
-            log.info("SfM configured to be skipped...skipping SfM")
+            log.info("Reconstruction configured to be skipped...skipping reconstruction")
     except Exception as e:
-        error_message = f"Issue creating the SfM component: {e}"
+        error_message = f"Issue creating the reconstruction component: {e}"
         pipeline.report_error(750, error_message)
 
     ##################################
@@ -1194,9 +1220,9 @@ if __name__ == "__main__":
     # Point Cloud, Images, and Poses to NerfStudio format
     ##################################
     try:
-        if config['RUN_TRAIN'] == "true" and config['RUN_SFM'] == "true":
-            if config['SFM_SOFTWARE_NAME'] == "colmap" or config['SFM_SOFTWARE_NAME'] == "glomap" or \
-                config['SFM_SOFTWARE_NAME'] == "vggt":
+        if config['RUN_TRAIN'] == "true" and config['RUN_RECON'] == "true":
+            if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
+                config['RECON_SOFTWARE_NAME'] == "vggt" or config['RECON_SOFTWARE_NAME'] == "map_anything":
                 args = ["--data_dir", config['DATASET_PATH']]
                 pipeline.create_component(
                     name="Colmap-to-Nerfstudio",
@@ -1208,11 +1234,9 @@ if __name__ == "__main__":
                     requires_gpu=False
                 )
             else:
-                raise RuntimeError(
-                    pipeline.report_error(
-                        750,
-                        f"SfM Software name given not implemented:{config['SFM_SOFTWARE_NAME']}"
-                    )
+                pipeline.report_error(
+                    750,
+                    f"Reconstruction software name given not implemented:{config['RECON_SOFTWARE_NAME']}"
                 )
         else:
             log.info("Not configured to output a Gaussian Splat...skipping dataset conversion.")
@@ -1226,8 +1250,8 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['RUN_TRAIN'] == "true":
-            if config['SFM_SOFTWARE_NAME'] == "glomap" or config['SFM_SOFTWARE_NAME'] == "colmap" or \
-                config['SFM_SOFTWARE_NAME'] == "vggt":
+            if config['RECON_SOFTWARE_NAME'] == "glomap" or config['RECON_SOFTWARE_NAME'] == "colmap" or \
+                config['RECON_SOFTWARE_NAME'] == "vggt" or config['RECON_SOFTWARE_NAME'] == "map_anything":
                 data_model = "colmap"
             # Single GPU gsplat
             if config['ENABLE_MULTI_GPU'] == "false" and \
@@ -1249,7 +1273,7 @@ if __name__ == "__main__":
                     ])
                 elif config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
                     config['MODEL'] == "splatfacto-mcmc":
-                    if config['RUN_SFM'] == "false": # Resume training
+                    if config['RUN_RECON'] == "false": # Resume training
                         # Check if we have extracted models in dataset path
                         # Files should already be in correct location from extraction phase
                         # Just validate they exist and add load arguments
@@ -1281,7 +1305,7 @@ if __name__ == "__main__":
                         "--max-num-iterations", str(int(int(config['MAX_STEPS'])))
                     ])
                 elif config['MODEL'] == "splatfacto-w-light":
-                    if config['RUN_SFM'] == "false": # Resume training
+                    if config['RUN_RECON'] == "false": # Resume training
                         if os.path.exists(model_ckpt_path):
                             args.extend([
                                 "--load-dir", model_ckpt_path,
@@ -1311,7 +1335,7 @@ if __name__ == "__main__":
                             "--pipeline.model.enable-bg-model=True"
                         ])
                 else:
-                    raise RuntimeError(pipeline.report_error(765, "Trainer specified does not match proper configuration"))
+                    pipeline.report_error(765, "Trainer specified does not match proper configuration")
 
                 args.extend([
                     data_model,
@@ -1372,7 +1396,7 @@ if __name__ == "__main__":
                     args.append("model.print_stats=true")
                 else:
                     args.append("model.print_stats=false")
-                if config['RUN_SFM'] == "false": # 3dgrut resume training
+                if config['RUN_RECON'] == "false": # 3dgrut resume training
                     # Validate checkpoint exists and is readable
                     if os.path.exists(model_ckpt_path):
                         args.extend([
@@ -1411,7 +1435,8 @@ if __name__ == "__main__":
     # Export .ply from splat training
     ##################################
     try:
-        if config['RUN_TRAIN'] == "true" and config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
+        #if config['RUN_TRAIN'] == "true" and
+        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
             if config['ENABLE_MULTI_GPU'] == "true":
                 ckpt_dir = os.path.join(output_path, "ckpts")
                 args = [
@@ -1476,7 +1501,7 @@ if __name__ == "__main__":
                     )
                 else:
                     # Use correct output path for resume training
-                    if config['RUN_SFM'] == "false":
+                    if config['RUN_RECON'] == "false":
                     #    export_output_path = os.path.join(config['CODE_PATH'], "resume_exports")
                         train_stage = RESUME_TRAIN_EXPERIMENT_NAME
                     else:
@@ -1507,7 +1532,7 @@ if __name__ == "__main__":
     # Export trajectory video of splat result
     ##################################
     try:
-        if config['ENABLE_VIDEO_EXPORT'] == "true":
+        if config['RUN_TRAIN'] == "true" and config['ENABLE_VIDEO_EXPORT'] == "true":
             if config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto" or \
                 config['MODEL'] == "splatfacto-big" or config['MODEL'] == "splatfacto-w-light" or \
                 config['MODEL'] == "splatfacto-mcmc":
@@ -1517,7 +1542,7 @@ if __name__ == "__main__":
                 if config['MODEL'] == "nerfacto":
                     model = "nerfacto"
                 # Use correct output path for resume training
-                if config['RUN_SFM'] == "false":
+                if config['RUN_RECON'] == "false":
                     train_stage = RESUME_TRAIN_EXPERIMENT_NAME
                 else:
                     train_stage = TRAIN_EXPERIMENT_NAME
@@ -1574,7 +1599,7 @@ if __name__ == "__main__":
     # Extract video thumbnail
     ##################################
     try:
-        if config['ENABLE_VIDEO_EXPORT'] == "true":
+        if config['RUN_TRAIN'] == "true" and config['ENABLE_VIDEO_EXPORT'] == "true":
             video_path = os.path.join(output_path, "render.mp4")
             args = [
                 "-i", video_path
@@ -1597,7 +1622,7 @@ if __name__ == "__main__":
     # Upload video thumbnail to S3
     ##################################
     try:
-        if config['ENABLE_VIDEO_EXPORT'] == "true":
+        if config['RUN_TRAIN'] == "true" and config['ENABLE_VIDEO_EXPORT'] == "true":
             thumbnail_path = os.path.join(output_path, "render_thumbnail.png")
             args = ["s3", "cp"]
             args.extend([
@@ -1623,12 +1648,12 @@ if __name__ == "__main__":
     ##################################
     try:
         # Apply refinement of output bounds to remove noise if configured
-        if config['REFINE_OUTPUT_BOUNDS'] == "true" and config['MODEL'] != "nerfacto":   
+        if config['RUN_TRAIN'] == "true" and config['CROP_OUTPUT_BOUNDS'] == "true" and config['MODEL'] != "nerfacto":   
             args = [
                 ply_path,
                 ply_path,
                 "--log-level", config['LOG_VERBOSITY'].upper(),
-                "--mode", config['REFINEMENT_MODE'] #rigid_body, environment
+                "--mode", config['CROP_MODE'] #rigid_body, environment
             ]
             pipeline.create_component(
                 name="Refine-BBox",
@@ -1648,7 +1673,7 @@ if __name__ == "__main__":
     # Clean PLY file - remove comments for SPZ compatibility
     ##################################
     try:
-        if config['MODEL'] != "nerfacto":
+        if config['RUN_TRAIN'] == "true" and config['MODEL'] != "nerfacto":
             args = [
                 "-i", ply_path
             ]
@@ -1670,24 +1695,26 @@ if __name__ == "__main__":
     # Rotate splat for pre-sog export
     ##################################
     try:
-        if config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and \
+        if config['RUN_TRAIN'] == "true" and config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and \
             config['ENABLE_SOGS'] == "true": # and config['MODEL'] != "splatfacto-mcmc":
-            args = [
-                "-i", ply_path,
-                "-o", ply_path,
-                "--rotations"
-            ]
             if str(config['MODEL']).lower() != "3dgut" and \
                 str(config['MODEL']).lower() != "3dgrt":
                 # Apply standard rotation for non-3dgrt models
-                args.append("x:270,y:0,z:0")
+                rotation = "270,0,0"
             else:
-                args.append("x:180,y:0,z:0")
+                rotation = "180,0,0"
+            
+            args = [
+                ply_path,
+                ply_path,
+                "-r", rotation,
+                "-w"
+            ]
             pipeline.create_component(
                 name="Rotation-Pre-Sog",
                 comp_type=ComponentType.transform,
-                comp_environ=ComponentEnvironment.python,
-                command="post_processing/rotate_splat.py",
+                comp_environ=ComponentEnvironment.executable,
+                command="splat-transform",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
@@ -1701,7 +1728,7 @@ if __name__ == "__main__":
     # Export sog from the .ply for compressed web viewing
     ##################################
     try:
-        if config['MODEL'] != "nerfacto" and config['ENABLE_SOGS'] == "true": # and config['MODEL'] != "splatfacto-mcmc":
+        if config['RUN_TRAIN'] == "true" and config['MODEL'] != "nerfacto" and config['ENABLE_SOGS'] == "true": # and config['MODEL'] != "splatfacto-mcmc":
             args = [
                 "-i", ply_path,
                 "-o", sog_path,
@@ -1721,22 +1748,50 @@ if __name__ == "__main__":
         pipeline.report_error(783, error_message)
 
     ##################################
+    # Export COMPONENT: USDZ
+    # Export USDZ from the .ply for compressed web viewing
+    ##################################
+    try:
+        if config['RUN_TRAIN'] == "true" and config['ENABLE_USDZ'] == "true" and config['MODEL'] != "nerfacto":
+            # Set PYTHONPATH to include 3dgrut directory
+            threedgrut_path = os.path.join(current_dir_path, "3dgrut")
+            os.environ['PYTHONPATH'] = f"{threedgrut_path}:{os.environ.get('PYTHONPATH', '')}"
+            
+            args = [
+                ply_path,
+                "--output_file", usdz_path,
+            ]
+            pipeline.create_component(
+                name="USDZ-Export",
+                comp_type=ComponentType.exporter,
+                comp_environ=ComponentEnvironment.python,
+                command="3dgrut/threedgrut/export/scripts/ply_to_usd.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=True
+            )
+    except Exception as e:
+        error_message = f"Issue converting ply to USDZ: {e}"
+        pipeline.report_error(786, error_message)
+
+    ##################################
     # Transform COMPONENT:
     # Rotate splat for post-sog export
     ##################################
     try:
-        if config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and \
+        if config['RUN_TRAIN'] == "true" and config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and \
             config['ENABLE_SOGS'] == "true": # and config['MODEL'] != "splatfacto-mcmc":
             args = [
-                "-i", ply_path,
-                "-o", ply_path,
-                "--rotations", "x:-270, y:0, z:0"
+                ply_path,
+                ply_path,
+                "--rotate=-270,0,0",
+                "-w"
             ]
             pipeline.create_component(
                 name="Rotation-Post-Sog",
                 comp_type=ComponentType.transform,
-                comp_environ=ComponentEnvironment.python,
-                command="post_processing/rotate_splat.py",
+                comp_environ=ComponentEnvironment.executable,
+                command="splat-transform",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
@@ -1751,22 +1806,25 @@ if __name__ == "__main__":
     ##################################
     try:
         # Apply pre-rotation if configured
-        if config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
-            args = [
-                "-i", ply_path,
-                "--rotations"
-            ]
+        if config['RUN_TRAIN'] == "true" and config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
             if str(config['MODEL']).lower() != "3dgut" and \
                 str(config['MODEL']).lower() != "3dgrt":
                 # Apply standard rotation for non-3dgrt models
-                args.append("x:270,y:180,z:0")
+                rotation = "270,180,0"
             else:
-                args.append("x:180,y:180,z:0")
+                rotation = "180,180,0"
+            
+            args = [
+                ply_path,
+                ply_path,
+                "-r", rotation,
+                "-w"
+            ]
             pipeline.create_component(
                 name="Rotation-Pre-SPZ",
                 comp_type=ComponentType.transform,
-                comp_environ=ComponentEnvironment.python,
-                command="post_processing/rotate_splat.py",
+                comp_environ=ComponentEnvironment.executable,
+                command="splat-transform",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
@@ -1780,14 +1838,21 @@ if __name__ == "__main__":
     # Mirror splat - pre-SPZ (SPZ module has built in mirror around X-Y)
     ##################################
     try:
-        if config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
+        if config['RUN_TRAIN'] == "true" and config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
+            # Mirror along X-axis using scale -1 (compensate for SPZ built-in flip)
             args = [
-                "--input", ply_path,
+                "--input", os.path.join(output_path, "splat.ply"),
                 "--axis", "x"  # Mirror along X-axis to compensate for SPZ built-in flip
+                #ply_path,
+                #ply_path,
+                #"--scale=-1,1,1",  # Scale -1 on X-axis = mirror
+                #"-w"
             ]
             pipeline.create_component(
                 name="Mirror-Pre-SPZ",
                 comp_type=ComponentType.transform,
+                #comp_environ=ComponentEnvironment.executable,
+                #command="splat-transform",
                 comp_environ=ComponentEnvironment.python,
                 command="post_processing/mirror_splat.py",
                 args=args,
@@ -1803,15 +1868,18 @@ if __name__ == "__main__":
     # Export compressed SPZ splat file
     ##################################
     try:
-        if config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
+        if config['RUN_TRAIN'] == "true" and config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
             args = [
+                #"-i",
                 ply_path
             ]
             pipeline.create_component(
                 name="Spz-Export",
                 comp_type=ComponentType.exporter,
                 comp_environ=ComponentEnvironment.executable,
+                #comp_environ=ComponentEnvironment.python,
                 command="splat_converter",
+                #command="post_processing/convert_ply_to_spz.py",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
@@ -1826,16 +1894,18 @@ if __name__ == "__main__":
     ##################################
     try:
         # Apply post-rotation if configured
-        if config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
+        if config['RUN_TRAIN'] == "true" and config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
             args = [
-                "-i", ply_path,
-                "--rotations", "x:180,y:180,z:0"
+                ply_path,
+                ply_path,
+                "-r", "180,180,0",
+                "-w"
             ]
             pipeline.create_component(
                 name="Rotate-Post-SPZ",
                 comp_type=ComponentType.transform,
-                comp_environ=ComponentEnvironment.python,
-                command="post_processing/rotate_splat.py",
+                comp_environ=ComponentEnvironment.executable,
+                command="splat-transform",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
@@ -1849,14 +1919,21 @@ if __name__ == "__main__":
     # Mirror splat - post-SPZ (SPZ module has built in mirror around X-Y)
     ##################################
     try:
-        if config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
+        if config['RUN_TRAIN'] == "true" and config['ROTATE_SPLAT'] == "true" and config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
+            # Mirror along X-axis using scale -1 (compensate for SPZ built-in flip)
             args = [
-                "--input", ply_path,
+                "--input", os.path.join(output_path, "splat.ply"),
                 "--axis", "x"  # Mirror along X-axis to compensate for SPZ built-in flip
+                #ply_path,
+                #ply_path,
+                #"--scale=-1,1,1",  # Scale -1 on X-axis = mirror
+                #"-w"
             ]
             pipeline.create_component(
                 name="Mirror-Post-SPZ",
                 comp_type=ComponentType.transform,
+                #comp_environ=ComponentEnvironment.executable,
+                #command="splat-transform",
                 comp_environ=ComponentEnvironment.python,
                 command="post_processing/mirror_splat.py",
                 args=args,
@@ -1872,7 +1949,7 @@ if __name__ == "__main__":
     # Export VIDEO to S3
     ##################################
     try:
-        if config['ENABLE_VIDEO_EXPORT'] == "true" and config['MODEL'] != "nerfacto":
+        if config['RUN_TRAIN'] == "true" and config['ENABLE_VIDEO_EXPORT'] == "true" and config['MODEL'] != "nerfacto":
             args = ["s3", "cp"]
             args.extend([
                 os.path.join(output_path, "render.mp4"),
@@ -1915,7 +1992,7 @@ if __name__ == "__main__":
         else:
             log.info(
                 "Not configured to output a Gaussian Splat...skipping upload splat to S3."
-                "Check the archive file for SfM results"
+                "Check the archive file for reconstruction results"
             )
     except Exception as e:
         error_message = f"Issue uploading asset to S3: {e}"
@@ -1945,7 +2022,31 @@ if __name__ == "__main__":
         else:
             log.info(
                 "Not configured to output a SOGS...skipping upload splat to S3."
-                "Check the archive file for SfM results"
+                "Check the archive file for reconstruction results"
+            )
+    except Exception as e:
+        error_message = f"Issue uploading asset to S3: {e}"
+        pipeline.report_error(790, error_message)
+
+    ##################################
+    # EXPORT COMPONENT:
+    # Export USDZ to S3
+    ##################################
+    try:
+        if config['RUN_TRAIN'] == "true" and config['ENABLE_USDZ'] == "true" and config['MODEL'] != "nerfacto":
+            args = ["s3", "cp"]
+            args.extend([
+                usdz_path,
+                f"{config['S3_OUTPUT']}/{config['UUID']}/{str(os.path.splitext(config['FILENAME'])[0]).lower()}.usdz"
+            ])
+            pipeline.create_component(
+                name="S3-Export-Usdz",
+                comp_type=ComponentType.exporter,
+                comp_environ=ComponentEnvironment.executable,
+                command="aws",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=False
             )
     except Exception as e:
         error_message = f"Issue uploading asset to S3: {e}"
@@ -1966,7 +2067,7 @@ if __name__ == "__main__":
                 ])
             else:
                 # Use correct path for resume training
-                #if config['RUN_SFM'] == "false":
+                #if config['RUN_RECON'] == "false":
                 #    ply_path = os.path.join(config['CODE_PATH'], "resume_exports", "splat.ply")
                 args.extend([
                     ply_path,
@@ -1985,7 +2086,7 @@ if __name__ == "__main__":
         else:
             log.info(
                 "Not configured to output a Gaussian Splat...skipping upload splat to S3."
-                "Check the archive file for SfM results"
+                "Check the archive file for reconstruction results"
             )
     except Exception as e:
         error_message = f"Issue uploading asset to S3: {e}"
@@ -2024,8 +2125,8 @@ if __name__ == "__main__":
         start_time = int(time.time())
         image_proc_time = None
         image_proc_end_time = None
-        sfm_time = None
-        sfm_end_time = None
+        recon_time = None
+        recon_end_time = None
         training_time = None
         for i in range(0, pipeline.config.num_components, 1):
             component = pipeline.components[i]
@@ -2045,7 +2146,7 @@ if __name__ == "__main__":
                             pipeline.run_component(i)
                             # Update VIDEO flag back to False after processing video to images
                             VIDEO = False
-                        elif VIDEO is False and config['RUN_SFM'] == "false" and config['RUN_TRAIN'] == "true":
+                        elif VIDEO is False and config['RUN_RECON'] == "false" and config['RUN_TRAIN'] == "true":
                             # Resume training - extract model.tar.gz
                             log.info("Detected resume training...")
                         else: # Archive of images or archive with a video
@@ -2096,7 +2197,7 @@ if __name__ == "__main__":
                             # Clean up temp directory
                             if os.path.exists(temp_path):
                                 shutil.rmtree(temp_path)
-                        if config['RUN_SFM'] == "true" and config['RUN_TRAIN'] == "true":
+                        if config['RUN_RECON'] == "true" and config['RUN_TRAIN'] == "true":
                             # Only process images if no video was found
                             if not video_found:
                                 validate_and_resize_images(image_path, config, log, pipeline)
@@ -2144,7 +2245,7 @@ if __name__ == "__main__":
                     if USE_GPU == "true" and num_images <= GPU_MAX_IMAGES and config['ENABLE_MULTI_GPU'] == "false":
                         use_gpu = "1"
                     component.args.extend([
-                        "--SiftExtraction.use_gpu", "0" #use_gpu
+                        "--SiftExtraction.use_gpu", "0" #use_gpu due to colmap error
                     ])
                     pipeline.run_component(i)
                 case "ColmapSfM-Feature-Matcher":
@@ -2154,12 +2255,12 @@ if __name__ == "__main__":
                     if USE_GPU == "true" and num_images <= GPU_MAX_IMAGES:
                         use_gpu = "1"
                     component.args.extend([
-                        "--SiftMatching.use_gpu", "0" #use_gpu
+                        "--SiftMatching.use_gpu", "0" #use_gpu due to colmap error
                     ])
                     pipeline.run_component(i)
                 case "Colmap-to-Nerfstudio":
                     # Ensure we use the largest Colmap model if multiple found
-                    if config['SFM_SOFTWARE_NAME'] == "colmap" or config['SFM_SOFTWARE_NAME'] == "glomap":
+                    if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap":
                         select_largest_colmap_model(sparse_path)
                     # Move existing transforms.json to transforms-in.json when using pose priors
                     # This ensures colmap-to-nerfstudio creates fresh transforms.json from updated COLMAP data
@@ -2169,29 +2270,36 @@ if __name__ == "__main__":
                             log.info(f"Moving {transforms_out_path} to {transforms_in_path} to preserve original")
                             shutil.move(transforms_out_path, transforms_in_path)
                     pipeline.run_component(i)
-                case "Vggt-Ba":
-                    cleanup_cuda_memory()
+                case "Map-Anything":
+                    # MAP-ANYTHING CONDITIONAL COMPONENT
+                    #num_images = len(os.listdir(image_path))
+                    #if USE_GPU == "true" and num_images > GPU_MAX_IMAGES:
+                    #    component.args.extend([
+                    #        "--memory_efficient_inference"
+                    #    ])
                     pipeline.run_component(i)
                 case "Train":
                     # TRAIN CONDITIONAL COMPONENT
                     current_time = int(time.time())
                     if image_proc_end_time is None:
                         image_proc_end_time = 0
-                    sfm_time = current_time - image_proc_end_time  # Calculate time since image processing completed
-                    sfm_end_time = current_time  # Store the timestamp when SfM completes
-                    log.info(f"Time for SfM: {sfm_time}s")
+                    recon_time = current_time - image_proc_end_time  # Calculate time since image processing completed
+                    recon_end_time = current_time  # Store the timestamp when reconstruction completes
+                    log.info(f"Time for reconstruction: {recon_time}s")
                     if config['ENABLE_MULTI_GPU'] == "false":
                         if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
-                            if config['SFM_SOFTWARE_NAME'] == "colmap" or config['SFM_SOFTWARE_NAME'] == "glomap" or \
-                                config['SFM_SOFTWARE_NAME'] == "vggt":
+                            if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
+                                config['RECON_SOFTWARE_NAME'] == "vggt" or config['RECON_SOFTWARE_NAME'] == "map_anything":
                                 # Move the sparse point cloud from sparse/0/* to colmap/sparse/*
                                 log.info('Running Training...')
-                                if config['RUN_SFM'] == "true":
+                                if config['RUN_RECON'] == "true":
                                     sparse_path_out = os.path.join(config['DATASET_PATH'], "colmap", "sparse")
                                     # Remove existing destination if it exists
                                     if os.path.exists(sparse_path_out):
+                                        log.info(f"Removing existing sparse point cloud at {sparse_path_out}")
                                         shutil.rmtree(sparse_path_out)
                                     # Ensure parent directory exists
+                                    log.info(f"Moving sparse point cloud from {sparse_path} to {sparse_path_out}")
                                     os.makedirs(os.path.dirname(sparse_path_out), exist_ok=True)
                                     shutil.move(sparse_path, sparse_path_out)
                                 
@@ -2199,7 +2307,7 @@ if __name__ == "__main__":
                                 # Set the max number of thread workers to 0 to prevent shared memory issues
                                 if config['MODEL'] != "nerfacto":
                                     num_images = len(os.listdir(image_path))
-                                    if num_images > GPU_MAX_IMAGES or config['RUN_SFM'] == "false":
+                                    if num_images > GPU_MAX_IMAGES or config['RUN_RECON'] == "false":
                                         index = component.args.index("colmap")
                                         if index != -1:
                                             component.args.insert(index, "disk")
@@ -2258,14 +2366,14 @@ if __name__ == "__main__":
                     if config['ENABLE_MULTI_GPU'] != "true":
                         if config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
                             root_exp_dir = os.path.join(output_path, TRAIN_EXPERIMENT_NAME)
-                            if config['RUN_SFM'] == "false":
+                            if config['RUN_RECON'] == "false":
                                 root_exp_dir = os.path.join(output_path, RESUME_TRAIN_EXPERIMENT_NAME)
                             exp_dir = os.listdir(root_exp_dir)[0]
                             shutil.move(os.path.join(root_exp_dir, exp_dir, "export_last.ply"), ply_path)
                         if config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
                             dest_dir = os.path.join(config['DATASET_PATH'], "3dgrut_models")
                             base_dir = os.path.join(config['DATASET_PATH'], 'exports', TRAIN_EXPERIMENT_NAME)
-                            if config['RUN_SFM'] == "false":
+                            if config['RUN_RECON'] == "false":
                                 base_dir = os.path.join(config['DATASET_PATH'], 'exports', RESUME_TRAIN_EXPERIMENT_NAME)
                             src_dir = os.path.join(base_dir, sorted(os.listdir(base_dir))[-1])
                             os.makedirs(dest_dir, exist_ok=True)
@@ -2273,7 +2381,7 @@ if __name__ == "__main__":
                 case "Nerfstudio-Export":
                     # NERFSTUDIO EXPORT CONDITIONAL COMPONENT
                     # For resume training, update config path to use the recreated checkpoint location
-                    if config['RUN_SFM'] == "false":
+                    if config['RUN_RECON'] == "false":
                         if os.path.exists(model_config_path):
                             for j, arg in enumerate(component.args):
                                 if arg == "--load-config" or arg == "--load_config":
@@ -2284,7 +2392,7 @@ if __name__ == "__main__":
                             log.warning(f"Config file not found at {model_config_path}, export may fail")
                     pipeline.run_component(i)
                     current_time = int(time.time())
-                    training_time = current_time - sfm_end_time  # Calculate actual training time
+                    training_time = current_time - recon_end_time  # Calculate actual training time
                     log.info(f"Time to train: {training_time}s")
                     # Clean up CUDA memory after training
                     cleanup_cuda_memory()

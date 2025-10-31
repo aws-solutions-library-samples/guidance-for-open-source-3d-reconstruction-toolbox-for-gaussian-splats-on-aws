@@ -294,7 +294,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # Install PlayCanvas splat-transform globally for SOGS capability
 RUN npm install -g @playcanvas/splat-transform
 
-# Install VGGT
+# Install VGGT and maintain torch version
 RUN git clone https://github.com/facebookresearch/vggt.git
 WORKDIR ${CODE_PATH}/vggt
 RUN sed -i '/^torch==/d' requirements.txt && \
@@ -302,9 +302,12 @@ RUN sed -i '/^torch==/d' requirements.txt && \
     sed -i '/^numpy==/d' requirements.txt && \
     pip install -r requirements.txt
 RUN pip install git+https://github.com/cvg/LightGlue.git hydra-core
-# Fix pycolmap 3.12 compatibility - replace camera_image_id with camera_id everywhere
-RUN find . -name "*.py" -exec sed -i 's/camera_image_id/camera_id/g' {} \; && \
-    find . -name "*.py" -exec sed -i 's/id=fidx + 1/image_id=fidx + 1/g' {} \;
+WORKDIR ${CODE_PATH}
+
+# Install Map-Anything
+RUN git clone https://github.com/facebookresearch/map-anything.git
+WORKDIR ${CODE_PATH}/map-anything
+RUN pip install -e .
 WORKDIR ${CODE_PATH}
 
 # Fix version compatibility issues with diffusers and transformers
@@ -312,7 +315,7 @@ RUN pip install --force-reinstall --no-cache-dir transformers==4.44.2 diffusers=
 
 # The main entrypoint and arguments are added into the container in the State Machine (e.g. ENTRYPOINT [ "python", "main.py" ])
 # Copy over application files
-RUN mkdir -p ${CODE_PATH}/sfm
+RUN mkdir -p ${CODE_PATH}/reconstruction
 RUN mkdir -p ${CODE_PATH}/training
 RUN mkdir -p ${CODE_PATH}/spherical
 RUN mkdir -p ${CODE_PATH}/segmentation
@@ -324,10 +327,15 @@ COPY ./src/main.py                                                  ${CODE_PATH}
 COPY ./src/config.json                                              ${CODE_PATH}
 COPY ./src/pipeline/pipeline.py                                     ${CODE_PATH}
 COPY ./src/pipeline/utils.py                                        ${CODE_PATH}
-COPY ./src/pipeline/sfm/extract_poses_imgs.py                       ${CODE_PATH}/sfm
-COPY ./src/pipeline/sfm/process_pose_transforms.py                  ${CODE_PATH}/sfm
-COPY ./src/pipeline/sfm/update_camera_model.py                      ${CODE_PATH}/sfm
-COPY ./src/pipeline/sfm/run_vggt.py                                 ${CODE_PATH}/sfm
+COPY ./src/pipeline/reconstruction/extract_poses_imgs.py            ${CODE_PATH}/reconstruction
+COPY ./src/pipeline/reconstruction/process_pose_transforms.py       ${CODE_PATH}/reconstruction
+COPY ./src/pipeline/reconstruction/update_camera_model.py           ${CODE_PATH}/reconstruction
+COPY ./src/pipeline/reconstruction/run_vggt.py                      ${CODE_PATH}/reconstruction
+COPY ./src/pipeline/reconstruction/run_map_anything.py              ${CODE_PATH}/reconstruction
+COPY ./src/pipeline/reconstruction/demo_colmap_vggt.py              ${CODE_PATH}/vggt/demo_colmap.py
+COPY ./src/pipeline/reconstruction/demo_colmap_mapanything.py       ${CODE_PATH}/map-anything/scripts/demo_colmap.py
+COPY ./src/pipeline/reconstruction/np_to_pycolmap.py                ${CODE_PATH}/vggt/vggt/dependency/np_to_pycolmap.py
+COPY ./src/pipeline/reconstruction/np_to_pycolmap.py                ${CODE_PATH}/map-anything/mapanything/third_party/np_to_pycolmap.py
 COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py            ${CODE_PATH}/training
 COPY ./src/pipeline/spherical/equirectangular_to_perspective.py     ${CODE_PATH}/spherical
 COPY ./src/pipeline/spherical/Equirec2Cube.py                       ${CODE_PATH}/spherical
@@ -353,8 +361,12 @@ COPY ./src/pipeline/post_processing/transform_coordinates.py        ${CODE_PATH}
 COPY ./src/pipeline/post_processing/clean_ply.py                    ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/extract_video_thumbnail.py      ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/images_to_video.py              ${CODE_PATH}/post_processing
+#COPY ./src/pipeline/post_processing/convert_ply_to_spz.py           ${CODE_PATH}/post_processing
 
 # Build the SPZ tool
+#RUN git clone https://github.com/nianticlabs/spz.git
+#WORKDIR spz
+#RUN pip install .
 WORKDIR ${CODE_PATH}/post_processing/spz/src
 RUN mkdir build
 WORKDIR ${CODE_PATH}/post_processing/spz/src/build

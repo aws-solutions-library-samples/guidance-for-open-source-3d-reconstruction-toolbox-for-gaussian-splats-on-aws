@@ -73,19 +73,19 @@ def refine_splat(selected_data, instance_type, use_spot_instance):
             "imageProcessing": selected_job.get('imageProcessing', {
                 "filterBlurryImages": shared_state.filter_blurry == "true"
             }),
-            "sfm": {
+            "reconstruction": {
                 "enable": False,  # Skip SFM for refinement
-                "softwareName": str(selected_job.get('sfm', {}).get('softwareName', shared_state.sfm)),
-                "enableEnhancedFeatureExtraction": selected_job.get('sfm', {}).get('enableEnhancedFeatureExtraction', shared_state.enhanced_feature == "true"),
-                "matchingMethod": str(selected_job.get('sfm', {}).get('matchingMethod', shared_state.matching_method)),
-                "posePriors": selected_job.get('sfm', {}).get('posePriors', {
+                "softwareName": str(selected_job.get('reconstruction', {}).get('softwareName', selected_job.get('sfm', {}).get('softwareName', shared_state.sfm))),
+                "posePriors": selected_job.get('reconstruction', {}).get('posePriors', selected_job.get('sfm', {}).get('posePriors', {
                     "usePosePriorColmapModelFiles": shared_state.use_colmap_model == "true",
                     "usePosePriorTransformJson": {
                         "enable": shared_state.use_transform_json == "true",
                         "sourceCoordinateName": shared_state.source_coordinate,
                         "poseIsWorldToCam": shared_state.pose_world_to_cam == "true"
                     }
-                })
+                })),
+                "enableEnhancedFeatureExtraction": selected_job.get('reconstruction', {}).get('enableEnhancedFeatureExtraction', selected_job.get('sfm', {}).get('enableEnhancedFeatureExtraction', shared_state.enhanced_feature == "true")),
+                "matchingMethod": str(selected_job.get('reconstruction', {}).get('matchingMethod', selected_job.get('sfm', {}).get('matchingMethod', shared_state.matching_method)))
             },
             "training": {
                 "enable": True,  # Enable training for refinement
@@ -97,10 +97,11 @@ def refine_splat(selected_data, instance_type, use_spot_instance):
             },
             "postProcessing": {
                 "rotateSplat": selected_job.get('rotateSplat', shared_state.rotate_splat) == "True",
-                "refineOutputBounds": selected_job.get('refineOutputBounds', shared_state.refine_output_bounds) == "True",
-                "refinementMode": selected_job.get('refinementMode', shared_state.refinement_mode),
+                "cropOutputBounds": selected_job.get('cropOutputBounds', selected_job.get('refineOutputBounds', shared_state.crop_output_bounds)) == "True",
+                "cropMode": selected_job.get('cropMode', selected_job.get('refinementMode', shared_state.crop_mode)),
                 "enableSpz": selected_job.get('enableSpz', shared_state.enable_spz) == "True",
-                "enableSogs": selected_job.get('enableSogs', shared_state.enable_sogs) == "True"
+                "enableSogs": selected_job.get('enableSogs', shared_state.enable_sogs) == "True",
+                "enableUsdz": selected_job.get('enableUsdz', shared_state.enable_usdz) == "True"
             },
             "sphericalCamera": {
                 "enable": selected_job.get('sphericalCamera') == 'True' if isinstance(selected_job.get('sphericalCamera'), str) else selected_job.get('sphericalCamera', {}).get('enable', shared_state.spherical_enable == "true"),

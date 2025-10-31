@@ -21,7 +21,7 @@
 # Gaussian Splat Repo for ECR
 resource "aws_ecr_repository" "ecr_repo" {
   name = "${lower(var.project_prefix)}-ecr-repo-${var.tf_random_suffix}"
-  image_tag_mutability = "IMMUTABLE"
+  image_tag_mutability = "MUTABLE"
   force_delete = true
   image_scanning_configuration {
     scan_on_push = true

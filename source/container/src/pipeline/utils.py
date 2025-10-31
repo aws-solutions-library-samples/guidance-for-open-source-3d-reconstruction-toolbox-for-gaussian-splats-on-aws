@@ -370,7 +370,12 @@ def calculate_bounds_percentile(positions, percentile=90):
 
 def calculate_bounds_std(positions, std_multiplier=2.0):
     """Calculate bounds using standard deviation method."""
-    center = np.mean(positions, axis=0)
+    # Use median for Y-axis (vertical) to better handle ground plane noise
+    center = np.array([
+        np.mean(positions[:, 0]),  # X: use mean
+        np.median(positions[:, 1]),  # Y: use median for better vertical centering
+        np.mean(positions[:, 2])   # Z: use mean
+    ])
     std_devs = np.std(positions, axis=0)
     half_size = std_devs * std_multiplier
     

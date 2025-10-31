@@ -60,6 +60,7 @@ class SharedState:
         self.spherical_enable = "false"
         self.enable_spz = "true"
         self.enable_sogs = "true"
+        self.enable_usdz = "true"
         self.remove_bg = "false"
         self.remove_objects = "false"
         self.object_removal_action = "erase"
@@ -70,8 +71,8 @@ class SharedState:
         self.mask_threshold = 0.6
         self.model_3d = None
         self.rotate_splat = "true"
-        self.refine_output_bounds = "false"
-        self.refinement_mode = "environment"
+        self.crop_output_bounds = "false"
+        self.crop_mode = "environment"
         self.video_start_time = 0.0
         self.video_stop_time = None
 
@@ -135,17 +136,17 @@ def parse_aws_credentials(creds_string):
         
         # Process each part
         for part in parts:
-            print(f"DEBUG: Processing part: {part[:15]}...")  # Show first 15 chars for debugging
+            #print(f"DEBUG: Processing part: {part[:15]}...")  # Show first 15 chars for debugging
             
             if part.startswith('$Env:AWS_ACCESS_KEY_ID='):
                 access_key = part.split('=', 1)[1].strip('"').strip("'")
-                print("DEBUG: Found access key")
+                #print("DEBUG: Found access key")
             elif part.startswith('$Env:AWS_SECRET_ACCESS_KEY='):
                 secret_key = part.split('=', 1)[1].strip('"').strip("'")
-                print("DEBUG: Found secret key")
+                #print("DEBUG: Found secret key")
             elif part.startswith('$Env:AWS_SESSION_TOKEN='):
                 session_token = part.split('=', 1)[1].strip('"').strip("'")
-                print("DEBUG: Found session token")
+                #print("DEBUG: Found session token")
         
         print("\nDEBUG: Final parsed values:")
         print(f"Access Key present: {bool(access_key)}")
@@ -230,6 +231,7 @@ def refresh_s3_contents():
                         item['Key'].lower().endswith('.spz') or 
                         item['Key'].lower().endswith('.glb') or
                         item['Key'].lower().endswith('.sog') or
+                        item['Key'].lower().endswith('.usdz') or
                         item['Key'].lower().endswith('.mp4')):
                     continue
                     
@@ -271,7 +273,7 @@ def refresh_s3_contents():
             # Create thumbnail HTML
             thumbnail_html = ""
             if job_data['thumbnail_url']:
-                thumbnail_html = f'<img src="{job_data["thumbnail_url"]}" style="width:60px;height:60px;object-fit:cover;border-radius:4px;" alt="Thumbnail" loading="lazy"/>'
+                thumbnail_html = f'<a href="{job_data["thumbnail_url"]}" download="{job_id}_thumbnail.png" style="display:inline-block;"><img src="{job_data["thumbnail_url"]}" style="width:60px;height:60px;object-fit:cover;border-radius:4px;cursor:pointer;" alt="Thumbnail" loading="lazy" title="Click to download"/></a>'
             
             # Add job header row with thumbnail
             files_data.append([
@@ -311,7 +313,7 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
                 filter_blurry, max_images, sfm_enable, enhanced_feature, matching_method, use_colmap_model,
                 use_transform_json, training_enable, max_steps, spherical_enable, remove_bg, remove_objects,
                 object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam, log_verbosity, mask_threshold, 
-                rotate_splat, refine_output_bounds, refinement_mode, enable_spz, enable_sogs, video_start_time, video_stop_time):
+                rotate_splat, crop_output_bounds, crop_mode, enable_spz, enable_sogs, video_start_time, video_stop_time):
     unique_uuid = uuid.uuid4()
     original_filename = os.path.basename(video_file) if video_file else "No file selected"
     
@@ -341,11 +343,9 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
         "imageProcessing": {
             "filterBlurryImages": filter_blurry == "true"
         },
-        "sfm": {
+        "reconstruction": {
             "enable": sfm_enable == "true",
             "softwareName": sfm_software,
-            "enableEnhancedFeatureExtraction": enhanced_feature == "true",
-            "matchingMethod": matching_method,
             "posePriors": {
                 "usePosePriorColmapModelFiles": use_colmap_model == "true",
                 "usePosePriorTransformJson": {
@@ -353,7 +353,9 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
                     "sourceCoordinateName": source_coordinate,
                     "poseIsWorldToCam": pose_world_to_cam == "true"
                 }
-            }
+            },
+            "enableEnhancedFeatureExtraction": enhanced_feature == "true",
+            "matchingMethod": matching_method
         },
         "training": {
             "enable": training_enable == "true",
@@ -362,10 +364,11 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
         },
         "postProcessing": {
             "rotateSplat": rotate_splat == "true",
-            "refineOutputBounds": refine_output_bounds == "true",
-            "refinementMode": refinement_mode,
+            "cropOutputBounds": crop_output_bounds == "true" if isinstance(crop_output_bounds, str) else crop_output_bounds,
+            "cropMode": crop_mode if isinstance(crop_mode, str) else "environment",
             "enableSpz": enable_spz == "true",
-            "enableSogs": enable_sogs == "true"
+            "enableSogs": enable_sogs == "true",
+            "enableUsdz": "true"
         },
         "sphericalCamera": {
             "enable": spherical_enable == "true",
@@ -460,11 +463,9 @@ def generate_splat(s3_bucket_name, s3_input_prefix, s3_output_prefix, file_obj,
             "imageProcessing": {
                 "filterBlurryImages": filter_blurry == "true"
             },
-            "sfm": {
+            "reconstruction": {
                 "enable": sfm_enable == "true",
                 "softwareName": sfm_software,
-                "enableEnhancedFeatureExtraction": enhanced_feature == "true",
-                "matchingMethod": matching_method,
                 "posePriors": {
                     "usePosePriorColmapModelFiles": use_colmap_model == "true",
                     "usePosePriorTransformJson": {
@@ -472,7 +473,9 @@ def generate_splat(s3_bucket_name, s3_input_prefix, s3_output_prefix, file_obj,
                         "sourceCoordinateName": source_coordinate,
                         "poseIsWorldToCam": pose_world_to_cam == "true"
                     }
-                }
+                },
+                "enableEnhancedFeatureExtraction": enhanced_feature == "true",
+                "matchingMethod": matching_method
             },
             "training": {
                 "enable": training_enable == "true",
@@ -481,10 +484,11 @@ def generate_splat(s3_bucket_name, s3_input_prefix, s3_output_prefix, file_obj,
             },
             "postProcessing": {
                 "rotateSplat": rotate_splat == "true",
-                "refineOutputBounds": shared_state.refine_output_bounds == "true",
-                "refinementMode": shared_state.refinement_mode,
+                "cropOutputBounds": shared_state.crop_output_bounds == "true",
+                "cropMode": shared_state.crop_mode,
                 "enableSpz": enable_spz == "true",
-                "enableSogs": enable_sogs == "true"
+                "enableSogs": enable_sogs == "true",
+                "enableUsdz": shared_state.enable_usdz == "true"
             },
             "sphericalCamera": {
                 "enable": spherical_enable == "true",
@@ -607,11 +611,9 @@ def create_upload_aws_tab():
                             "imageProcessing": {
                                 "filterBlurryImages": shared_state.filter_blurry == "true"
                             },
-                            "sfm": {
+                            "reconstruction": {
                                 "enable": shared_state.sfm_enable == "true",
                                 "softwareName": shared_state.sfm,
-                                "enableEnhancedFeatureExtraction": shared_state.enhanced_feature == "true",
-                                "matchingMethod": shared_state.matching_method,
                                 "posePriors": {
                                     "usePosePriorColmapModelFiles": shared_state.use_colmap_model == "true",
                                     "usePosePriorTransformJson": {
@@ -619,7 +621,9 @@ def create_upload_aws_tab():
                                         "sourceCoordinateName": shared_state.source_coordinate,
                                         "poseIsWorldToCam": shared_state.pose_world_to_cam == "true"
                                     }
-                                }
+                                },
+                                "enableEnhancedFeatureExtraction": shared_state.enhanced_feature == "true",
+                                "matchingMethod": shared_state.matching_method
                             },
                             "training": {
                                 "enable": shared_state.training_enable == "true",
@@ -628,10 +632,11 @@ def create_upload_aws_tab():
                             },
                             "postProcessing": {
                                 "rotateSplat": shared_state.rotate_splat == "true",
-                                "refineOutputBounds": shared_state.refine_output_bounds == "true",
-                                "refinementMode": shared_state.refinement_mode,
+                                "cropOutputBounds": shared_state.crop_output_bounds == "true",
+                                "cropMode": shared_state.crop_mode,
                                 "enableSpz": shared_state.enable_spz == "true",
-                                "enableSogs": shared_state.enable_sogs == "true"
+                                "enableSogs": shared_state.enable_sogs == "true",
+                                "enableUsdz": shared_state.enable_usdz == "true"
                             },
                             "sphericalCamera": {
                                 "enable": shared_state.spherical_enable == "true",
@@ -705,8 +710,8 @@ def create_aws_configuration_tab():
                 )
 
                 def update_shared_state(region, ddb_table, bucket, input_prefix, output_prefix, media_prefix, inst, spot):
-                    print(f"DEBUG: Updating shared_state.instance from '{shared_state.instance}' to '{inst}'")
-                    print(f"DEBUG: Updating shared_state.use_spot_instance from '{shared_state.use_spot_instance}' to '{spot}'")
+                    #print(f"DEBUG: Updating shared_state.instance from '{shared_state.instance}' to '{inst}'")
+                    #print(f"DEBUG: Updating shared_state.use_spot_instance from '{shared_state.use_spot_instance}' to '{spot}'")
                     shared_state.aws_region = region
                     shared_state.ddb_table_name = ddb_table
                     shared_state.s3_bucket = bucket
@@ -715,21 +720,21 @@ def create_aws_configuration_tab():
                     shared_state.media_input = media_prefix
                     shared_state.instance = inst
                     shared_state.use_spot_instance = spot
-                    print(f"DEBUG: Updated shared_state.instance to '{shared_state.instance}'")
+                    #print(f"DEBUG: Updated shared_state.instance to '{shared_state.instance}'")
                     return "AWS configuration updated"
 
                 # Immediately update shared_state when values change
                 def update_instance_type(inst):
-                    print(f"DEBUG: Instance type changed to: {inst}")
+                    #print(f"DEBUG: Instance type changed to: {inst}")
                     shared_state.instance = inst
-                    print(f"DEBUG: Shared state instance updated to: {shared_state.instance}")
-                    print(f"DEBUG: Main shared_state object ID: {id(shared_state)}")
+                    #print(f"DEBUG: Shared state instance updated to: {shared_state.instance}")
+                    #print(f"DEBUG: Main shared_state object ID: {id(shared_state)}")
                 
                 def update_spot_instance(spot):
-                    print(f"DEBUG: Spot instance setting changed to: {spot}")
+                    #print(f"DEBUG: Spot instance setting changed to: {spot}")
                     shared_state.use_spot_instance = spot
-                    print(f"DEBUG: Shared state spot instance updated to: {shared_state.use_spot_instance}")
-                    print(f"DEBUG: Main shared_state object ID: {id(shared_state)}")
+                    #print(f"DEBUG: Shared state spot instance updated to: {shared_state.use_spot_instance}")
+                    #print(f"DEBUG: Main shared_state object ID: {id(shared_state)}")
                 
                 # Update shared_state immediately when values change
                 instance.change(
@@ -851,25 +856,27 @@ def create_advanced_settings_tab():
                     )
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### SFM")
-                # SFM Settings
+                gr.Markdown("### Reconstruction")
+                # Reconstruction Settings
                 sfm_enable = gr.Radio(
-                    label="Enable SFM",
+                    label="Enable Reconstruction",
                     choices=["true", "false"],
                     value="true"
                 )
                 sfm = gr.Dropdown(
-                    label="SFM Software",
-                    choices=["colmap", "glomap", "vggt"],
+                    label="Reconstruction Software",
+                    choices=["colmap", "glomap", "vggt", "map_anything"],
                     value="glomap"
                 )
+            with gr.Column():
+                gr.Markdown("### Colmap Settings")
                 enhanced_feature = gr.Radio(
-                    label="Enhanced Feature Extraction",
+                    label="Colmap Enhanced Feature Extraction",
                     choices=["true", "false"],
                     value="false"
                 )
                 matching_method = gr.Dropdown(
-                    label="Matching Method",
+                    label="Colmap Matching Method",
                     choices=["sequential", "exhaustive", "vocab", "spatial"],
                     value="sequential"
                 )
@@ -924,6 +931,24 @@ def create_advanced_settings_tab():
                     ],
                     value="splatfacto"
                 )
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### Post Processing")
+                rotate_splat = gr.Radio(
+                    label="Rotate Splat for Gradio Viewer",
+                    choices=["true", "false"],
+                    value="true"
+                )
+                crop_output_bounds = gr.Radio(
+                    label="Crop Output Bounds",
+                    choices=["true", "false"],
+                    value="false"
+                )
+                crop_mode = gr.Dropdown(
+                    label="Crop Mode",
+                    choices=["environment", "rigid_body"],
+                    value="environment"
+                )
                 enable_spz = gr.Radio(
                     label="Enable SPZ Export",
                     choices=["true", "false"],
@@ -934,23 +959,10 @@ def create_advanced_settings_tab():
                     choices=["true", "false"],
                     value="true"
                 )
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("### Post Processing")
-                rotate_splat = gr.Radio(
-                    label="Rotate Splat for Gradio Viewer",
+                enable_usdz = gr.Radio(
+                    label="Enable USDZ Export",
                     choices=["true", "false"],
                     value="true"
-                )
-                refine_output_bounds = gr.Radio(
-                    label="Refine Output Bounds",
-                    choices=["true", "false"],
-                    value="false"
-                )
-                refinement_mode = gr.Dropdown(
-                    label="Refinement Mode",
-                    choices=["environment", "rigid_body"],
-                    value="environment"
                 )
         with gr.Row():
             with gr.Column():
@@ -975,8 +987,8 @@ def create_advanced_settings_tab():
                      shared_state.max_images, shared_state.video_start_time, shared_state.video_stop_time, shared_state.sfm_enable, 
                      shared_state.enhanced_feature, shared_state.matching_method,
                      shared_state.use_colmap_model, shared_state.use_transform_json,
-                     shared_state.training_enable, shared_state.max_steps, shared_state.enable_spz, shared_state.enable_sogs,
-                     shared_state.rotate_splat, shared_state.refine_output_bounds, shared_state.refinement_mode,
+                     shared_state.training_enable, shared_state.max_steps, shared_state.enable_spz, shared_state.enable_sogs, shared_state.enable_usdz,
+                     shared_state.rotate_splat, shared_state.crop_output_bounds, shared_state.crop_mode,
                      shared_state.spherical_enable,
                      shared_state.remove_bg, shared_state.remove_objects,
                      shared_state.object_removal_action, shared_state.objects_to_remove, shared_state.source_coordinate, shared_state.pose_world_to_cam,
@@ -988,8 +1000,8 @@ def create_advanced_settings_tab():
                     sfm, model, faces, bg_model, filter_blurry,
                     max_images, video_start_time, video_stop_time, sfm_enable, enhanced_feature, matching_method,
                     use_colmap_model, use_transform_json, training_enable,
-                    max_steps, enable_spz, enable_sogs,
-                    rotate_splat, refine_output_bounds, refinement_mode,
+                    max_steps, enable_spz, enable_sogs, enable_usdz,
+                    rotate_splat, crop_output_bounds, crop_mode,
                     spherical_enable, remove_bg, remove_objects,
                     object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam,
                     log_verbosity, mask_threshold
@@ -1019,18 +1031,19 @@ def create_advanced_settings_tab():
                         'max_steps': settings[14],
                         'enable_spz': settings[15],
                         'enable_sogs': settings[16],
-                        'rotate_splat': settings[17],
-                        'refine_output_bounds': settings[18],
-                        'refinement_mode': settings[19],
-                        'spherical_enable': settings[20],
-                        'remove_bg': settings[21],
-                        'remove_objects': settings[22],
-                        'object_removal_action': settings[23],
-                        'objects_to_remove': settings[24],
-                        'source_coordinate': settings[25],
-                        'pose_world_to_cam': settings[26],
-                        'log_verbosity': settings[27],
-                        'mask_threshold': settings[28]
+                        'enable_usdz': settings[17],
+                        'rotate_splat': settings[18],
+                        'crop_output_bounds': settings[19],
+                        'crop_mode': settings[20],
+                        'spherical_enable': settings[21],
+                        'remove_bg': settings[22],
+                        'remove_objects': settings[23],
+                        'object_removal_action': settings[24],
+                        'objects_to_remove': settings[25],
+                        'source_coordinate': settings[26],
+                        'pose_world_to_cam': settings[27],
+                        'log_verbosity': settings[28],
+                        'mask_threshold': settings[29]
                     }
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -1047,7 +1060,7 @@ def create_advanced_settings_tab():
                 
                 def load_configuration(config_name):
                     if not config_name:
-                        return ["Please select a configuration"] + [gr.update() for _ in range(29)]
+                        return ["Please select a configuration"] + [gr.update() for _ in range(30)]
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
                     config_file = os.path.join(configs_dir, f"{config_name}.json")
@@ -1075,9 +1088,10 @@ def create_advanced_settings_tab():
                             config_data.get('max_steps', 15000),
                             config_data.get('enable_spz', 'true'),
                             config_data.get('enable_sogs', 'true'),
+                            config_data.get('enable_usdz', 'true'),
                             config_data.get('rotate_splat', 'true'),
-                            config_data.get('refine_output_bounds', 'false'),
-                            config_data.get('refinement_mode', 'environment'),
+                            config_data.get('crop_output_bounds', 'false'),
+                            config_data.get('crop_mode', 'environment'),
                             config_data.get('spherical_enable', 'false'),
                             config_data.get('remove_bg', 'false'),
                             config_data.get('remove_objects', 'false'),
@@ -1089,7 +1103,7 @@ def create_advanced_settings_tab():
                             config_data.get('mask_threshold', 0.6)
                         ]
                     except Exception as e:
-                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(29)]
+                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(30)]
                 
                 # Wire up save/load buttons
                 save_config_btn.click(
@@ -1118,7 +1132,7 @@ def on_select(evt: gr.SelectData, data):
     """Handle row selection in the files table with improved error handling"""
     try:
         if not hasattr(evt, 'index') or evt.index is None or len(evt.index) == 0:
-            print("[DEBUG] No index in selection event")
+            #print("[DEBUG] No index in selection event")
             raise ValueError("Invalid selection event - no index")
             
         row_idx = evt.index[0]
@@ -1128,14 +1142,14 @@ def on_select(evt: gr.SelectData, data):
         elif isinstance(data, list):
             data_list = data
         else:
-            print(f"[DEBUG] Unexpected data type: {type(data)}")
+            #print(f"[DEBUG] Unexpected data type: {type(data)}")
             raise ValueError(f"Unexpected data type: {type(data)}")
             
         if not data_list or row_idx >= len(data_list):
             raise ValueError("Invalid selection")
             
         selected_row = data_list[row_idx]
-        print(f"[DEBUG] Selected row data: {selected_row}")
+        #print(f"[DEBUG] Selected row data: {selected_row}")
         
         if not selected_row or len(selected_row) < 2:
             raise ValueError("Invalid row data structure")
@@ -1442,8 +1456,8 @@ def handle_view_multi(selected_row):
             
             presigned_url = generate_presigned_url(bucket_name, file_key)
             if presigned_url:
-                print(f"[DEBUG] Video URL generated: {presigned_url}")
-                print(f"[DEBUG] Video filename: {filename}")
+                #print(f"[DEBUG] Video URL generated: {presigned_url}")
+                #print(f"[DEBUG] Video filename: {filename}")
                 return (
                     gr.update(value=None), 
                     "Video selected - check Video Preview tab",
@@ -1657,7 +1671,7 @@ def add_to_favorites(selected_data):
         if not selected_data:
             return "No item selected"
         
-        print(f"Debug - selected_data: {selected_data}")  # Debug print
+        #print(f"Debug - selected_data: {selected_data}")  # Debug print
         
         # Check if selected_data is a list or array
         if not isinstance(selected_data, (list, tuple)):
@@ -2304,7 +2318,7 @@ def generate_presigned_url(bucket_name, key, expiration=3600):
             Params=params,
             ExpiresIn=expiration
         )
-        print(f"[DEBUG] Generated presigned URL for {key}")
+        #print(f"[DEBUG] Generated presigned URL for {key}")
         return url
     except Exception as e:
         print(f"Error generating presigned URL: {str(e)}")
@@ -2432,8 +2446,8 @@ def create_debug_tab():
                         shared_state.log_verbosity,
                         shared_state.mask_threshold,
                         shared_state.rotate_splat,
-                        shared_state.refine_output_bounds,
-                        shared_state.refinement_mode,
+                        shared_state.crop_output_bounds,
+                        shared_state.crop_mode,
                         shared_state.enable_spz,
                         shared_state.enable_sogs,
                         shared_state.video_start_time,
@@ -2469,7 +2483,7 @@ def load_favorites():
         # List all files in the directory
         for file in os.listdir(favorites_dir):
             # Check for supported file types
-            if file.endswith(('.ply', '.spz', '.glb', '.sog')):
+            if file.endswith(('.ply', '.spz', '.glb', '.sog', '.usdz')):
                 # Extract the original filename and UUID if possible
                 parts = file.rsplit('_', 1)
                 if len(parts) == 2:
@@ -2897,22 +2911,22 @@ def create_interface():
                         # Load logos directly from Gradio components and apply theme-based visibility
                         light_logo = gr.Image(
                             "../../assets/images/PoweredByAWS_horiz_RGB_1c_Gray850.png",
-                            show_download_button=False,
+                            #show_download_button=False,
                             show_label=False,
                             container=False,
                             height=40,
                             width=None,
-                            show_fullscreen_button=False,
+                            #show_fullscreen_button=False,
                             elem_classes=["theme-image-light"]
                         )
                         dark_logo = gr.Image(
                             "../../assets/images/PoweredByAWS_horiz_RGB_1c_White.png",
-                            show_download_button=False,
+                            #show_download_button=False,
                             show_label=False,
                             container=False,
                             height=40,
                             width=None,
-                            show_fullscreen_button=False,
+                            #show_fullscreen_button=False,
                             elem_classes=["theme-image-dark"]
                         )
                         

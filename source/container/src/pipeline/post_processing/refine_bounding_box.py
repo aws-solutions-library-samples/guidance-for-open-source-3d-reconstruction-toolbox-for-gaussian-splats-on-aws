@@ -63,8 +63,8 @@ def main():
         'python', os.path.join(script_dir, 'extract_center_cube.py'),
         args.input_path, intermediate_output,
         '--method', 'std',
-        '--std-multiplier', '2.5' # Higher value = less crop, expand bounding box
-        # 1-Std=68%, 2-Std=95%, 3-Std=99.7
+        '--std-multiplier', '3.0' # Higher value = less crop, expand bounding box
+        # 1-Std=68%, 2-Std=95%, 3-Std=99.7%
     ]
     
     try:

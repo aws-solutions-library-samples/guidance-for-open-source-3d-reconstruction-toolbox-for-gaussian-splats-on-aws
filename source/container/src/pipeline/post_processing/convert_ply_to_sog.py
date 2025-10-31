@@ -71,6 +71,16 @@ def main():
         print(f"Stdout: {result.stdout}")
         print(f"Stderr: {result.stderr}")
         
+        # Check if GPU failed and retry with CPU if not already using CPU
+        if result.returncode != 0 and not args.cpu and ('VK_ERROR_INCOMPATIBLE_DRIVER' in result.stderr or 'Cannot read properties of null' in result.stderr):
+            print("GPU processing failed, retrying with CPU mode (-c flag)...")
+            cmd_cpu = cmd + ['-c']
+            print(f"Running command: {' '.join(cmd_cpu)}")
+            result = subprocess.run(cmd_cpu, capture_output=True, text=True)
+            print(f"Command completed with return code: {result.returncode}")
+            print(f"Stdout: {result.stdout}")
+            print(f"Stderr: {result.stderr}")
+        
         # List all files in output directory
         output_dir = os.path.dirname(output_path)
         if os.path.exists(output_dir):

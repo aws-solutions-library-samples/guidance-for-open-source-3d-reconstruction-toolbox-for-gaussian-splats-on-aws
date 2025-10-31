@@ -266,7 +266,9 @@ def get_cloudwatch_logs(training_job_name, is_batch_job=False, log_stream_name=N
             'device-side assertions',
             'glomap::ViewGraph::KeepLargestConnectedComponents',
             'Failed to extract frame',
-            'mean_reprojection_error'
+            'mean_reprojection_error',
+            'vkCreateInstance failed with VK_ERROR_INCOMPATIBLE_DRIVER',
+            'Warning: vkCreateInstance'
         ]
         
         def should_ignore_message(message):

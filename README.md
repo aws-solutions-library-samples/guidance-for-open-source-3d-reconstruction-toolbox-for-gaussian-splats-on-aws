@@ -91,6 +91,34 @@ The list of open source libraries that make this project possible include:
 - [sam2](https://github.com/facebookresearch/sam2) [(Apache-2.0/BSD-3-Clause)](https://github.com/facebookresearch/sam2/blob/main/LICENSE) - High Quality Background Remover for Objects in Video
 - [SuperSplat](https://github.com/playcanvas/supersplat) [(MIT)](https://github.com/playcanvas/supersplat?tab=MIT-1-ov-file#readme) - Splat Editor
 - [Gradio](https://github.com/gradio-app/gradio) [(Apache-2.0)](https://github.com/gradio-app/gradio#Apache-2.0-1-ov-file) - UI and Splat Viewer
+- [VGGT](https://github.com/facebookresearch/vggt?tab=readme-ov-file) [(VGGT-Commercial)](https://github.com/facebookresearch/vggt?tab=readme-ov-file) - Visually Grounded Geometric Transformer
+- [MapAnything](https://github.com/facebookresearch/map-anything) [(Apache-2.0)](https://github.com/facebookresearch/map-anything#Apache-2.0-1-ov-file) - Universal Feed-Forward Metric 3D Reconstruction
+- [Splat-Transform](https://github.com/playcanvas/splat-transform) [(MIT)](https://github.com/playcanvas/splat-transform#MIT-1-ov-file) - Rotate and Compress Splats
+
+- [Attentive-Eraser](https://github.com/Anonym0u3/AttentiveEraser) [(Apache-2.0)](https://github.com/Anonym0u3/AttentiveEraser#Apache-2.0-1-ov-file) - Object Eraser
+
+- [rembg](https://github.com/danielgatis/rembg/) [(MIT)](https://github.com/danielgatis/rembg/#MIT-1-ov-file) - Background Remover
+
+- [spz](https://github.com/nianticlabs/spz/tree/main) [(MIT)](https://github.com/nianticlabs/spz/tree/main#MIT-1-ov-file) - Compressed Splat Version
+
+
+Current features include:
+
+| Category         | Component                                                    | Notes                                                                                                        |
+| ---------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| Video Processing | Video to Images                                              | Extract frames (images) from video. Supports .mov/.mp4, perspective/equirectangular. Can set start/stop time. |
+| Image Processing | Filter Blurry Images                                         | Remove blurry images from a correlated set of images using a threshold.                                      |
+| Spherical Images | Equirectangular to Perspective                               | Convert spherical images into perspective images for processing. Remove cube map faces from the dataset.        |
+| Segmentation     | Erase Objects                                                | Use u2net to classify objects and erase them using diffusion/in-painting. Supports "human".                  |
+| Segmentation     | Remove Objects                                               | Use u2net to classify objects and remove/mask them. Supports "human".                                        |
+| Segmentation     | Remove Background                                            | Use u2net or SAM2 to detect objects (rigid body) and remove background. SAM2 only supports video.            |
+| Reconstruction   | Images to Point Cloud/Poses - Incremental SfM                | Supports Colmap. input video/images only or images + pose-priors.                                            |
+| Reconstruction   | Images to Point Cloud/Poses - Global SfM                     | Supports Glomap. input video/images only or images + pose-priors.                                            |
+| Reconstruction   | Images to Point Cloud/Poses - Transformer                    | Supports VGGT (limited to < 50 images) and Map-Anything. Images only.                                        |
+| Training         | Images, Point Cloud, & Poses to Gaussian Splat               | Supports splatfacto, splatfacto-big, splatfacto-mcmc, splatfacto-w-light, 3dgrt, 3dgut, nerfacto             |
+| Post Processing  | Export Gaussian Splat and Metadata                           | Supports outputs .ply, .spz, .sog, .usdz (beta), .mp4, .mp4,                                                                          |
+| Post Processing  | Transform/Rotate all generated objects from native to viewer | Supports Gradio interface             |
+| Post Processing  | Crop all generated objects                                   | Supports environments or rigid_objects to reduce noise.             |
 
 ## Prerequisites
 
