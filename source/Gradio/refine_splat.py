@@ -25,10 +25,7 @@ def refine_splat(selected_data, instance_type, use_spot_instance):
             return f"Error: Job {job_id} not found in database"
         
         selected_job = response['Item']
-        print(f"Selected job data: {selected_job}")
-        print(f"DEBUG: postProcessing section: {selected_job.get('postProcessing', 'NOT FOUND')}")
-        print(f"DEBUG: enableSpz in original: {selected_job.get('postProcessing', {}).get('enableSpz', 'NOT FOUND')}")
-        print(f"DEBUG: enableSogs in original: {selected_job.get('postProcessing', {}).get('enableSogs', 'NOT FOUND')}")
+        #print(f"Selected job data: {selected_job}")
         
         # Extract model and max steps from selected job
         original_model = None
@@ -45,9 +42,6 @@ def refine_splat(selected_data, instance_type, use_spot_instance):
         # Check for maxSteps in DynamoDB record
         if original_max_steps is None:
             original_max_steps = selected_job.get('maxSteps')
-        
-        print(f"Found model: {original_model}")
-        print(f"Found max steps from selected job: {original_max_steps}")
         
         # Generate new UUID for refinement job
         refine_uuid = uuid.uuid4()
@@ -89,7 +83,7 @@ def refine_splat(selected_data, instance_type, use_spot_instance):
             },
             "training": {
                 "enable": True,  # Enable training for refinement
-                "maxSteps": "20000",
+                "maxSteps": "20000", # This will be overwritten in container using contants set for max_steps for optimal training
                 "model": str(original_model or shared_state.model),
                 "enableMultiGpu": selected_job.get('training', {}).get('enableMultiGpu', False),
 

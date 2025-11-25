@@ -71,15 +71,18 @@ class BatchConstruct(Construct):
         # Create compute environments
         self.spot_compute_env = self._create_spot_compute_environment()
         self.on_demand_compute_env = self._create_on_demand_compute_environment()
+        self.g6e_spot_compute_env = self._create_g6e_spot_compute_environment()
         
-        # Create job queue
+        # Create job queues
         self.job_queue = self._create_job_queue()
+        self.g6e_job_queue = self._create_g6e_job_queue()
         
         # Create job definitions for different instance types
         self.job_definitions = self._create_job_definitions()
         
         # Outputs
         CfnOutput(self, "BatchJobQueueArn", value=self.job_queue.ref)
+        CfnOutput(self, "G6eBatchJobQueueArn", value=self.g6e_job_queue.ref)
         for instance_type, job_def in self.job_definitions.items():
             CfnOutput(self, f"BatchJobDefinition{instance_type.replace('.', '').upper()}Arn", value=job_def.ref)
 
@@ -225,7 +228,6 @@ chmod 775 /mnt/workspace
 
     def _create_spot_compute_environment(self):
         """Create spot compute environment"""
-        # Generate a timestamp to ensure new compute environment names on each deployment
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         
@@ -240,7 +242,7 @@ chmod 775 /mnt/workspace
                 "allocationStrategy": "BEST_FIT",
                 "bidPercentage": 50,
                 "minvCpus": 0,
-                "maxvCpus": 512, # Increased from 64 to 512 to match Terraform
+                "maxvCpus": 512,
                 "desiredvCpus": 0,
                 "instanceTypes": ["g5.4xlarge", "g5.8xlarge", "g6.4xlarge", "g6.8xlarge", "g6e.4xlarge"],
                 "ec2Configuration": [{
@@ -256,10 +258,42 @@ chmod 775 /mnt/workspace
             }
         )
         return spot_env
+    
+    def _create_g6e_spot_compute_environment(self):
+        """Create dedicated g6e spot compute environment"""
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        
+        g6e_spot_env = batch.CfnComputeEnvironment(
+            self, "G6eSpotComputeEnvironment",
+            compute_environment_name=f"G6eSpotComputeEnv-{self.random_id}-{timestamp}",
+            type="MANAGED",
+            state="ENABLED",
+            service_role=self.batch_service_role.role_arn,
+            compute_resources={
+                "type": "EC2",
+                "allocationStrategy": "BEST_FIT",
+                "bidPercentage": 50,
+                "minvCpus": 0,
+                "maxvCpus": 128,
+                "desiredvCpus": 0,
+                "instanceTypes": ["g6e.4xlarge"],
+                "ec2Configuration": [{
+                    "imageType": "ECS_AL2"
+                }],
+                "subnets": [subnet.subnet_id for subnet in self.vpc.public_subnets],
+                "securityGroupIds": [self.security_group.security_group_id],
+                "instanceRole": self.instance_profile.attr_arn,
+                "launchTemplate": {
+                    "launchTemplateId": self.launch_template.ref,
+                    "version": "$Latest"
+                }
+            }
+        )
+        return g6e_spot_env
 
     def _create_on_demand_compute_environment(self):
         """Create on-demand compute environment as fallback"""
-        # Generate a timestamp to ensure new compute environment names on each deployment
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         
@@ -301,7 +335,6 @@ chmod 775 /mnt/workspace
 
     def _create_job_queue(self):
         """Create job queue with spot priority"""
-        # Generate a timestamp for the queue name to match Terraform behavior
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         
@@ -324,83 +357,778 @@ chmod 775 /mnt/workspace
         job_queue.add_dependency(self.spot_compute_env)
         job_queue.add_dependency(self.on_demand_compute_env)
         return job_queue
+    
+    def _create_g6e_job_queue(self):
+        """Create dedicated g6e job queue"""
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        
+        g6e_job_queue = batch.CfnJobQueue(
+            self, "G6eBatchJobQueue",
+            job_queue_name=f"G6eJobQueue-{self.random_id}-{timestamp}",
+            state="ENABLED",
+            priority=1,
+            compute_environment_order=[
+                {
+                    "order": 1,
+                    "computeEnvironment": self.g6e_spot_compute_env.ref
+                }
+            ]
+        )
+        g6e_job_queue.add_dependency(self.g6e_spot_compute_env)
+        return g6e_job_queue
 
     def _create_job_definitions(self):
-        """Create job definitions for different instance types"""
-        
-        # Instance type configurations: (vCPUs, memory_mb, gpu_count)
-        instance_configs = {
-            "g5.4xlarge": (16, 60000, 1),
-            "g5.8xlarge": (32, 120000, 1), 
-            "g6.4xlarge": (16, 60000, 1),
-            "g6.8xlarge": (32, 120000, 1)
-        }
-        
+        """Create job definitions exactly matching Terraform"""
         job_definitions = {}
         
-        for instance_type, (vcpus, memory, gpu_count) in instance_configs.items():
-            job_def_id = f"BatchJobDefinition{instance_type.replace('.', '').upper()}"
-            
-            job_definitions[instance_type] = batch.CfnJobDefinition(
-                self, job_def_id,
-                type="container",
-                container_properties={
-                    "image": self.ecr_repo_uri,
-                    "vcpus": vcpus,
-                    "memory": memory,
-                    "jobRoleArn": self.task_role.role_arn,
-                    "command": ["python", "/opt/ml/code/main.py"],
-                    "resourceRequirements": [
+        # Small instances (4 vCPUs) - Terraform: batch_job_definition_small
+        job_definitions["small"] = batch.CfnJobDefinition(
+            self, "BatchJobDefinitionSmall",
+            type="container",
+            container_properties={
+                "image": self.ecr_repo_uri,
+                "vcpus": 4,
+                "memory": 15000,
+                "jobRoleArn": self.task_role.role_arn,
+                "command": ["python", "/opt/ml/code/main.py"],
+                "privileged": True,
+                "resourceRequirements": [
+                    {
+                        "type": "GPU",
+                        "value": "1"
+                    }
+                ],
+                "linuxParameters": {
+                    "sharedMemorySize": 8192,
+                    "devices": [
                         {
-                            "type": "GPU",
-                            "value": str(gpu_count)
-                        }
-                    ],
-                    "mountPoints": [
-                        {
-                            "sourceVolume": "workspace",
-                            "containerPath": "/tmp",
-                            "readOnly": False
+                            "hostPath": "/dev/nvidia0",
+                            "containerPath": "/dev/nvidia0",
+                            "permissions": ["read", "write", "mknod"]
                         },
                         {
-                            "sourceVolume": "shm",
-                            "containerPath": "/dev/shm",
-                            "readOnly": False
-                        }
-                    ],
-                    "volumes": [
-                        {
-                            "name": "workspace",
-                            "host": {
-                                "sourcePath": "/mnt/workspace"
-                            }
+                            "hostPath": "/dev/nvidiactl",
+                            "containerPath": "/dev/nvidiactl",
+                            "permissions": ["read", "write", "mknod"]
                         },
                         {
-                            "name": "shm",
-                            "host": {
-                                "sourcePath": "/dev/shm"
-                            }
-                        }
-                    ],
-                    "ulimits": [
-                        {
-                            "name": "memlock",
-                            "softLimit": -1,
-                            "hardLimit": -1
-                        },
-                        {
-                            "name": "stack",
-                            "softLimit": 67108864,
-                            "hardLimit": 67108864
+                            "hostPath": "/dev/nvidia-uvm",
+                            "containerPath": "/dev/nvidia-uvm",
+                            "permissions": ["read", "write", "mknod"]
                         }
                     ]
                 },
-                retry_strategy={
-                    "attempts": 1
+                "mountPoints": [
+                    {
+                        "sourceVolume": "workspace",
+                        "containerPath": "/tmp",
+                        "readOnly": False
+                    },
+                    {
+                        "sourceVolume": "shm",
+                        "containerPath": "/dev/shm",
+                        "readOnly": False
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "workspace",
+                        "host": {
+                            "sourcePath": "/mnt/workspace"
+                        }
+                    },
+                    {
+                        "name": "shm",
+                        "host": {
+                            "sourcePath": "/dev/shm"
+                        }
+                    }
+                ],
+                "ulimits": [
+                    {
+                        "name": "memlock",
+                        "softLimit": -1,
+                        "hardLimit": -1
+                    },
+                    {
+                        "name": "stack",
+                        "softLimit": 67108864,
+                        "hardLimit": 67108864
+                    }
+                ]
+            },
+            retry_strategy={
+                "attempts": 1
+            },
+            timeout={
+                "attemptDurationSeconds": 259200
+            }
+        )
+        
+        # Medium instances (8 vCPUs) - Terraform: batch_job_definition_medium
+        job_definitions["medium"] = batch.CfnJobDefinition(
+            self, "BatchJobDefinitionMedium",
+            type="container",
+            container_properties={
+                "image": self.ecr_repo_uri,
+                "vcpus": 8,
+                "memory": 30000,
+                "jobRoleArn": self.task_role.role_arn,
+                "command": ["python", "/opt/ml/code/main.py"],
+                "privileged": True,
+                "resourceRequirements": [
+                    {
+                        "type": "GPU",
+                        "value": "1"
+                    }
+                ],
+                "linuxParameters": {
+                    "sharedMemorySize": 8192,
+                    "devices": [
+                        {
+                            "hostPath": "/dev/nvidia0",
+                            "containerPath": "/dev/nvidia0",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidiactl",
+                            "containerPath": "/dev/nvidiactl",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidia-uvm",
+                            "containerPath": "/dev/nvidia-uvm",
+                            "permissions": ["read", "write", "mknod"]
+                        }
+                    ]
                 },
-                timeout={
-                    "attemptDurationSeconds": 259200  # 72 hours
-                }
-            )
+                "mountPoints": [
+                    {
+                        "sourceVolume": "workspace",
+                        "containerPath": "/tmp",
+                        "readOnly": False
+                    },
+                    {
+                        "sourceVolume": "shm",
+                        "containerPath": "/dev/shm",
+                        "readOnly": False
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "workspace",
+                        "host": {
+                            "sourcePath": "/mnt/workspace"
+                        }
+                    },
+                    {
+                        "name": "shm",
+                        "host": {
+                            "sourcePath": "/dev/shm"
+                        }
+                    }
+                ],
+                "ulimits": [
+                    {
+                        "name": "memlock",
+                        "softLimit": -1,
+                        "hardLimit": -1
+                    },
+                    {
+                        "name": "stack",
+                        "softLimit": 67108864,
+                        "hardLimit": 67108864
+                    }
+                ]
+            },
+            retry_strategy={
+                "attempts": 1
+            },
+            timeout={
+                "attemptDurationSeconds": 259200
+            }
+        )
+        
+        # Large instances (16 vCPUs) - Terraform: batch_job_definition (default)
+        job_definitions["default"] = batch.CfnJobDefinition(
+            self, "BatchJobDefinition",
+            type="container",
+            container_properties={
+                "image": self.ecr_repo_uri,
+                "vcpus": 16,
+                "memory": 60000,
+                "jobRoleArn": self.task_role.role_arn,
+                "command": ["python", "/opt/ml/code/main.py"],
+                "privileged": True,
+                "resourceRequirements": [
+                    {
+                        "type": "GPU",
+                        "value": "1"
+                    }
+                ],
+                "linuxParameters": {
+                    "sharedMemorySize": 8192,
+                    "devices": [
+                        {
+                            "hostPath": "/dev/nvidia0",
+                            "containerPath": "/dev/nvidia0",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidiactl",
+                            "containerPath": "/dev/nvidiactl",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidia-uvm",
+                            "containerPath": "/dev/nvidia-uvm",
+                            "permissions": ["read", "write", "mknod"]
+                        }
+                    ]
+                },
+                "mountPoints": [
+                    {
+                        "sourceVolume": "workspace",
+                        "containerPath": "/tmp",
+                        "readOnly": False
+                    },
+                    {
+                        "sourceVolume": "shm",
+                        "containerPath": "/dev/shm",
+                        "readOnly": False
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "workspace",
+                        "host": {
+                            "sourcePath": "/mnt/workspace"
+                        }
+                    },
+                    {
+                        "name": "shm",
+                        "host": {
+                            "sourcePath": "/dev/shm"
+                        }
+                    }
+                ],
+                "ulimits": [
+                    {
+                        "name": "memlock",
+                        "softLimit": -1,
+                        "hardLimit": -1
+                    },
+                    {
+                        "name": "stack",
+                        "softLimit": 67108864,
+                        "hardLimit": 67108864
+                    }
+                ]
+            },
+            retry_strategy={
+                "attempts": 1
+            },
+            timeout={
+                "attemptDurationSeconds": 259200
+            }
+        )
+        
+        # Extra Large instances (32 vCPUs) - Terraform: batch_job_definition_xlarge
+        job_definitions["xlarge"] = batch.CfnJobDefinition(
+            self, "BatchJobDefinitionXlarge",
+            type="container",
+            container_properties={
+                "image": self.ecr_repo_uri,
+                "vcpus": 32,
+                "memory": 400000,
+                "jobRoleArn": self.task_role.role_arn,
+                "command": ["python", "/opt/ml/code/main.py"],
+                "privileged": True,
+                "resourceRequirements": [
+                    {
+                        "type": "GPU",
+                        "value": "1"
+                    }
+                ],
+                "linuxParameters": {
+                    "sharedMemorySize": 8192
+                },
+                "mountPoints": [
+                    {
+                        "sourceVolume": "workspace",
+                        "containerPath": "/tmp",
+                        "readOnly": False
+                    },
+                    {
+                        "sourceVolume": "shm",
+                        "containerPath": "/dev/shm",
+                        "readOnly": False
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "workspace",
+                        "host": {
+                            "sourcePath": "/mnt/workspace"
+                        }
+                    },
+                    {
+                        "name": "shm",
+                        "host": {
+                            "sourcePath": "/dev/shm"
+                        }
+                    }
+                ],
+                "ulimits": [
+                    {
+                        "name": "memlock",
+                        "softLimit": -1,
+                        "hardLimit": -1
+                    },
+                    {
+                        "name": "stack",
+                        "softLimit": 67108864,
+                        "hardLimit": 67108864
+                    }
+                ]
+            },
+            retry_strategy={
+                "attempts": 1
+            },
+            timeout={
+                "attemptDurationSeconds": 259200
+            }
+        )
+        
+        # G5.4xlarge specific - Terraform: batch_job_definition_g5_4xlarge
+        job_definitions["g5.4xlarge"] = batch.CfnJobDefinition(
+            self, "BatchJobDefinitionG54xlarge",
+            type="container",
+            container_properties={
+                "image": self.ecr_repo_uri,
+                "vcpus": 16,
+                "memory": 60000,
+                "jobRoleArn": self.task_role.role_arn,
+                "command": ["python", "/opt/ml/code/main.py"],
+                "privileged": True,
+                "resourceRequirements": [
+                    {
+                        "type": "GPU",
+                        "value": "1"
+                    }
+                ],
+                "linuxParameters": {
+                    "sharedMemorySize": 8192,
+                    "devices": [
+                        {
+                            "hostPath": "/dev/nvidia0",
+                            "containerPath": "/dev/nvidia0",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidiactl",
+                            "containerPath": "/dev/nvidiactl",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidia-uvm",
+                            "containerPath": "/dev/nvidia-uvm",
+                            "permissions": ["read", "write", "mknod"]
+                        }
+                    ]
+                },
+                "mountPoints": [
+                    {
+                        "sourceVolume": "workspace",
+                        "containerPath": "/tmp",
+                        "readOnly": False
+                    },
+                    {
+                        "sourceVolume": "shm",
+                        "containerPath": "/dev/shm",
+                        "readOnly": False
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "workspace",
+                        "host": {
+                            "sourcePath": "/mnt/workspace"
+                        }
+                    },
+                    {
+                        "name": "shm",
+                        "host": {
+                            "sourcePath": "/dev/shm"
+                        }
+                    }
+                ],
+                "ulimits": [
+                    {
+                        "name": "memlock",
+                        "softLimit": -1,
+                        "hardLimit": -1
+                    },
+                    {
+                        "name": "stack",
+                        "softLimit": 67108864,
+                        "hardLimit": 67108864
+                    }
+                ]
+            },
+            retry_strategy={
+                "attempts": 1
+            },
+            timeout={
+                "attemptDurationSeconds": 259200
+            }
+        )
+        
+        # G5.8xlarge specific - Terraform: batch_job_definition_g5_8xlarge
+        job_definitions["g5.8xlarge"] = batch.CfnJobDefinition(
+            self, "BatchJobDefinitionG58xlarge",
+            type="container",
+            container_properties={
+                "image": self.ecr_repo_uri,
+                "vcpus": 32,
+                "memory": 120000,
+                "jobRoleArn": self.task_role.role_arn,
+                "command": ["python", "/opt/ml/code/main.py"],
+                "privileged": True,
+                "resourceRequirements": [
+                    {
+                        "type": "GPU",
+                        "value": "1"
+                    }
+                ],
+                "linuxParameters": {
+                    "sharedMemorySize": 8192,
+                    "devices": [
+                        {
+                            "hostPath": "/dev/nvidia0",
+                            "containerPath": "/dev/nvidia0",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidiactl",
+                            "containerPath": "/dev/nvidiactl",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidia-uvm",
+                            "containerPath": "/dev/nvidia-uvm",
+                            "permissions": ["read", "write", "mknod"]
+                        }
+                    ]
+                },
+                "mountPoints": [
+                    {
+                        "sourceVolume": "workspace",
+                        "containerPath": "/tmp",
+                        "readOnly": False
+                    },
+                    {
+                        "sourceVolume": "shm",
+                        "containerPath": "/dev/shm",
+                        "readOnly": False
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "workspace",
+                        "host": {
+                            "sourcePath": "/mnt/workspace"
+                        }
+                    },
+                    {
+                        "name": "shm",
+                        "host": {
+                            "sourcePath": "/dev/shm"
+                        }
+                    }
+                ],
+                "ulimits": [
+                    {
+                        "name": "memlock",
+                        "softLimit": -1,
+                        "hardLimit": -1
+                    },
+                    {
+                        "name": "stack",
+                        "softLimit": 67108864,
+                        "hardLimit": 67108864
+                    }
+                ]
+            },
+            retry_strategy={
+                "attempts": 1
+            },
+            timeout={
+                "attemptDurationSeconds": 259200
+            }
+        )
+        
+        # G6.4xlarge specific - Terraform: batch_job_definition_g6_4xlarge
+        job_definitions["g6.4xlarge"] = batch.CfnJobDefinition(
+            self, "BatchJobDefinitionG64xlarge",
+            type="container",
+            container_properties={
+                "image": self.ecr_repo_uri,
+                "vcpus": 16,
+                "memory": 60000,
+                "jobRoleArn": self.task_role.role_arn,
+                "command": ["python", "/opt/ml/code/main.py"],
+                "privileged": True,
+                "resourceRequirements": [
+                    {
+                        "type": "GPU",
+                        "value": "1"
+                    }
+                ],
+                "linuxParameters": {
+                    "sharedMemorySize": 8192,
+                    "devices": [
+                        {
+                            "hostPath": "/dev/nvidia0",
+                            "containerPath": "/dev/nvidia0",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidiactl",
+                            "containerPath": "/dev/nvidiactl",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidia-uvm",
+                            "containerPath": "/dev/nvidia-uvm",
+                            "permissions": ["read", "write", "mknod"]
+                        }
+                    ]
+                },
+                "mountPoints": [
+                    {
+                        "sourceVolume": "workspace",
+                        "containerPath": "/tmp",
+                        "readOnly": False
+                    },
+                    {
+                        "sourceVolume": "shm",
+                        "containerPath": "/dev/shm",
+                        "readOnly": False
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "workspace",
+                        "host": {
+                            "sourcePath": "/mnt/workspace"
+                        }
+                    },
+                    {
+                        "name": "shm",
+                        "host": {
+                            "sourcePath": "/dev/shm"
+                        }
+                    }
+                ],
+                "ulimits": [
+                    {
+                        "name": "memlock",
+                        "softLimit": -1,
+                        "hardLimit": -1
+                    },
+                    {
+                        "name": "stack",
+                        "softLimit": 67108864,
+                        "hardLimit": 67108864
+                    }
+                ]
+            },
+            retry_strategy={
+                "attempts": 1
+            },
+            timeout={
+                "attemptDurationSeconds": 259200
+            }
+        )
+        
+        # G6.8xlarge specific - Terraform: batch_job_definition_g6_8xlarge
+        job_definitions["g6.8xlarge"] = batch.CfnJobDefinition(
+            self, "BatchJobDefinitionG68xlarge",
+            type="container",
+            container_properties={
+                "image": self.ecr_repo_uri,
+                "vcpus": 32,
+                "memory": 120000,
+                "jobRoleArn": self.task_role.role_arn,
+                "command": ["python", "/opt/ml/code/main.py"],
+                "privileged": True,
+                "resourceRequirements": [
+                    {
+                        "type": "GPU",
+                        "value": "1"
+                    }
+                ],
+                "linuxParameters": {
+                    "sharedMemorySize": 8192,
+                    "devices": [
+                        {
+                            "hostPath": "/dev/nvidia0",
+                            "containerPath": "/dev/nvidia0",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidiactl",
+                            "containerPath": "/dev/nvidiactl",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidia-uvm",
+                            "containerPath": "/dev/nvidia-uvm",
+                            "permissions": ["read", "write", "mknod"]
+                        }
+                    ]
+                },
+                "mountPoints": [
+                    {
+                        "sourceVolume": "workspace",
+                        "containerPath": "/tmp",
+                        "readOnly": False
+                    },
+                    {
+                        "sourceVolume": "shm",
+                        "containerPath": "/dev/shm",
+                        "readOnly": False
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "workspace",
+                        "host": {
+                            "sourcePath": "/mnt/workspace"
+                        }
+                    },
+                    {
+                        "name": "shm",
+                        "host": {
+                            "sourcePath": "/dev/shm"
+                        }
+                    }
+                ],
+                "ulimits": [
+                    {
+                        "name": "memlock",
+                        "softLimit": -1,
+                        "hardLimit": -1
+                    },
+                    {
+                        "name": "stack",
+                        "softLimit": 67108864,
+                        "hardLimit": 67108864
+                    }
+                ]
+            },
+            retry_strategy={
+                "attempts": 1
+            },
+            timeout={
+                "attemptDurationSeconds": 259200
+            }
+        )
+        
+        # G6e.4xlarge specific - Terraform: batch_job_definition_g6e_4xlarge
+        job_definitions["g6e.4xlarge"] = batch.CfnJobDefinition(
+            self, "BatchJobDefinitionG6e4xlarge",
+            type="container",
+            container_properties={
+                "image": self.ecr_repo_uri,
+                "vcpus": 16,
+                "memory": 122880,
+                "jobRoleArn": self.task_role.role_arn,
+                "command": ["python", "/opt/ml/code/main.py"],
+                "privileged": True,
+                "environment": [
+                    {
+                        "name": "LD_LIBRARY_PATH",
+                        "value": "/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+                    },
+                    {
+                        "name": "NVIDIA_DRIVER_CAPABILITIES",
+                        "value": "compute,utility,graphics"
+                    }
+                ],
+                "resourceRequirements": [
+                    {
+                        "type": "GPU",
+                        "value": "1"
+                    }
+                ],
+                "linuxParameters": {
+                    "sharedMemorySize": 8192,
+                    "devices": [
+                        {
+                            "hostPath": "/dev/nvidia0",
+                            "containerPath": "/dev/nvidia0",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidiactl",
+                            "containerPath": "/dev/nvidiactl",
+                            "permissions": ["read", "write", "mknod"]
+                        },
+                        {
+                            "hostPath": "/dev/nvidia-uvm",
+                            "containerPath": "/dev/nvidia-uvm",
+                            "permissions": ["read", "write", "mknod"]
+                        }
+                    ]
+                },
+                "mountPoints": [
+                    {
+                        "sourceVolume": "workspace",
+                        "containerPath": "/tmp",
+                        "readOnly": False
+                    },
+                    {
+                        "sourceVolume": "shm",
+                        "containerPath": "/dev/shm",
+                        "readOnly": False
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "workspace",
+                        "host": {
+                            "sourcePath": "/mnt/workspace"
+                        }
+                    },
+                    {
+                        "name": "shm",
+                        "host": {
+                            "sourcePath": "/dev/shm"
+                        }
+                    }
+                ],
+                "ulimits": [
+                    {
+                        "name": "memlock",
+                        "softLimit": -1,
+                        "hardLimit": -1
+                    },
+                    {
+                        "name": "stack",
+                        "softLimit": 67108864,
+                        "hardLimit": 67108864
+                    }
+                ]
+            },
+            retry_strategy={
+                "attempts": 1
+            },
+            timeout={
+                "attemptDurationSeconds": 259200
+            }
+        )
         
         return job_definitions

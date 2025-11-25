@@ -61,3 +61,11 @@ output "batch_job_queue" {
 output "job_definition_selector_function_name" {
   value = aws_lambda_function.job_definition_selector.function_name
 }
+
+output "batch_job_definition_g6e_4xlarge" {
+  value = aws_batch_job_definition.batch_job_definition_g6e_4xlarge.name
+}
+
+output "batch_job_queue_g6e" {
+  value = aws_batch_job_queue.g6e_job_queue.name
+}

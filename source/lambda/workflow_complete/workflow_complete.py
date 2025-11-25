@@ -268,7 +268,12 @@ def get_cloudwatch_logs(training_job_name, is_batch_job=False, log_stream_name=N
             'Failed to extract frame',
             'mean_reprojection_error',
             'vkCreateInstance failed with VK_ERROR_INCOMPATIBLE_DRIVER',
-            'Warning: vkCreateInstance'
+            'Warning: vkCreateInstance',
+            'XDG_RUNTIME_DIR not set in the environment',
+            'maxDynamicUniformBuffersPerPipelineLayout',
+            'maxDynamicStorageBuffersPerPipelineLayout',
+            'LOG_VERBOSITY:',
+            '(type: str)'
         ]
         
         def should_ignore_message(message):
@@ -482,7 +487,7 @@ def get_cloudwatch_logs(training_job_name, is_batch_job=False, log_stream_name=N
                                 found_error = True
                                 continue
                 
-                    if found_error and len(error_messages) < 15:
+                    if found_error and len(error_messages) < 50:
                         error_messages.append(message.strip())
             
             if found_error:
@@ -644,9 +649,28 @@ def lambda_handler(event, context):
             else:
                 queue_time_str = "Unknown"
             
-            # Update DynamoDB status
-            update_expression = 'SET uuidStatus = :uuidStatus'
-            expression_attribute_values = {':uuidStatus': 'Complete'}
+            # List output files from S3 and store in DynamoDB
+            s3_client = boto3.client('s3')
+            output_files = []
+            try:
+                s3_output = event['envVars']['S3_OUTPUT']
+                # Handle both s3://bucket/prefix and bucket/prefix formats
+                if s3_output.startswith('s3://'):
+                    s3_output = s3_output[5:]  # Remove s3://
+                parts = s3_output.split('/', 1)
+                bucket_name = parts[0]
+                prefix_base = parts[1] if len(parts) > 1 else ''
+                prefix = f"{prefix_base}/{event['envVars']['UUID']}/" if prefix_base else f"{event['envVars']['UUID']}/"
+                response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+                for obj in response.get('Contents', []):
+                    if obj['Key'].endswith(('.ply', '.spz', '.sog', '.usdz', '.mp4', '.glb')):
+                        output_files.append({'filename': obj['Key'].split('/')[-1], 'size': obj['Size']})
+            except Exception as e:
+                print(f"Error listing output files: {e}")
+            
+            # Update DynamoDB status and output files
+            update_expression = 'SET uuidStatus = :uuidStatus, outputFiles = :outputFiles'
+            expression_attribute_values = {':uuidStatus': 'Complete', ':outputFiles': output_files}
             update_ddb_item_value(table, key, update_expression, expression_attribute_values)
             
             # Get additional job details from DynamoDB
@@ -812,9 +836,28 @@ This is an automated message from the Splat Processing System"""
             }
         }
 
-        # Update DynamoDB status
-        update_expression = 'SET uuidStatus = :uuidStatus'
-        expression_attribute_values = {':uuidStatus': 'Complete'}
+        # List output files from S3 and store in DynamoDB
+        s3_client = boto3.client('s3')
+        output_files = []
+        try:
+            s3_output = event['envVars']['S3_OUTPUT']
+            # Handle both s3://bucket/prefix and bucket/prefix formats
+            if s3_output.startswith('s3://'):
+                s3_output = s3_output[5:]  # Remove s3://
+            parts = s3_output.split('/', 1)
+            bucket_name = parts[0]
+            prefix_base = parts[1] if len(parts) > 1 else ''
+            prefix = f"{prefix_base}/{event['envVars']['UUID']}/" if prefix_base else f"{event['envVars']['UUID']}/"
+            response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+            for obj in response.get('Contents', []):
+                if obj['Key'].endswith(('.ply', '.spz', '.sog', '.usdz', '.mp4', '.glb')):
+                    output_files.append({'filename': obj['Key'].split('/')[-1], 'size': obj['Size']})
+        except Exception as e:
+            print(f"Error listing output files: {e}")
+        
+        # Update DynamoDB status and output files
+        update_expression = 'SET uuidStatus = :uuidStatus, outputFiles = :outputFiles'
+        expression_attribute_values = {':uuidStatus': 'Complete', ':outputFiles': output_files}
         update_ddb_item_value(table, key, update_expression, expression_attribute_values)
 
         # Get additional job details from DynamoDB

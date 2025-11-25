@@ -526,7 +526,7 @@ def untar_gz(file_path, extract_path='.'):
             # Extract only safe members - validated to prevent directory traversal
             safe_members = [m for m in tar.getmembers() 
                           if not (os.path.isabs(m.name) or ".." in m.name or 
-                                 (m.issym() or m.islnk()) and (os.path.isabs(m.linkname) or ".." in m.linkname))]
+                                 ((m.issym() or m.islnk()) and (os.path.isabs(m.linkname) or ".." in m.linkname)))]
             tar.extractall(extract_path, members=safe_members)  # nosemgrep: dangerous-tarfile-extractall
             # Members are validated above to prevent directory traversal attacks
     except FileNotFoundError as e:
@@ -680,8 +680,8 @@ def create_tarball(source_path, output_path, arcname=None):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     if arcname is None:
         arcname = os.path.basename(source_path)
-    with tarfile.open(output_path, "w:gz") as tar:
-        tar.add(source_path, arcname=arcname)
+    with tarfile.open(output_path, "w:gz", dereference=True) as tar:
+        tar.add(source_path, arcname=arcname, recursive=True)
 
 def remove_cubemap_faces(erp_images_dir, remove_face_list):
     """
@@ -806,3 +806,47 @@ def cleanup_cuda_memory():
         torch.cuda.synchronize()
         import gc
         gc.collect()
+
+def setup_local_debug(config, log):
+    """Setup local debug mode paths and directories"""
+    LOCAL_DEBUG = os.environ.get('LOCAL_DEBUG', config.get('LOCAL_DEBUG', 'false')).lower() == 'true'
+    
+    if LOCAL_DEBUG:
+        if log:
+            log.info("LOCAL_DEBUG mode enabled - using local filesystem instead of S3")
+        else:
+            print("LOCAL_DEBUG mode enabled - using local filesystem instead of S3")
+        
+        LOCAL_MOUNT = os.environ.get('LOCAL_MOUNT', '/mnt/data')
+        
+        config['DATASET_PATH'] = os.path.join(LOCAL_MOUNT, 'workflow-input')
+        config['S3_INPUT'] = os.path.join(LOCAL_MOUNT, 'media-input')
+        config['S3_OUTPUT'] = os.path.join(LOCAL_MOUNT, 'workflow-output')
+        
+        if 'CODE_PATH' not in config or not config['CODE_PATH']:
+            config['CODE_PATH'] = '/opt/ml/code'
+        
+        os.environ['MODEL_PATH'] = os.path.join(LOCAL_MOUNT, 'models')
+        
+        os.makedirs(config['DATASET_PATH'], exist_ok=True)
+        os.makedirs(config['S3_INPUT'], exist_ok=True)
+        os.makedirs(config['S3_OUTPUT'], exist_ok=True)
+        os.makedirs(os.environ['MODEL_PATH'], exist_ok=True)
+        
+        if log:
+            log.info(f"Local paths: DATASET={config['DATASET_PATH']}, OUTPUT={config['S3_OUTPUT']}, CODE={config['CODE_PATH']}")
+        else:
+            print(f"Local paths: DATASET={config['DATASET_PATH']}, OUTPUT={config['S3_OUTPUT']}, CODE={config['CODE_PATH']}")
+    
+    return LOCAL_DEBUG
+
+def copy_to_local_output(source_path, config, filename, log):
+    """Copy file to local output directory"""
+    local_output = os.path.join(config['S3_OUTPUT'], config['UUID'])
+    os.makedirs(local_output, exist_ok=True)
+    dest_path = os.path.join(local_output, filename)
+    if os.path.exists(source_path):
+        shutil.copy2(source_path, dest_path)
+        log.info(f"Copied {filename} to local output: {local_output}")
+        return True
+    return False

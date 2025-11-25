@@ -43,7 +43,7 @@
       "Resource": "arn:aws:states:::batch:submitJob.sync",
       "Parameters": {
         "JobName.$": "$.envVars.UUID",
-        "JobQueue.$": "$.stateMachine.batchJobQueue",
+        "JobQueue.$": "$.selectedBatchJobQueue",
         "JobDefinition.$": "$.selectedBatchJobDefinition",
         "ContainerOverrides": {
           "Environment": [

@@ -247,7 +247,7 @@ resource "aws_batch_compute_environment" "spot_compute_env" {
     min_vcpus          = 0
     max_vcpus          = 512
     desired_vcpus      = 0
-    instance_type      = ["g5.4xlarge", "g5.8xlarge", "g6.4xlarge", "g6.8xlarge", "g6e.4xlarge"]
+    instance_type      = ["g5.4xlarge", "g5.8xlarge", "g6.4xlarge", "g6.8xlarge"]
     
     bid_percentage     = 50
 
@@ -290,7 +290,7 @@ resource "aws_batch_compute_environment" "on_demand_compute_env" {
     min_vcpus          = 0
     max_vcpus          = 128
     desired_vcpus      = 0
-    instance_type      = ["g5.4xlarge", "g5.8xlarge", "g6.4xlarge", "g6.8xlarge", "g6e.4xlarge"]
+    instance_type      = ["g5.4xlarge", "g5.8xlarge", "g6.4xlarge", "g6.8xlarge"]
 
     ec2_configuration {
       image_type = "ECS_AL2"
@@ -347,6 +347,7 @@ resource "aws_batch_job_definition" "batch_job_definition_small" {
     memory = 15000
     jobRoleArn = aws_iam_role.batch_task_role.arn
     command = ["python", "/opt/ml/code/main.py"]
+    privileged = true
     
     resourceRequirements = [
       {
@@ -354,6 +355,27 @@ resource "aws_batch_job_definition" "batch_job_definition_small" {
         value = "1"
       }
     ]
+    
+    linuxParameters = {
+      sharedMemorySize = 8192
+      devices = [
+        {
+          hostPath = "/dev/nvidia0"
+          containerPath = "/dev/nvidia0"
+          permissions = ["read", "write", "mknod"]
+        },
+        {
+          hostPath = "/dev/nvidiactl"
+          containerPath = "/dev/nvidiactl"
+          permissions = ["read", "write", "mknod"]
+        },
+        {
+          hostPath = "/dev/nvidia-uvm"
+          containerPath = "/dev/nvidia-uvm"
+          permissions = ["read", "write", "mknod"]
+        }
+      ]
+    }
     
     mountPoints = [
       {
@@ -417,6 +439,7 @@ resource "aws_batch_job_definition" "batch_job_definition_medium" {
     memory = 30000
     jobRoleArn = aws_iam_role.batch_task_role.arn
     command = ["python", "/opt/ml/code/main.py"]
+    privileged = true
     
     resourceRequirements = [
       {
@@ -424,6 +447,27 @@ resource "aws_batch_job_definition" "batch_job_definition_medium" {
         value = "1"
       }
     ]
+    
+    linuxParameters = {
+      sharedMemorySize = 8192
+      devices = [
+        {
+          hostPath = "/dev/nvidia0"
+          containerPath = "/dev/nvidia0"
+          permissions = ["read", "write", "mknod"]
+        },
+        {
+          hostPath = "/dev/nvidiactl"
+          containerPath = "/dev/nvidiactl"
+          permissions = ["read", "write", "mknod"]
+        },
+        {
+          hostPath = "/dev/nvidia-uvm"
+          containerPath = "/dev/nvidia-uvm"
+          permissions = ["read", "write", "mknod"]
+        }
+      ]
+    }
     
     mountPoints = [
       {
@@ -487,6 +531,7 @@ resource "aws_batch_job_definition" "batch_job_definition" {
     memory = 60000
     jobRoleArn = aws_iam_role.batch_task_role.arn
     command = ["python", "/opt/ml/code/main.py"]
+    privileged = true
     
     resourceRequirements = [
       {
@@ -494,6 +539,27 @@ resource "aws_batch_job_definition" "batch_job_definition" {
         value = "1"
       }
     ]
+    
+    linuxParameters = {
+      sharedMemorySize = 8192
+      devices = [
+        {
+          hostPath = "/dev/nvidia0"
+          containerPath = "/dev/nvidia0"
+          permissions = ["read", "write", "mknod"]
+        },
+        {
+          hostPath = "/dev/nvidiactl"
+          containerPath = "/dev/nvidiactl"
+          permissions = ["read", "write", "mknod"]
+        },
+        {
+          hostPath = "/dev/nvidia-uvm"
+          containerPath = "/dev/nvidia-uvm"
+          permissions = ["read", "write", "mknod"]
+        }
+      ]
+    }
     
     mountPoints = [
       {
@@ -554,9 +620,10 @@ resource "aws_batch_job_definition" "batch_job_definition_xlarge" {
   container_properties = jsonencode({
     image  = aws_ecr_repository.ecr_repo.repository_url
     vcpus  = 32
-    memory = 120000
+    memory = 400000
     jobRoleArn = aws_iam_role.batch_task_role.arn
     command = ["python", "/opt/ml/code/main.py"]
+    privileged = true
     
     resourceRequirements = [
       {
@@ -564,6 +631,10 @@ resource "aws_batch_job_definition" "batch_job_definition_xlarge" {
         value = "1"
       }
     ]
+    
+    linuxParameters = {
+      sharedMemorySize = 8192
+    }
     
     mountPoints = [
       {
@@ -627,6 +698,7 @@ resource "aws_batch_job_definition" "batch_job_definition_g5_4xlarge" {
     memory = 60000
     jobRoleArn = aws_iam_role.batch_task_role.arn
     command = ["python", "/opt/ml/code/main.py"]
+    privileged = true
     
     resourceRequirements = [
       {
@@ -634,6 +706,10 @@ resource "aws_batch_job_definition" "batch_job_definition_g5_4xlarge" {
         value = "1"
       }
     ]
+    
+    linuxParameters = {
+      sharedMemorySize = 8192
+    }
     
     mountPoints = [
       {
@@ -697,6 +773,7 @@ resource "aws_batch_job_definition" "batch_job_definition_g5_8xlarge" {
     memory = 120000
     jobRoleArn = aws_iam_role.batch_task_role.arn
     command = ["python", "/opt/ml/code/main.py"]
+    privileged = true
     
     resourceRequirements = [
       {
@@ -704,6 +781,10 @@ resource "aws_batch_job_definition" "batch_job_definition_g5_8xlarge" {
         value = "1"
       }
     ]
+    
+    linuxParameters = {
+      sharedMemorySize = 8192
+    }
     
     mountPoints = [
       {
@@ -767,6 +848,7 @@ resource "aws_batch_job_definition" "batch_job_definition_g6_4xlarge" {
     memory = 60000
     jobRoleArn = aws_iam_role.batch_task_role.arn
     command = ["python", "/opt/ml/code/main.py"]
+    privileged = true
     
     resourceRequirements = [
       {
@@ -774,6 +856,10 @@ resource "aws_batch_job_definition" "batch_job_definition_g6_4xlarge" {
         value = "1"
       }
     ]
+    
+    linuxParameters = {
+      sharedMemorySize = 8192
+    }
     
     mountPoints = [
       {
@@ -834,9 +920,10 @@ resource "aws_batch_job_definition" "batch_job_definition_g6_8xlarge" {
   container_properties = jsonencode({
     image  = aws_ecr_repository.ecr_repo.repository_url
     vcpus  = 32
-    memory = 120000
+    memory = 400000
     jobRoleArn = aws_iam_role.batch_task_role.arn
     command = ["python", "/opt/ml/code/main.py"]
+    privileged = true
     
     resourceRequirements = [
       {
@@ -844,6 +931,113 @@ resource "aws_batch_job_definition" "batch_job_definition_g6_8xlarge" {
         value = "1"
       }
     ]
+    
+    linuxParameters = {
+      sharedMemorySize = 8192
+    }
+    
+    mountPoints = [
+      {
+        sourceVolume  = "workspace"
+        containerPath = "/tmp"
+        readOnly      = false
+      },
+      {
+        sourceVolume  = "shm"
+        containerPath = "/dev/shm"
+        readOnly      = false
+      }
+    ]
+    
+    volumes = [
+      {
+        name = "workspace"
+        host = {
+          sourcePath = "/mnt/workspace"
+        }
+      },
+      {
+        name = "shm"
+        host = {
+          sourcePath = "/dev/shm"
+        }
+      }
+    ]
+    
+    ulimits = [
+      {
+        name      = "memlock"
+        softLimit = -1
+        hardLimit = -1
+      },
+      {
+        name      = "stack"
+        softLimit = 67108864
+        hardLimit = 67108864
+      }
+    ]
+  })
+
+  retry_strategy {
+    attempts = 1
+  }
+
+  timeout {
+    attempt_duration_seconds = 259200
+  }
+}
+
+# G6e.4xlarge job definition (high memory for 64GB VRAM GPU)
+resource "aws_batch_job_definition" "batch_job_definition_g6e_4xlarge" {
+  name = "${var.project_prefix}-job-definition-g6e-4xlarge-${var.tf_random_suffix}"
+  type = "container"
+
+  container_properties = jsonencode({
+    image  = aws_ecr_repository.ecr_repo.repository_url
+    vcpus  = 16
+    memory = 122880
+    jobRoleArn = aws_iam_role.batch_task_role.arn
+    command = ["python", "/opt/ml/code/main.py"]
+    privileged = true
+    
+    environment = [
+      {
+        name  = "LD_LIBRARY_PATH"
+        value = "/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+      },
+      {
+        name  = "NVIDIA_DRIVER_CAPABILITIES"
+        value = "compute,utility,graphics"
+      }
+    ]
+    
+    resourceRequirements = [
+      {
+        type  = "GPU"
+        value = "1"
+      }
+    ]
+    
+    linuxParameters = {
+      sharedMemorySize = 8192
+      devices = [
+        {
+          hostPath = "/dev/nvidia0"
+          containerPath = "/dev/nvidia0"
+          permissions = ["read", "write", "mknod"]
+        },
+        {
+          hostPath = "/dev/nvidiactl"
+          containerPath = "/dev/nvidiactl"
+          permissions = ["read", "write", "mknod"]
+        },
+        {
+          hostPath = "/dev/nvidia-uvm"
+          containerPath = "/dev/nvidia-uvm"
+          permissions = ["read", "write", "mknod"]
+        }
+      ]
+    }
     
     mountPoints = [
       {

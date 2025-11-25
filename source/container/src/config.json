@@ -41,7 +41,5 @@
     "ENABLE_USDZ": "True",
     "USDZ_COORDS": "gradio",
     "ENABLE_VIDEO_EXPORT": "True",
-    "ENABLE_MULTI_GPU": "False",
-    "REMOVE_HUMAN_SUBJECT": "False",
-    "GENERATE_SPLAT": "True"
+    "ENABLE_MULTI_GPU": "False"
 }

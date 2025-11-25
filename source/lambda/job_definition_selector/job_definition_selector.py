@@ -7,19 +7,25 @@ import os
 
 def lambda_handler(event, context):
     """
-    Select appropriate Batch job definition based on instance type
+    Select appropriate Batch job definition and queue based on instance type
     """
+    
+    # Get default job definitions and queues
+    default_large = os.environ.get('BATCH_JOB_DEFINITION_LARGE')
+    default_xlarge = os.environ.get('BATCH_JOB_DEFINITION_XLARGE')
+    default_queue = os.environ.get('BATCH_JOB_QUEUE')
+    g6e_queue = os.environ.get('BATCH_JOB_QUEUE_G6E', default_queue)
     
     # Instance type to job definition mapping
     instance_type_mapping = {
         # Large instances (16 vCPUs) - Default
-        'g5.4xlarge': os.environ.get('BATCH_JOB_DEFINITION_G5_4XLARGE', os.environ['BATCH_JOB_DEFINITION_LARGE']),
-        'g6.4xlarge': os.environ['BATCH_JOB_DEFINITION_LARGE'],
-        'g6e.4xlarge': os.environ['BATCH_JOB_DEFINITION_LARGE'],
+        'g5.4xlarge': os.environ.get('BATCH_JOB_DEFINITION_G5_4XLARGE', default_large),
+        'g6.4xlarge': os.environ.get('BATCH_JOB_DEFINITION_G6_4XLARGE', default_large),
+        'g6e.4xlarge': os.environ.get('BATCH_JOB_DEFINITION_G6E_4XLARGE', default_large),
         
         # Extra Large instances (32 vCPUs)
-        'g5.8xlarge': os.environ['BATCH_JOB_DEFINITION_XLARGE'],
-        'g6.8xlarge': os.environ['BATCH_JOB_DEFINITION_XLARGE'],
+        'g5.8xlarge': os.environ.get('BATCH_JOB_DEFINITION_G5_8XLARGE', default_xlarge),
+        'g6.8xlarge': os.environ.get('BATCH_JOB_DEFINITION_G6_8XLARGE', default_xlarge),
     }
     
     try:
@@ -39,14 +45,28 @@ def lambda_handler(event, context):
         # Select appropriate job definition
         selected_job_definition = instance_type_mapping.get(
             instance_type, 
-            os.environ['BATCH_JOB_DEFINITION_LARGE']  # Default to large
+            default_large  # Default to large
         )
+        
+        # Validate that we have a job definition
+        if not selected_job_definition:
+            error_msg = f"No job definition found for instance type {instance_type}. Available mappings: {list(instance_type_mapping.keys())}"
+            print(f"ERROR: {error_msg}")
+            raise ValueError(error_msg)
         
         print(f"DEBUG: Selected job definition: {selected_job_definition}")
         
-        # Return the event with the selected job definition
+        # Return the event with the selected job definition and queue
         result = event.copy()
         result['selectedBatchJobDefinition'] = selected_job_definition
+        
+        # Use dedicated g6e queue for g6e instances, otherwise use default
+        if instance_type == 'g6e.4xlarge':
+            result['selectedBatchJobQueue'] = g6e_queue
+            print(f"Selected g6e-specific queue: {g6e_queue}")
+        else:
+            result['selectedBatchJobQueue'] = default_queue
+            print(f"Selected default queue: {default_queue}")
         
         print(f"Selected job definition {selected_job_definition} for instance type {instance_type}")
         
@@ -56,5 +76,5 @@ def lambda_handler(event, context):
         print(f"Error selecting job definition: {str(e)}")
         # Return default job definition on error
         result = event.copy()
-        result['selectedBatchJobDefinition'] = os.environ['BATCH_JOB_DEFINITION_LARGE']
+        result['selectedBatchJobDefinition'] = default_large or os.environ.get('BATCH_JOB_DEFINITION_LARGE', '')
         return result

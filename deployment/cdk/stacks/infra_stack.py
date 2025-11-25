@@ -127,7 +127,10 @@ class GSWorkflowBaseStack(Stack):
                 'BATCH_JOB_DEFINITION_G5_4XLARGE': batch.job_definitions['g5.4xlarge'].ref,
                 'BATCH_JOB_DEFINITION_G5_8XLARGE': batch.job_definitions['g5.8xlarge'].ref,
                 'BATCH_JOB_DEFINITION_G6_4XLARGE': batch.job_definitions['g6.4xlarge'].ref,
-                'BATCH_JOB_DEFINITION_G6_8XLARGE': batch.job_definitions['g6.8xlarge'].ref
+                'BATCH_JOB_DEFINITION_G6_8XLARGE': batch.job_definitions['g6.8xlarge'].ref,
+                'BATCH_JOB_DEFINITION_G6E_4XLARGE': batch.job_definitions['g6e.4xlarge'].ref,
+                'BATCH_JOB_QUEUE': batch.job_queue.ref,
+                'BATCH_JOB_QUEUE_G6E': batch.g6e_job_queue.ref
             },
             reserved_concurrent_executions=10,
             tracing=lambda_.Tracing.ACTIVE
@@ -210,6 +213,7 @@ class GSWorkflowBaseStack(Stack):
                 'ECR_IMAGE_URI': self.ecr.repository.repository_uri,
                 'CONTAINER_ROLE_NAME': self.container_role_name,
                 'BATCH_JOB_QUEUE': batch.job_queue.ref,
+                'BATCH_JOB_QUEUE_G6E': batch.g6e_job_queue.ref,
                 'BATCH_JOB_DEFINITION': batch.job_definitions['g5.4xlarge'].ref,  # Default
                 'JOB_DEFINITION_SELECTOR_LAMBDA_NAME': lambda_job_definition_selector.lambda_function.function_arn,
 
@@ -402,6 +406,21 @@ class GSWorkflowBaseStack(Stack):
         )
         lambda_workflow_complete.lambda_function.add_to_role_policy(
             statement=batch_statement
+        )
+        
+        # Add S3 permissions for listing output files
+        lambda_workflow_complete.lambda_function.add_to_role_policy(
+            statement=iam.PolicyStatement(
+                actions=[
+                    "s3:ListBucket",
+                    "s3:GetObject"
+                ],
+                effect=iam.Effect.ALLOW,
+                resources=[
+                    f"arn:aws:s3:::{self.bucket_name}",
+                    f"arn:aws:s3:::{self.bucket_name}/*"
+                ]
+            )
         )
         
         # Also add Batch permissions to trigger Lambda for job submission

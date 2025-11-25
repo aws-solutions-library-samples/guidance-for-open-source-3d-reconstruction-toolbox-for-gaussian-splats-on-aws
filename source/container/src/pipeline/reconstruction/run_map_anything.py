@@ -33,7 +33,15 @@ def run_map_anything(scene_dir: str, memory_efficient_inference: bool = True, us
         cmd.append("--use_ba")
     
     print(f"Running Map-Anything: {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=True)
+    try:
+        result = subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        if use_ba:
+            print(f"Map-Anything failed with bundle adjustment, retrying without BA...")
+            cmd.remove("--use_ba")
+            result = subprocess.run(cmd, check=True)
+        else:
+            raise
     
     # Debug: Check what was created
     sparse_dir = Path(scene_dir) / "sparse"

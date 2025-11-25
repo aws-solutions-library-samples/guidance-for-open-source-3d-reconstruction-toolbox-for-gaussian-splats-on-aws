@@ -141,6 +141,10 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     libncursesw5-dev \
     libdb-dev \
     curl \
+    vulkan-tools \
+    libvulkan1 \
+    libvulkan-dev \
+    mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
 
 # Install and upgrade pip and dependencies with retry logic
@@ -194,6 +198,34 @@ RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cm
     && wget https://github.com/ceres-solver/ceres-solver/archive/refs/tags/${CERES_VERSION}.tar.gz \
     && tar -xvzf ${CERES_VERSION}.tar.gz && rm ${CERES_VERSION}.tar.gz && mkdir ceres-bin && cd ceres-bin \
     && cmake -DCUDA=ON -DCUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DEXPORT_BUILD_DIR=ON ../ceres-solver-${CERES_VERSION} && make -j3 && make install
+
+# FUTURE FEATURE: CUDA SUPPORT FOR SfM BA
+# Build GoogleTest for Ceres support
+#RUN git clone https://github.com/google/googletest.git --branch v1.16.0 --depth 1 \
+#    && cd googletest \
+#    && mkdir build && cd build && cmake .. -DBUILD_GMOCK=OFF -DCMAKE_INSTALL_PREFIX=/usr/local \
+#    && cmake --build . --parallel \
+#    && cmake --install . \
+#    && cd ${CODE_PATH}
+
+# Build abseil for Ceres support
+#RUN git clone https://github.com/abseil/abseil-cpp.git --branch 20250127.0 --depth 1 \
+#    && cd abseil-cpp \
+#    && mkdir build && cd build \
+#    && cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX=/usr/local \
+#    && cmake --build . --parallel \
+#    && cmake --install . \
+#    && cd ${CODE_PATH}
+
+# Install cuDSS library
+#RUN apt-get update && apt-get install -y --no-install-recommends libcudss-dev-13-6 \
+#    && rm -rf /var/lib/apt/lists/*
+
+# Build Ceres with cuDSS support
+#RUN git clone https://github.com/ceres-solver/ceres-solver.git --recursive \
+#    && mkdir ceres-bin && cd ceres-bin \
+#    && cmake -DCUDA=ON -DUSE_CUDSS=ON -DCUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF ../ceres-solver && make -j3 && make install \
+#    && cd ${CODE_PATH}
 
 ENV CMAKE_PREFIX_PATH="/usr/local/bin/eigen/${EIGEN_VERSION}"
 ENV Eigen3_DIR="/usr/local/bin/eigen/${EIGEN_VERSION}"
@@ -352,7 +384,7 @@ COPY ./src/pipeline/video_processing/simple_video_to_images.py      ${CODE_PATH}
 COPY ./src/pipeline/post_processing/rotate_splat.py                 ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/mirror_splat.py                 ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/gsplat_pt_to_ply.py             ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/refine_bounding_box.py          ${CODE_PATH}/post_processing
+COPY ./src/pipeline/post_processing/crop_splat.py                   ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/extract_center_cube.py          ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/refine_center_object.py         ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/convert_ply_to_sog.py           ${CODE_PATH}/post_processing
@@ -361,7 +393,6 @@ COPY ./src/pipeline/post_processing/transform_coordinates.py        ${CODE_PATH}
 COPY ./src/pipeline/post_processing/clean_ply.py                    ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/extract_video_thumbnail.py      ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/images_to_video.py              ${CODE_PATH}/post_processing
-#COPY ./src/pipeline/post_processing/convert_ply_to_spz.py           ${CODE_PATH}/post_processing
 
 # Build the SPZ tool
 #RUN git clone https://github.com/nianticlabs/spz.git

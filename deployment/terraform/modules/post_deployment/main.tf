@@ -66,6 +66,10 @@ resource "local_file" "updated_outputs" {
 # Package the docker image
 resource "null_resource" "docker_packaging" {
   triggers = {
+    # Trigger rebuild when source files change
+    dockerfile_hash = filemd5("${path.root}/../../source/container/Dockerfile")
+    main_py_hash = filemd5("${path.root}/../../source/container/src/main.py")
+    # Force rebuild every time
     run_at = timestamp()
   }
 

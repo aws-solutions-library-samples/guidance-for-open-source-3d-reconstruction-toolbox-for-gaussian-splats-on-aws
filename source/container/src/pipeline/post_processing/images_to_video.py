@@ -94,8 +94,10 @@ def main():
     try:
         # Find the latest 3DGRUT render directory
         render_dir = find_latest_3dgrut_renders(args.input)
+        is_3dgrut = False
         if render_dir:
             print(f"Found 3DGRUT render directory: {render_dir}")
+            is_3dgrut = True
             image_files = sorted(glob.glob(os.path.join(render_dir, "*.png")))
             if not image_files:
                 print(f"No PNG files in {render_dir}, trying fallback search")
@@ -118,14 +120,26 @@ def main():
         
         height, width, _ = first_img.shape
         
-        # Create video writer with H.264 codec for web compatibility
-        fourcc = cv2.VideoWriter_fourcc(*'avc1')
-        out = cv2.VideoWriter(args.output, fourcc, args.framerate, (width, height))
+        # Try multiple codecs in order of preference
+        codecs_to_try = ['mp4v', 'XVID', 'MJPG']
+        out = None
         
-        if not out.isOpened():
-            # Fallback to libx264 if avc1 fails
-            fourcc = cv2.VideoWriter_fourcc(*'H264')
-            out = cv2.VideoWriter(args.output, fourcc, args.framerate, (width, height))
+        for codec in codecs_to_try:
+            try:
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                out = cv2.VideoWriter(args.output, fourcc, args.framerate, (width, height))
+                if out.isOpened():
+                    print(f"Using codec: {codec}")
+                    break
+                else:
+                    out.release()
+            except Exception as e:
+                print(f"Failed to use codec {codec}: {e}")
+                continue
+        
+        if out is None or not out.isOpened():
+            print("Error: Could not initialize video writer with any codec")
+            sys.exit(1)
         
         # Write images to video
         for img_path in image_files:

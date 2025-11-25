@@ -35,7 +35,7 @@ print(f"Gradio Version: {gr.__version__}")
 class SharedState:
     def __init__(self):
         self.aws_region = "us-east-1"
-        self.stack_unique_id = ""
+        self.stack_unique_id = "j6x8xn"
         self.s3_bucket = f"3dgs-bucket-{self.stack_unique_id}"
         self.ddb_table_name = f"3dgs-table-{self.stack_unique_id}"
         self.s3_input = "workflow-input"
@@ -207,65 +207,63 @@ def get_thumbnail_url(job_id):
         return None
 
 def refresh_s3_contents():
-    """Refresh S3 contents and return grouped data by job ID"""
+    """Refresh contents from DynamoDB and return grouped data by job ID"""
     try:
         refresh_id = time.time()
-        print(f"\n=== Refreshing S3 Contents (ID: {refresh_id}) ===")
-        s3_client = boto3.client('s3')
-        bucket_name = shared_state.s3_bucket
-        output_prefix = shared_state.s3_output or "workflow-output"
+        print(f"\n=== Refreshing Job Contents from DynamoDB (ID: {refresh_id}) ===")
+        dynamodb = boto3.resource('dynamodb', region_name=shared_state.aws_region)
+        table = dynamodb.Table(shared_state.ddb_table_name)
         
-        response = s3_client.list_objects_v2(
-            Bucket=bucket_name,
-            Prefix=output_prefix
-        )
+        response = table.scan()
         
-        # Group files by job ID
+        print(f"DEBUG: Found {len(response.get('Items', []))} total items in DynamoDB")
+        
+        # Group files by job ID from DynamoDB
         jobs_dict = {}
-        if 'Contents' in response:
-            for item in response['Contents']:
-                if item['Key'].endswith('/'):
-                    continue
+        for item in response.get('Items', []):
+            job_id = item.get('uuid', 'unknown')
+            status = item.get('uuidStatus', 'unknown')
+            print(f"DEBUG: Job {job_id[:8]}... has status: '{status}' (type: {type(status)})")
+            
+            # Make status check case-insensitive and flexible
+            status_lower = str(status).lower()
+            if status_lower not in ['complete', 'completed']:
+                print(f"DEBUG: Skipping job {job_id[:8]}... - status '{status}' doesn't match")
+                continue
+            
+            print(f"DEBUG: Including job {job_id[:8]}... - status matches")
+            
+            job_id = item['uuid']
+            output_files = item.get('outputFiles', [])
+            print(f"DEBUG: Job {job_id[:8]}... has {len(output_files)} output files")
+            print(f"DEBUG: Output files content: {output_files}")
+            
+            if not output_files:
+                print(f"DEBUG: Skipping job {job_id[:8]}... - no output files")
+                continue
+            
+            last_modified = item.get('endTimestamp', item.get('startTimestamp', ''))
+            
+            jobs_dict[job_id] = {
+                'files': [],
+                'last_modified': last_modified,
+                'thumbnail_url': get_thumbnail_url(job_id)
+            }
+            
+            for file_info in output_files:
+                size_bytes = file_info.get('size', 0)
+                if size_bytes < 1024:
+                    size_str = f"{size_bytes} B"
+                elif size_bytes < 1024 * 1024:
+                    size_str = f"{size_bytes/1024:.1f} KB"
+                else:
+                    size_str = f"{size_bytes/(1024*1024):.1f} MB"
                 
-                if not (item['Key'].lower().endswith('.ply') or 
-                        item['Key'].lower().endswith('.spz') or 
-                        item['Key'].lower().endswith('.glb') or
-                        item['Key'].lower().endswith('.sog') or
-                        item['Key'].lower().endswith('.usdz') or
-                        item['Key'].lower().endswith('.mp4')):
-                    continue
-                    
-                path_parts = item['Key'].split('/')
-                if len(path_parts) >= 3:
-                    job_id = path_parts[-2]
-                    filename = path_parts[-1]
-                    
-                    size_bytes = item['Size']
-                    if size_bytes < 1024:
-                        size_str = f"{size_bytes} B"
-                    elif size_bytes < 1024 * 1024:
-                        size_str = f"{size_bytes/1024:.1f} KB"
-                    else:
-                        size_str = f"{size_bytes/(1024*1024):.1f} MB"
-                    
-                    last_modified = item['LastModified'].strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    if job_id not in jobs_dict:
-                        jobs_dict[job_id] = {
-                            'files': [],
-                            'last_modified': last_modified,
-                            'thumbnail_url': get_thumbnail_url(job_id)
-                        }
-                    
-                    jobs_dict[job_id]['files'].append({
-                        'filename': filename,
-                        'size': size_str,
-                        'last_modified': last_modified
-                    })
-                    
-                    # Update job's last modified to the most recent file
-                    if last_modified > jobs_dict[job_id]['last_modified']:
-                        jobs_dict[job_id]['last_modified'] = last_modified
+                jobs_dict[job_id]['files'].append({
+                    'filename': file_info['filename'],
+                    'size': size_str,
+                    'last_modified': last_modified
+                })
         
         # Convert to display format with grouped rows
         files_data = []
@@ -793,7 +791,7 @@ def create_advanced_settings_tab():
                 label="Max Images",
                 value=300,
                 minimum=1,
-                maximum=1000
+                maximum=4999
                 )
                 video_start_time = gr.Number(
                     label="Video Start Time (seconds)",
@@ -2911,22 +2909,22 @@ def create_interface():
                         # Load logos directly from Gradio components and apply theme-based visibility
                         light_logo = gr.Image(
                             "../../assets/images/PoweredByAWS_horiz_RGB_1c_Gray850.png",
-                            #show_download_button=False,
+                            show_download_button=False,
                             show_label=False,
                             container=False,
                             height=40,
                             width=None,
-                            #show_fullscreen_button=False,
+                            show_fullscreen_button=False,
                             elem_classes=["theme-image-light"]
                         )
                         dark_logo = gr.Image(
                             "../../assets/images/PoweredByAWS_horiz_RGB_1c_White.png",
-                            #show_download_button=False,
+                            show_download_button=False,
                             show_label=False,
                             container=False,
                             height=40,
                             width=None,
-                            #show_fullscreen_button=False,
+                            show_fullscreen_button=False,
                             elem_classes=["theme-image-dark"]
                         )
                         
