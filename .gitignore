@@ -19,3 +19,4 @@ deployment/cdk/workflow-submissions/
 source/Gradio/.DS_Store
 source/venv/
 source/Gradio/workflow-submissions
+deployment/cdk/cdk.context.json

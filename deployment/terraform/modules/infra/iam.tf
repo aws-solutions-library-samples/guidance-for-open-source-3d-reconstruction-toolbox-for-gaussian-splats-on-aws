@@ -558,7 +558,8 @@ locals {
     container_policies = {
         sagemaker = "${data.aws_iam_policy.AmazonSageMakerFullAccess_policy.arn}",
         ecr = "${aws_iam_policy.iam_policy_ecr.arn}",
-        s3 = "${aws_iam_policy.iam_policy_s3.arn}"
+        s3 = "${aws_iam_policy.iam_policy_s3.arn}",
+        dynamodb = "${aws_iam_policy.iam_policy_dynamodb.arn}"
     }
 }
 

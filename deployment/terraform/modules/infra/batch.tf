@@ -207,6 +207,27 @@ resource "aws_iam_role_policy_attachment" "batch_task_logs_policy" {
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
 }
 
+# Add DynamoDB permissions for phase tracking
+resource "aws_iam_role_policy" "batch_task_dynamodb_policy" {
+  name = "${var.project_prefix}-batch-task-dynamodb-policy-${var.tf_random_suffix}"
+  role = aws_iam_role.batch_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:UpdateItem",
+          "dynamodb:PutItem",
+          "dynamodb:GetItem"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 # Spot fleet role
 resource "aws_iam_role" "spot_fleet_role" {
   name = "${var.project_prefix}-spot-fleet-role-${var.tf_random_suffix}"
@@ -920,7 +941,7 @@ resource "aws_batch_job_definition" "batch_job_definition_g6_8xlarge" {
   container_properties = jsonencode({
     image  = aws_ecr_repository.ecr_repo.repository_url
     vcpus  = 32
-    memory = 400000
+    memory = 120000
     jobRoleArn = aws_iam_role.batch_task_role.arn
     command = ["python", "/opt/ml/code/main.py"]
     privileged = true

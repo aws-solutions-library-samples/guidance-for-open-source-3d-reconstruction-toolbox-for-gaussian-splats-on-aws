@@ -30,15 +30,14 @@ from typing import List
 from rich.logging import RichHandler
 
 class ComponentType(enum.Enum):
-    loader = 0
-    filter = 1
-    transform = 2
-    renderer = 3
-    exporter = 4
+    PRE_PROCESSING = 0
+    RECONSTRUCTION = 1
+    TRAINING = 2
+    POST_PROCESSING = 3
 
 class ComponentEnvironment(enum.Enum):
-    executable = 0
-    python = 1
+    EXECUTABLE = 0
+    PYTHON = 1
 
 class Status(enum.Enum):
     ERROR = 0
@@ -102,7 +101,6 @@ class Pipeline:
             handlers = [
                 RichHandler(),
                 logging.FileHandler(f"{self.config.name}-pipeline-log"),
-                #logging.StreamHandler(sys.stdout)
             ]
         )
     class Config:
@@ -129,6 +127,9 @@ class Pipeline:
         current_comp_step: int
         log: logging
         progress: int
+        comp_group_names: List[str]
+        comp_group_elapsed_time: List[int]
+        comp_start_names: List[str]
     config: Config
     session: Session
     components: List[Component]
@@ -185,7 +186,7 @@ class Pipeline:
         cmd_args = []
         
         # Add the command
-        if self.components[index].comp_environ == ComponentEnvironment.python:
+        if self.components[index].comp_environ == ComponentEnvironment.PYTHON:
             cmd_args.append(sys.executable)
         cmd_args.append(self.components[index].command)
         
@@ -211,6 +212,9 @@ class Pipeline:
                 cmd_args.append(arg)
                 
         self.session.log.info(f"Component command: {cmd_args}")
+        
+        # Determine if we need to capture output for this component
+        capture_output = self.components[index].name in ['3DGRUT-Metrics', 'GSplat-Metrics']
             
         try:
             # Subprocess call is secure: uses list format (not shell=True) with validated arguments
@@ -218,9 +222,16 @@ class Pipeline:
                 cmd_args,
                 check=True,
                 cwd=self.components[index].cwd,
-                env=env
+                env=env,
+                capture_output=capture_output,
+                text=True if capture_output else False
             )
-            self.session.log.info(result.stdout)
+            
+            # Store output if captured
+            if capture_output:
+                self.components[index].output = result.stdout
+                self.session.log.info(result.stdout)
+            
             if result.stderr:
                 self.session.log.error(result.stderr)
         except subprocess.CalledProcessError as e:
@@ -239,6 +250,6 @@ class Pipeline:
         Report the latest error
         """
         self.session.status = (response_code, Status.ERROR)
-        error = message+": "+traceback.format_exc()
-        self.session.log.error(error)
-        sys.exit(1)
+        self.session.log.error(f"\n{'='*80}\nError {response_code}: {message}\n{'='*80}")
+        self.session.log.error(traceback.format_exc())
+        sys.exit(response_code)

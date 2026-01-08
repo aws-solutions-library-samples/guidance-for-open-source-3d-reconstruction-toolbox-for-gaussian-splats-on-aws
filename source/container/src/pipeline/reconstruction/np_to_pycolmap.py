@@ -74,10 +74,6 @@ def batch_np_matrix_to_pycolmap(
 
     # Reconstruction object, following the format of PyCOLMAP/COLMAP
     reconstruction = pycolmap.Reconstruction()
-    
-    # Add rig first
-    rig = pycolmap.Rig(rig_id=1)
-    reconstruction.add_rig(rig)
 
     inlier_num = masks.sum(0)
     valid_mask = inlier_num >= 2  # a track is invalid if without two inliers
@@ -103,23 +99,18 @@ def batch_np_matrix_to_pycolmap(
 
             # add camera
             reconstruction.add_camera(camera)
-            
-            # add camera to rig immediately
-            sensor = pycolmap.sensor_t(type=pycolmap.SensorType.CAMERA, id=camera.camera_id)
-            if reconstruction.rigs[1].num_sensors() == 0:
-                reconstruction.rigs[1].add_ref_sensor(sensor)
-            else:
-                reconstruction.rigs[1].add_sensor(sensor, pycolmap.Rigid3d())
 
         # set image
         cam_from_world = pycolmap.Rigid3d(
             pycolmap.Rotation3d(extrinsics[fidx][:3, :3]), extrinsics[fidx][:3, 3]
         )  # Rot and Trans
 
+        # set image - in pycolmap 3.13.0, create image without pose
         image = pycolmap.Image(
-            image_id=fidx + 1, name=f"image_{fidx + 1}", camera_id=camera.camera_id
+            image_id=fidx + 1, 
+            name=f"image_{fidx + 1}", 
+            camera_id=camera.camera_id
         )
-        image.frame_id = fidx + 1
 
         points2D_list = []
 
@@ -148,14 +139,10 @@ def batch_np_matrix_to_pycolmap(
             image.points2D = pycolmap.Point2DList(points2D_list)
         except:
             print(f"frame {fidx + 1} is out of BA")
-
-        # add frame first
-        frame = pycolmap.Frame(frame_id=fidx + 1)
-        frame.rig_id = 1
-        reconstruction.add_frame(frame)
         
-        # add image
+        # add image and register with pose
         reconstruction.add_image(image)
+        reconstruction.register_image(fidx + 1, cam_from_world)
 
     return reconstruction, valid_mask
 
@@ -245,16 +232,12 @@ def batch_np_matrix_to_pycolmap_wo_track(
 
     # Reconstruction object, following the format of PyCOLMAP/COLMAP
     reconstruction = pycolmap.Reconstruction()
-    
-    # Add rig first
-    rig = pycolmap.Rig(rig_id=1)
-    reconstruction.add_rig(rig)
 
     for vidx in range(P):
         reconstruction.add_point3D(points3d[vidx], pycolmap.Track(), points_rgb[vidx])
 
     camera = None
-    # frame idx
+    # frame idx - only add cameras, we'll write images manually
     for fidx in range(N):
         # set camera
         if camera is None or (not shared_camera):
@@ -266,58 +249,9 @@ def batch_np_matrix_to_pycolmap_wo_track(
 
             # add camera
             reconstruction.add_camera(camera)
-            
-            # add camera to rig immediately
-            sensor = pycolmap.sensor_t(type=pycolmap.SensorType.CAMERA, id=camera.camera_id)
-            if reconstruction.rigs[1].num_sensors() == 0:
-                reconstruction.rigs[1].add_ref_sensor(sensor)
-            else:
-                reconstruction.rigs[1].add_sensor(sensor, pycolmap.Rigid3d())
 
-        # set image
-        cam_from_world = pycolmap.Rigid3d(
-            pycolmap.Rotation3d(extrinsics[fidx][:3, :3]), extrinsics[fidx][:3, 3]
-        )  # Rot and Trans
-
-        image = pycolmap.Image(
-            image_id=fidx + 1, name=f"image_{fidx + 1}", camera_id=camera.camera_id
-        )
-        image.frame_id = fidx + 1
-
-        points2D_list = []
-
-        point2D_idx = 0
-
-        points_belong_to_fidx = points_xyf[:, 2].astype(np.int32) == fidx
-        points_belong_to_fidx = np.nonzero(points_belong_to_fidx)[0]
-
-        for point3D_batch_idx in points_belong_to_fidx:
-            point3D_id = point3D_batch_idx + 1
-            point2D_xyf = points_xyf[point3D_batch_idx]
-            point2D_xy = point2D_xyf[:2]
-            points2D_list.append(pycolmap.Point2D(point2D_xy, point3D_id))
-
-            # add element
-            track = reconstruction.points3D[point3D_id].track
-            track.add_element(fidx + 1, point2D_idx)
-            point2D_idx += 1
-
-        assert point2D_idx == len(points2D_list)
-
-        try:
-            image.points2D = pycolmap.Point2DList(points2D_list)
-        except:
-            print(f"frame {fidx + 1} does not have any points")
-
-        # add frame first
-        frame = pycolmap.Frame(frame_id=fidx + 1)
-        frame.rig_id = 1
-        reconstruction.add_frame(frame)
-        
-        # add image
-        reconstruction.add_image(image)
-
-    return reconstruction
+    # Return reconstruction and data needed for manual image writing
+    return reconstruction, extrinsics, shared_camera
 
 
 def _build_pycolmap_intri(fidx, intrinsics, camera_type, extra_params=None):

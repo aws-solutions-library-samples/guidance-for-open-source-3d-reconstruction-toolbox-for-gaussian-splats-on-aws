@@ -411,7 +411,8 @@ def get_cloudwatch_logs(training_job_name, is_batch_job=False, log_stream_name=N
             - Status: Process terminated due to GPU memory/indexing error"""
                     error_messages.append(cuda_error_message)
                     found_error = True
-                    break
+                    # Continue collecting next 20 lines for context
+                    continue
                 
                 # Check for SFM failure
                 if is_sfm_failure(message):
@@ -462,7 +463,8 @@ def get_cloudwatch_logs(training_job_name, is_batch_job=False, log_stream_name=N
             - Status: Process terminated during training"""
                     error_messages.append(sfm_error_message)
                     found_error = True
-                    break
+                    # Continue collecting next 20 lines for context
+                    continue
 
                 # Skip messages that should be ignored
                 #if any(ignore_msg in message for ignore_msg in ignore_messages):
@@ -487,10 +489,12 @@ def get_cloudwatch_logs(training_job_name, is_batch_job=False, log_stream_name=N
                                 found_error = True
                                 continue
                 
-                    if found_error and len(error_messages) < 50:
-                        error_messages.append(message.strip())
+                # If we found an error, collect the next lines for context (up to 50 total lines)
+                if found_error and len(error_messages) < 50:
+                    error_messages.append(message.strip())
             
-            if found_error:
+            # If we found enough error context, stop processing more log streams
+            if found_error and len(error_messages) >= 50:
                 break
 
         if found_error:
@@ -684,6 +688,13 @@ def lambda_handler(event, context):
             elif 'model' in workflow_item:
                 model = workflow_item['model']
             
+            # Extract reconstruction software name
+            recon_software = "N/A"
+            if 'reconSoftwareName' in workflow_item:
+                recon_software = workflow_item['reconSoftwareName']
+            elif 'reconstruction' in workflow_item and 'softwareName' in workflow_item['reconstruction']:
+                recon_software = workflow_item['reconstruction']['softwareName']
+            
             # Extract s3Input
             s3_input = workflow_item.get('s3Input', 'N/A')
             
@@ -707,6 +718,7 @@ File Processed Successfully: {event['envVars']['FILENAME']}
 
 📋 Job Details:
 • Model: {model}
+• Reconstruction Software: {recon_software}
 • S3 Input: {s3_input}
 • Instance Type: {instance_type}
 
@@ -871,6 +883,13 @@ This is an automated message from the Splat Processing System"""
         elif 'model' in workflow_item:
             model = workflow_item['model']
         
+        # Extract reconstruction software name
+        recon_software = "N/A"
+        if 'reconSoftwareName' in workflow_item:
+            recon_software = workflow_item['reconSoftwareName']
+        elif 'reconstruction' in workflow_item and 'softwareName' in workflow_item['reconstruction']:
+            recon_software = workflow_item['reconstruction']['softwareName']
+        
         # Extract s3Input
         s3_input = workflow_item.get('s3Input', 'N/A')
         
@@ -897,6 +916,7 @@ File Processed Successfully: {event['envVars']['FILENAME']}
 
 📋 Job Details:
 • Model: {model}
+• Reconstruction Software: {recon_software}
 • S3 Input: {s3_input}
 • Instance Type: {instance_type}
 

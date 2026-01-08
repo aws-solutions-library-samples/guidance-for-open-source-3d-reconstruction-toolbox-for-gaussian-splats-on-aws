@@ -72,11 +72,15 @@
             {"Name": "RUN_TRAIN", "Value.$": "$.envVars.RUN_TRAIN"},
             {"Name": "MODEL", "Value.$": "$.envVars.MODEL"},
             {"Name": "MAX_STEPS", "Value.$": "$.envVars.MAX_STEPS"},
-            {"Name": "ROTATE_SPLAT", "Value.$": "$.envVars.ROTATE_SPLAT"},
             {"Name": "ENABLE_SPZ", "Value.$": "$.envVars.ENABLE_SPZ"},
-            {"Name": "ENABLE_SOGS", "Value.$": "$.envVars.ENABLE_SOGS"},
-            {"Name": "REFINE_OUTPUT_BOUNDS", "Value.$": "$.envVars.CROP_OUTPUT_BOUNDS"},
-            {"Name": "REFINEMENT_MODE", "Value.$": "$.envVars.CROP_MODE"},
+            {"Name": "ENABLE_SOG", "Value.$": "$.envVars.ENABLE_SOG"},
+            {"Name": "ENABLE_USDZ", "Value.$": "$.envVars.ENABLE_USDZ"},
+            {"Name": "PLY_COORDS", "Value.$": "$.envVars.PLY_COORDS"},
+            {"Name": "SPZ_COORDS", "Value.$": "$.envVars.SPZ_COORDS"},
+            {"Name": "SOG_COORDS", "Value.$": "$.envVars.SOG_COORDS"},
+            {"Name": "USDZ_COORDS", "Value.$": "$.envVars.USDZ_COORDS"},
+            {"Name": "CROP_OUTPUT_BOUNDS", "Value.$": "$.envVars.CROP_OUTPUT_BOUNDS"},
+            {"Name": "CROP_MODE", "Value.$": "$.envVars.CROP_MODE"},
             {"Name": "SPHERICAL_CAMERA", "Value.$": "$.envVars.SPHERICAL_CAMERA"},
             {"Name": "SPHERICAL_CUBE_FACES_TO_REMOVE", "Value.$": "$.envVars.SPHERICAL_CUBE_FACES_TO_REMOVE"},
             {"Name": "REMOVE_BACKGROUND", "Value.$": "$.envVars.REMOVE_BACKGROUND"},
@@ -84,7 +88,9 @@
             {"Name": "MASK_THRESHOLD", "Value.$": "$.envVars.MASK_THRESHOLD"},
             {"Name": "REMOVE_OBJECT", "Value.$": "$.envVars.REMOVE_OBJECT"},
             {"Name": "OBJECT_REMOVAL_ACTION", "Value.$": "$.envVars.OBJECT_REMOVAL_ACTION"},
-            {"Name": "OBJECT_REMOVAL_OBJECTS", "Value.$": "$.envVars.OBJECT_REMOVAL_OBJECTS"}
+            {"Name": "OBJECT_REMOVAL_OBJECTS", "Value.$": "$.envVars.OBJECT_REMOVAL_OBJECTS"},
+            {"Name": "DDB_TABLE_NAME", "Value.$": "$.stateMachine.ddbTableName"},
+            {"Name": "AWS_DEFAULT_REGION", "Value.$": "$.stateMachine.awsRegion"}
           ]
         }
       },
@@ -188,11 +194,15 @@
           "RUN_TRAIN.$": "$.envVars.RUN_TRAIN",
           "MODEL.$": "$.envVars.MODEL",
           "MAX_STEPS.$": "$.envVars.MAX_STEPS",
-          "ROTATE_SPLAT.$": "$.envVars.ROTATE_SPLAT",
           "ENABLE_SPZ.$": "$.envVars.ENABLE_SPZ",
-          "ENABLE_SOGS.$": "$.envVars.ENABLE_SOGS",
-          "REFINE_OUTPUT_BOUNDS.$": "$.envVars.CROP_OUTPUT_BOUNDS",
-          "REFINEMENT_MODE.$": "$.envVars.CROP_MODE",
+          "ENABLE_SOG.$": "$.envVars.ENABLE_SOG",
+          "ENABLE_USDZ.$": "$.envVars.ENABLE_USDZ",
+          "PLY_COORDS.$": "$.envVars.PLY_COORDS",
+          "SPZ_COORDS.$": "$.envVars.SPZ_COORDS",
+          "SOG_COORDS.$": "$.envVars.SOG_COORDS",
+          "USDZ_COORDS.$": "$.envVars.USDZ_COORDS",
+          "CROP_OUTPUT_BOUNDS.$": "$.envVars.CROP_OUTPUT_BOUNDS",
+          "CROP_MODE.$": "$.envVars.CROP_MODE",
           "SPHERICAL_CAMERA.$": "$.envVars.SPHERICAL_CAMERA",
           "SPHERICAL_CUBE_FACES_TO_REMOVE.$": "$.envVars.SPHERICAL_CUBE_FACES_TO_REMOVE",
           "REMOVE_BACKGROUND.$": "$.envVars.REMOVE_BACKGROUND",
@@ -200,7 +210,9 @@
           "MASK_THRESHOLD.$": "$.envVars.MASK_THRESHOLD",
           "REMOVE_OBJECT.$": "$.envVars.REMOVE_OBJECT",
           "OBJECT_REMOVAL_ACTION.$": "$.envVars.OBJECT_REMOVAL_ACTION",
-          "OBJECT_REMOVAL_OBJECTS.$": "$.envVars.OBJECT_REMOVAL_OBJECTS"
+          "OBJECT_REMOVAL_OBJECTS.$": "$.envVars.OBJECT_REMOVAL_OBJECTS",
+          "DDB_TABLE_NAME.$": "$.stateMachine.ddbTableName",
+          "AWS_DEFAULT_REGION.$": "$.stateMachine.awsRegion"
         }
       },
       "Retry": [

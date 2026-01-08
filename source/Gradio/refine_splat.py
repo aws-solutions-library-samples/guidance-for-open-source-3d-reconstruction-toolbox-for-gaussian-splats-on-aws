@@ -3,12 +3,23 @@ import uuid
 import json
 import os
 
-def refine_splat(selected_data, instance_type, use_spot_instance):
+def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=None, crop_mode=None, enable_spz=None, enable_sog=None, enable_usdz=None, ply_coords=None, spz_coords=None, sog_coords=None, usdz_coords=None):
     """Resume training for a selected splat by creating a new job with RUN_SFM=false"""
     try:
         # Import shared_state for other configuration values
         from generate_splat_gradio import shared_state
         print(f"DEBUG: Received parameters - instance: {instance_type}, spot: {use_spot_instance}")
+        
+        # Use provided values or fall back to shared_state
+        crop_bounds = crop_bounds if crop_bounds is not None else shared_state.crop_output_bounds
+        crop_mode = crop_mode if crop_mode is not None else shared_state.crop_mode
+        enable_spz = enable_spz if enable_spz is not None else shared_state.enable_spz
+        enable_sog = enable_sog if enable_sog is not None else shared_state.enable_sog
+        enable_usdz = enable_usdz if enable_usdz is not None else shared_state.enable_usdz
+        ply_coords = ply_coords if ply_coords is not None else shared_state.ply_coords
+        spz_coords = spz_coords if spz_coords is not None else shared_state.spz_coords
+        sog_coords = sog_coords if sog_coords is not None else shared_state.sog_coords
+        usdz_coords = usdz_coords if usdz_coords is not None else shared_state.usdz_coords
         
         if not selected_data:
             return "No file selected"
@@ -46,17 +57,35 @@ def refine_splat(selected_data, instance_type, use_spot_instance):
         # Generate new UUID for refinement job
         refine_uuid = uuid.uuid4()
         
+        # Get original filename from source job for tracking in UI
+        # Try multiple possible locations where the original filename might be stored
+        original_filename = None
+        if 'filename' in selected_job and selected_job['filename'] != 'model.tar.gz':
+            original_filename = selected_job['filename']
+        elif 's3' in selected_job and 'inputKey' in selected_job['s3']:
+            input_key = selected_job['s3']['inputKey']
+            if input_key != 'model.tar.gz':
+                original_filename = input_key
+        elif 'inputKey' in selected_job and selected_job['inputKey'] != 'model.tar.gz':
+            original_filename = selected_job['inputKey']
+        
+        # If we still don't have an original filename, use a descriptive default
+        if not original_filename:
+            original_filename = f"refined_{job_id[:8]}.mp4"
+        
         # Create refinement job config based on selected job
         print(f"DEBUG: Using parameters - instance: {instance_type}, spot: {use_spot_instance}")
+        print(f"DEBUG: Original filename for tracking: {original_filename}")
         refine_config = {
             "uuid": str(refine_uuid),
             "instanceType": instance_type,
             "useSpotInstance": use_spot_instance,
             "logVerbosity": str(selected_job.get('logVerbosity', shared_state.log_verbosity)),
+            "originalMediaFilename": original_filename,  # Preserve original filename for UI tracking
             "s3": {
                 "bucketName": shared_state.s3_bucket,
                 "inputPrefix": f"{str(selected_job.get('outputPrefix', shared_state.s3_output))}/{job_id}/output",
-                "inputKey": "model.tar.gz",  # Use the model.tar.gz from selected job
+                "inputKey": "model.tar.gz",  # Backend still uses model.tar.gz
                 "outputPrefix": shared_state.s3_output
             },
             "videoProcessing": selected_job.get('videoProcessing', {
@@ -90,12 +119,15 @@ def refine_splat(selected_data, instance_type, use_spot_instance):
                 **{k: v for k, v in selected_job.get('training', {}).items() if k not in ['enable', 'maxSteps', 'model', 'enableMultiGpu', 'refineSteps']}  # Preserve other parameters
             },
             "postProcessing": {
-                "rotateSplat": selected_job.get('rotateSplat', shared_state.rotate_splat) == "True",
-                "cropOutputBounds": selected_job.get('cropOutputBounds', selected_job.get('refineOutputBounds', shared_state.crop_output_bounds)) == "True",
-                "cropMode": selected_job.get('cropMode', selected_job.get('refinementMode', shared_state.crop_mode)),
-                "enableSpz": selected_job.get('enableSpz', shared_state.enable_spz) == "True",
-                "enableSogs": selected_job.get('enableSogs', shared_state.enable_sogs) == "True",
-                "enableUsdz": selected_job.get('enableUsdz', shared_state.enable_usdz) == "True"
+                "cropOutputBounds": crop_bounds == "true" if isinstance(crop_bounds, str) else crop_bounds,
+                "cropMode": crop_mode,
+                "enableSpz": enable_spz == "true" if isinstance(enable_spz, str) else enable_spz,
+                "enableSog": enable_sog == "true" if isinstance(enable_sog, str) else enable_sog,
+                "enableUsdz": enable_usdz == "true" if isinstance(enable_usdz, str) else enable_usdz,
+                "plyCoords": ply_coords,
+                "spzCoords": spz_coords,
+                "sogCoords": sog_coords,
+                "usdzCoords": usdz_coords
             },
             "sphericalCamera": {
                 "enable": selected_job.get('sphericalCamera') == 'True' if isinstance(selected_job.get('sphericalCamera'), str) else selected_job.get('sphericalCamera', {}).get('enable', shared_state.spherical_enable == "true"),

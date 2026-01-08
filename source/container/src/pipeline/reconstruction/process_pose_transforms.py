@@ -405,7 +405,41 @@ def normalize_quaternion_from_matrix_stable(matrix):
     
     return normalized_matrix
 
-def write_cameras_file(cameras, output_dir):
+def get_camera_model_from_db(database_path):
+    """
+    Query the COLMAP database to get the camera model used during feature extraction.
+    Returns the model name (e.g., 'SIMPLE_PINHOLE', 'SIMPLE_RADIAL', 'PINHOLE', 'RADIAL').
+    """
+    with sqlite3.connect(database_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT model 
+            FROM cameras 
+            LIMIT 1
+            """
+        )
+        result = cursor.fetchone()
+        if result:
+            # COLMAP stores model as integer, map to string
+            model_id = result[0]
+            model_map = {
+                0: 'SIMPLE_PINHOLE',
+                1: 'PINHOLE',
+                2: 'SIMPLE_RADIAL',
+                3: 'RADIAL',
+                4: 'OPENCV',
+                5: 'OPENCV_FISHEYE',
+                6: 'FULL_OPENCV',
+                7: 'FOV',
+                8: 'SIMPLE_RADIAL_FISHEYE',
+                9: 'RADIAL_FISHEYE',
+                10: 'THIN_PRISM_FISHEYE'
+            }
+            return model_map.get(model_id, 'SIMPLE_PINHOLE')
+    return 'SIMPLE_PINHOLE'
+
+def write_cameras_file(cameras, output_dir, database_path=None):
     """
     Write the Colmap cameras.txt file with camera intrinsic params
         0 = 'w': frame['w'],
@@ -414,6 +448,12 @@ def write_cameras_file(cameras, output_dir):
         3 = 'cx': frame['cx'],
         4 = 'cy': frame['cy']
     """
+    # Get camera model from database if available
+    camera_model = 'SIMPLE_PINHOLE'
+    if database_path and os.path.exists(database_path):
+        camera_model = get_camera_model_from_db(database_path)
+        print(f"Using camera model from database: {camera_model}")
+    
     cameras_path = os.path.join(output_dir, 'cameras.txt')
     print(f"Writing cameras file to {cameras_path}")
     with open(cameras_path, 'w', encoding="utf-8") as f:
@@ -421,10 +461,19 @@ def write_cameras_file(cameras, output_dir):
         f.write('#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n')
 
         for idx, camera in enumerate(cameras, 1):
-            # Use SIMPLE_PINHOLE for 3DGRUT compatibility (f, cx, cy)
-            params = [camera['fl_x'], camera['cx'], camera['cy']]
-            f.write(f'{idx} SIMPLE_PINHOLE {camera["w"]} {camera["h"]} {" ".join(map(str, params))}\n')
-    print(f"Wrote {len(cameras)} cameras to file")
+            # Match the camera model from the database
+            if camera_model == 'SIMPLE_RADIAL':
+                # SIMPLE_RADIAL: f, cx, cy, k
+                params = [camera['fl_x'], camera['cx'], camera['cy'], 0.0]
+            elif camera_model == 'PINHOLE':
+                # PINHOLE: fx, fy, cx, cy
+                params = [camera['fl_x'], camera['fl_x'], camera['cx'], camera['cy']]
+            else:  # SIMPLE_PINHOLE
+                # SIMPLE_PINHOLE: f, cx, cy
+                params = [camera['fl_x'], camera['cx'], camera['cy']]
+            
+            f.write(f'{idx} {camera_model} {camera["w"]} {camera["h"]} {" ".join(map(str, params))}\n')
+    print(f"Wrote {len(cameras)} cameras to file with model {camera_model}")
 
 def write_images_file(image_names, poses, output_dir, source_coord_name, pose_is_world_to_cam):
     """
@@ -710,7 +759,7 @@ if __name__ == '__main__':
                     reordered_cameras.append(cameras[idx])
 
             # Write reconstruction files with correct order
-            write_cameras_file(reordered_cameras, sparse_path),
+            write_cameras_file(reordered_cameras, sparse_path, colmap_db_path),
             write_images_file(
                 colmap_image_names,
                 reordered_poses,

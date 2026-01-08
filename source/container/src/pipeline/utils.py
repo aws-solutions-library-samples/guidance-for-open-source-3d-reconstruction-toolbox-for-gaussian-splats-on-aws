@@ -32,6 +32,9 @@ from tqdm import tqdm as tqdm_func
 from PIL import Image
 import glob
 import torch
+import boto3
+from botocore.exceptions import ClientError
+from decimal import Decimal
 
 def reverse_file_order(directory_path):
     """
@@ -850,3 +853,254 @@ def copy_to_local_output(source_path, config, filename, log):
         log.info(f"Copied {filename} to local output: {local_output}")
         return True
     return False
+
+def print_container_version_info():
+    """Print container version information"""
+    import sys
+    import subprocess
+    import torch
+    import torchvision
+    import pycolmap
+    
+    print("=== CONTAINER VERSION INFORMATION ===")
+    print(f"  Python: {sys.version.split()[0]}")
+    
+    try:
+        result = subprocess.run(['nvcc', '--version'], capture_output=True, text=True)
+        if result.returncode == 0 and 'release' in result.stdout:
+            cuda_version = result.stdout.split('release ')[1].split(',')[0]
+            print(f"  CUDA: {cuda_version}")
+        else:
+            print("  CUDA: Not found")
+    except:
+        print("  CUDA: Not found")
+    
+    try:
+        print(f"  PyTorch: {torch.__version__}")
+    except:
+        print("  PyTorch: Not found")
+    
+    try:
+        print(f"  TorchVision: {torchvision.__version__}")
+    except:
+        print("  TorchVision: Not found")
+    
+    try:
+        if torch.cuda.is_available():
+            vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            print(f"  GPU: {torch.cuda.get_device_name()} ({vram:.2f}GB VRAM)")
+    except:
+        pass
+    
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            meminfo = f.read()
+            mem_total = int([line for line in meminfo.split('\n') if 'MemTotal' in line][0].split()[1]) / 1024**2
+            print(f"  System RAM: {mem_total:.2f}GB")
+    except:
+        pass
+    
+    try:
+        shm_result = subprocess.check_output(['df', '-h', '/dev/shm']).decode().split('\n')[1].split()
+        print(f"  Shared memory (/dev/shm): Size={shm_result[1]}, Used={shm_result[2]}, Available={shm_result[3]}")
+    except:
+        pass
+    
+    print(f"  Execution mode: {'AWS Batch' if 'AWS_BATCH_JOB_ID' in os.environ else 'SageMaker'}")
+    
+    if 'AWS_BATCH_JOB_ID' in os.environ:
+        print(f"  Batch Job ID: {os.environ.get('AWS_BATCH_JOB_ID')}")
+        print(f"  Batch Job Queue: {os.environ.get('AWS_BATCH_JQ_NAME', 'N/A')}")
+        try:
+            ulimit_result = subprocess.check_output(['ulimit', '-a'], shell=True, executable='/bin/bash').decode()
+            print(f"  Resource limits:\n{ulimit_result}")
+        except:
+            pass
+    
+    try:
+        result = subprocess.run(['colmap', '-h'], capture_output=True, text=True)
+        if result.returncode == 0 and 'COLMAP' in result.stdout:
+            colmap_version = result.stdout.split('\n')[0].split()[1]
+            print(f"  COLMAP: {colmap_version}")
+        else:
+            print("  COLMAP: Not found")
+    except:
+        print("  COLMAP: Not found")
+    
+    try:
+        result = subprocess.run(['glomap', '-h'], capture_output=True, text=True)
+        if result.returncode == 0 and 'GLOMAP' in result.stdout:
+            glomap_version = result.stdout.split('\n')[0].split()[1]
+            print(f"  Glomap: {glomap_version}")
+        else:
+            print("  Glomap: Not found")
+    except:
+        print("  Glomap: Not found")
+    
+    try:
+        print(f"  pycolmap: {pycolmap.__version__}")
+    except:
+        print(f"  pycolmap: Not available")
+    
+    print("=== END VERSION INFORMATION ===")
+    print()
+
+def update_dynamodb_metrics(uuid, table_name, comp_group_elapsed_time=None, metrics=None, log=None):
+    """
+    Update DynamoDB with component timing and training metrics.
+    
+    Args:
+        uuid: Job UUID
+        table_name: DynamoDB table name
+        comp_group_elapsed_time: List of elapsed times for each component group [pre_processing, reconstruction, training, post_processing]
+        metrics: Dictionary containing training metrics (psnr, ssim, lpips)
+        log: Logger instance
+    """
+    if os.environ.get('LOCAL_DEBUG', '').lower() == 'true':
+        if log:
+            log.info("LOCAL_DEBUG mode - skipping DynamoDB update")
+        return
+    
+    try:
+        region = os.environ.get('AWS_DEFAULT_REGION', os.environ.get('AWS_REGION', 'us-east-1'))
+        dynamodb = boto3.resource('dynamodb', region_name=region)
+        table = dynamodb.Table(table_name)
+        
+        update_parts = []
+        expression_values = {}
+        
+        if comp_group_elapsed_time:
+            update_parts.append('componentGroupElapsedTime = :times')
+            expression_values[':times'] = comp_group_elapsed_time
+        
+        if metrics:
+            # Convert float values to Decimal for DynamoDB
+            decimal_metrics = {k: Decimal(str(v)) for k, v in metrics.items()}
+            update_parts.append('evaluationMetrics = :metrics')
+            expression_values[':metrics'] = decimal_metrics
+        
+        if update_parts:
+            table.update_item(
+                Key={'uuid': uuid},
+                UpdateExpression='SET ' + ', '.join(update_parts),
+                ExpressionAttributeValues=expression_values
+            )
+            if log:
+                log.info(f"Updated DynamoDB with timing/metrics for job {uuid}")
+    except ClientError as e:
+        if log:
+            log.warning(f"Failed to update DynamoDB: {e}")
+    except Exception as e:
+        if log:
+            log.warning(f"Error updating DynamoDB: {e}")
+
+def update_component_phase_completion(uuid, table_name, phase_name, elapsed_time, log=None):
+    """
+    Update DynamoDB when a component phase completes.
+    
+    Args:
+        uuid: Job UUID
+        table_name: DynamoDB table name
+        phase_name: Name of the phase (PRE_PROCESSING, RECONSTRUCTION, TRAINING, POST_PROCESSING)
+        elapsed_time: Time in seconds for this phase
+        log: Logger instance
+    """
+    if os.environ.get('LOCAL_DEBUG', '').lower() == 'true':
+        if log:
+            log.info(f"LOCAL_DEBUG mode - skipping phase completion update for {phase_name}")
+        return
+    
+    try:
+        region = os.environ.get('AWS_DEFAULT_REGION', os.environ.get('AWS_REGION', 'us-east-1'))
+        dynamodb = boto3.resource('dynamodb', region_name=region)
+        table = dynamodb.Table(table_name)
+        
+        # Update the specific phase completion
+        # Convert phase name to attribute: PRE_PROCESSING -> pre_processingElapsedTime, RECONSTRUCTION -> reconstructionElapsedTime
+        phase_lower = phase_name.lower()
+        if '_' in phase_lower:
+            parts = phase_lower.split('_')
+            attr_name = parts[0] + '_' + ''.join(parts[1:]) + 'ElapsedTime'
+        else:
+            attr_name = phase_lower + 'ElapsedTime'
+        
+        table.update_item(
+            Key={'uuid': uuid},
+            UpdateExpression='SET #phase = :time, lastUpdatedPhase = :phase_name',
+            ExpressionAttributeNames={'#phase': attr_name},
+            ExpressionAttributeValues={
+                ':time': elapsed_time,
+                ':phase_name': phase_name
+            }
+        )
+        if log:
+            log.info(f"Updated {phase_name} completion: {elapsed_time}s")
+    except Exception as e:
+        if log:
+            log.warning(f"Error updating phase completion: {e}")
+
+def parse_3dgrut_metrics_from_log(log_output, output_json_path):
+    """
+    Parse 3DGRUT evaluation metrics from console output and save to JSON.
+    
+    Args:
+        log_output: String containing console output from 3DGRUT render.py
+        output_json_path: Path to save the metrics JSON file
+    
+    Returns:
+        Dictionary with parsed metrics or None if parsing failed
+    """
+    import re
+    import json
+    
+    metrics = {'psnr': 0.0, 'ssim': 0.0, 'lpips': 0.0}
+    
+    # Parse from table format: │ 31.632    │ 0.963     │ 0.053      │
+    # Look for the data row after the header row with mean_psnr, mean_ssim, mean_lpips
+    table_match = re.search(r'│\s*([0-9.]+)\s*│\s*([0-9.]+)\s*│\s*([0-9.]+)\s*│', log_output)
+    
+    if table_match:
+        metrics['psnr'] = float(table_match.group(1))
+        metrics['ssim'] = float(table_match.group(2))
+        metrics['lpips'] = float(table_match.group(3))
+    
+    # Only save if at least one metric was found
+    if any(v > 0 for v in metrics.values()):
+        os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
+        with open(output_json_path, 'w') as f:
+            json.dump({'results': metrics}, f, indent=2)
+        return metrics
+    
+    return None
+
+def parse_gsplat_metrics_from_log(log_output, output_json_path):
+    """
+    Parse gsplat-mcmc evaluation metrics from console output and save to JSON.
+    Format: PSNR: 24.901, SSIM: 0.8576, LPIPS: 0.167 Time: 0.031s/image Number of GS: 2929743
+    
+    Args:
+        log_output: String containing console output from gsplat simple_trainer.py
+        output_json_path: Path to save the metrics JSON file
+    
+    Returns:
+        Dictionary with parsed metrics or None if parsing failed
+    """
+    import re
+    import json
+    
+    psnr_match = re.search(r'PSNR:\s*([0-9.]+)', log_output)
+    ssim_match = re.search(r'SSIM:\s*([0-9.]+)', log_output)
+    lpips_match = re.search(r'LPIPS:\s*([0-9.]+)', log_output)
+    
+    if psnr_match and ssim_match and lpips_match:
+        metrics = {
+            'psnr': float(psnr_match.group(1)),
+            'ssim': float(ssim_match.group(1)),
+            'lpips': float(lpips_match.group(1))
+        }
+        os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
+        with open(output_json_path, 'w') as f:
+            json.dump({'results': metrics}, f, indent=2)
+        return metrics
+    
+    return None

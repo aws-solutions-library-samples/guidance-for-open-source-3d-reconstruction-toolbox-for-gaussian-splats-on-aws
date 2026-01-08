@@ -35,20 +35,39 @@ if __name__ == "__main__":
     parser.add_argument("output_ply")
     args = parser.parse_args()
 
-    ckpt_files = os.listdir(args.input_pt)
-    ckpt_files = sorted(ckpt_files)
+    ckpt_files = sorted([f for f in os.listdir(args.input_pt) if f.endswith('.pt')])
     print(', '.join(ckpt_files))
 
-    last_ckpt_file = os.path.join(args.input_pt, ckpt_files[len(ckpt_files)-1])
-    print(last_ckpt_file)
+    # Check if multi-GPU checkpoints (multiple rank files)
+    rank_files = [f for f in ckpt_files if 'rank' in f]
     
-    ckpt = torch.load(
-        last_ckpt_file,
-        map_location=torch.device("cpu"),
-        weights_only=True,
-        pickle_module=None
-    )
-    splats = ckpt["splats"]
+    if rank_files:
+        # Multi-GPU: merge all rank checkpoints
+        print(f"Found {len(rank_files)} rank checkpoints, merging...")
+        all_splats = []
+        
+        # Get the latest checkpoint number
+        latest_ckpt_num = max([int(f.split('_')[1]) for f in rank_files])
+        latest_rank_files = [f for f in rank_files if f.startswith(f'ckpt_{latest_ckpt_num}_')]
+        
+        for rank_file in sorted(latest_rank_files):
+            ckpt_path = os.path.join(args.input_pt, rank_file)
+            print(f"Loading {ckpt_path}")
+            ckpt = torch.load(ckpt_path, map_location=torch.device("cpu"), weights_only=True)
+            all_splats.append(ckpt["splats"])
+        
+        # Merge splats from all ranks
+        merged_splats = {}
+        for key in all_splats[0].keys():
+            merged_splats[key] = torch.cat([s[key] for s in all_splats], dim=0)
+        
+        splats = merged_splats
+    else:
+        # Single GPU: use last checkpoint
+        last_ckpt_file = os.path.join(args.input_pt, ckpt_files[-1])
+        print(f"Loading {last_ckpt_file}")
+        ckpt = torch.load(last_ckpt_file, map_location=torch.device("cpu"), weights_only=True)
+        splats = ckpt["splats"]
 
     position = splats["means"].cpu().numpy()
     ply_channels = [
@@ -73,4 +92,5 @@ if __name__ == "__main__":
     for i in range(4):
         ply_channels.append((f"rot_{i}", rot[:, i, np.newaxis]))
 
+    print(f"Writing PLY with {len(position)} Gaussians to {args.output_ply}")
     ExportGaussianSplat.write_ply(args.output_ply, len(position), dict(ply_channels))

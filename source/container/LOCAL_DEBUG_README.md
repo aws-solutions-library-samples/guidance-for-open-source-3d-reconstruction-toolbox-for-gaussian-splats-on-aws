@@ -85,7 +85,7 @@ cd /<YOUR-LOCAL-PATH>/guidance-for-open-source-3d-reconstruction-toolbox-for-gau
 mkdir -p workflow-input workflow-output models
 
 # Copy your input media
-cp your-video.mp4 workflow-input/
+cp your-video.mov workflow-input/
 
 # Copy models (if not already in container)
 # This is the models.tar.gz gzip file that gets built with CDK/Terraform
@@ -99,7 +99,7 @@ cp -r <YOUR-LOCAL-PATH>/models/* models/
 docker run -it \
   -e LOCAL_DEBUG=true \
   -e UUID=test-job-001 \
-  -e FILENAME=input.mp4 \
+  -e FILENAME=input.mov \
   -e DATASET_PATH=/mnt/data/workflow-input \
   -e RECON_SOFTWARE_NAME=glomap \
   -e MODEL=splatfacto \

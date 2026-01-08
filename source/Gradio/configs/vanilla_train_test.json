@@ -15,11 +15,11 @@
   "training_enable": "true",
   "max_steps": 1000,
   "enable_spz": "true",
-  "enable_sogs": "true",
+  "enable_sog": "true",
   "enable_usdz": "true",
   "rotate_splat": "true",
   "crop_output_bounds": "true",
-  "crop_mode": "environment",
+  "crop_mode": "rigid_body",
   "spherical_enable": "false",
   "remove_bg": "false",
   "remove_objects": "false",
@@ -28,5 +28,9 @@
   "source_coordinate": "arkit",
   "pose_world_to_cam": "true",
   "log_verbosity": "info",
-  "mask_threshold": 0.6
+  "mask_threshold": 0.6,
+  "ply_coords": "rhyu",
+  "spz_coords": "rhyu",
+  "sog_coords": "rhyu",
+  "usdz_coords": "rhyu"
 }

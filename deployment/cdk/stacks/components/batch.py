@@ -167,6 +167,19 @@ class BatchConstruct(Construct):
             ]
         )
         
+        # Add DynamoDB permissions for phase tracking
+        self.task_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "dynamodb:UpdateItem",
+                    "dynamodb:PutItem",
+                    "dynamodb:GetItem"
+                ],
+                resources=["*"]
+            )
+        )
+        
         instance_profile = iam.CfnInstanceProfile(
             self, "BatchInstanceProfile",
             roles=[instance_role.role_name]
