@@ -3986,8 +3986,8 @@ async () => {
                 app.root.addChild(entity);
                 
                 // Focus camera on splat
-                camera.setPosition(5, 2, 5);
-                camera.lookAt(0, 0, 0);
+                //camera.setPosition(5, 2, 5);
+                //camera.lookAt(0, 0, 0);
             });
             
             asset.on('error', (err) => {

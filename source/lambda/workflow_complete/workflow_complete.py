@@ -161,6 +161,28 @@ def get_cloudwatch_logs(training_job_name, is_batch_job=False, log_stream_name=N
     logs_client = boto3.client('logs')
     
     try:
+        # FIRST: Check if the job actually succeeded before scanning for errors
+        if not is_batch_job:
+            sagemaker_client = boto3.client('sagemaker')
+            training_job = sagemaker_client.describe_training_job(
+                TrainingJobName=training_job_name
+            )
+            
+            # If job succeeded, return success immediately without scanning logs
+            if training_job['TrainingJobStatus'] == 'Completed':
+                return {
+                    'status': 'SUCCESS',
+                    'message': 'Training completed successfully'
+                }
+            
+            # If job failed, continue to scan logs for error details
+            if training_job['TrainingJobStatus'] != 'Failed':
+                return {
+                    'status': 'SUCCESS',
+                    'message': f"Job status: {training_job['TrainingJobStatus']}"
+                }
+        
+        # Only scan logs if job actually failed
         if is_batch_job and log_stream_name:
             # For Batch jobs, use the provided log stream name
             log_group_name = '/aws/batch/job'

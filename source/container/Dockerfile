@@ -241,7 +241,7 @@ RUN git clone https://github.com/nerfstudio-project/nerfstudio.git \
     && pip install -e . \
     && cd ${CODE_PATH}
 
-# Install latest gsplat from source
+# Install latest gsplat from source (for splatfacto, splatfacto-big, splatfacto-mcmc)
 RUN git clone https://github.com/nerfstudio-project/gsplat.git --recursive \
     && cd ${CODE_PATH}/gsplat \
     && git reset --hard ${GSPLAT_HASH} \
@@ -252,19 +252,30 @@ RUN git clone https://github.com/nerfstudio-project/gsplat.git --recursive \
     && pip install --force-reinstall imageio tqdm \
     && cd ${CODE_PATH}
 
+# Install Splatfacto-w with gsplat==1.4.0 to separate location
+# Install with dependencies to get complete environment
+RUN mkdir -p /opt/splatfacto_w_env \
+    && git clone https://github.com/KevinXu02/splatfacto-w ${CODE_PATH}/splatfacto-w \
+    && pip install --target=/opt/splatfacto_w_env gsplat==1.4.0 \
+    && pip install --target=/opt/splatfacto_w_env --upgrade git+https://github.com/KevinXu02/splatfacto-w
+
+# Copy and make wrapper scripts executable
+COPY src/pipeline/training/run_splatfacto_w_wrapper.sh /opt/ml/code/training/run_splatfacto_w_wrapper.sh
+COPY src/pipeline/training/run_splatfacto_w_wrapper.py /opt/ml/code/training/run_splatfacto_w_wrapper.py
+COPY src/pipeline/training/run_splatfacto_w_export.py /opt/ml/code/training/run_splatfacto_w_export.py
+COPY src/pipeline/training/run_splatfacto_w_eval.py /opt/ml/code/training/run_splatfacto_w_eval.py
+COPY src/pipeline/training/run_splatfacto_w_render.py /opt/ml/code/training/run_splatfacto_w_render.py
+RUN chmod +x /opt/ml/code/training/run_splatfacto_w_wrapper.sh \
+    /opt/ml/code/training/run_splatfacto_w_wrapper.py \
+    /opt/ml/code/training/run_splatfacto_w_export.py \
+    /opt/ml/code/training/run_splatfacto_w_eval.py \
+    /opt/ml/code/training/run_splatfacto_w_render.py
+
 # Install gsplat-specific pycolmap to separate location
 RUN mkdir -p /opt/gsplat_pycolmap \
     && pip install --target=/opt/gsplat_pycolmap git+https://github.com/rmbrualla/pycolmap@cc7ea4b7301720ac29287dbe450952511b32125e
 
-# Install Splatfacto-w with its compatible gsplat version (base environment)
-RUN git clone https://github.com/KevinXu02/splatfacto-w \
-    && pip install git+https://github.com/KevinXu02/splatfacto-w
-
 # Copy and apply patch for splatfacto-w gradient bug (must be done before COLMAP install)
-COPY ./src/pipeline/training/patch_splatfactow.py ${CODE_PATH}/
-RUN python3 ${CODE_PATH}/patch_splatfactow.py /usr/local/lib/python${PYTHON_VERSION_}/site-packages/splatfactow/splatfactow_model.py && \
-    rm ${CODE_PATH}/patch_splatfactow.py
-
 # Install COLMAP from source
 RUN wget https://github.com/colmap/colmap/archive/refs/tags/${COLMAP_VERSION}.zip \
     && unzip ${COLMAP_VERSION}.zip && rm ${COLMAP_VERSION}.zip \
@@ -350,8 +361,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 # Install PlayCanvas splat-transform globally for SOG capability
 RUN npm install -g @playcanvas/splat-transform@${SPLAT_TRANSFORM_VERSION}
 
-# Install Map-Anything
-RUN git clone https://github.com/facebookresearch/map-anything.git
+# Install Map-Anything with pycolmap 3.10.0 in separate location
+RUN mkdir -p /opt/mapanything_pycolmap \
+    && pip install --target=/opt/mapanything_pycolmap --no-deps pycolmap==3.10.0 \
+    && git clone https://github.com/facebookresearch/map-anything.git
 WORKDIR ${CODE_PATH}/map-anything
 RUN pip install -e .
 WORKDIR ${CODE_PATH}
@@ -359,6 +372,10 @@ WORKDIR ${CODE_PATH}
 # Fix version compatibility issues with diffusers and transformers
 RUN pip install --force-reinstall --no-cache-dir transformers==4.44.2 diffusers==0.30.3
 RUN pip install git+https://github.com/cvg/LightGlue.git hydra-core
+
+# CRITICAL FIX: Reinstall pycolmap after map-anything to ensure ABI compatibility
+# Map-anything may have installed incompatible dependencies that conflict with pycolmap
+RUN pip install --force-reinstall --no-cache-dir --no-deps pycolmap
 
 # Final numpy version lock to ensure compatibility with numba and splatfacto-w
 RUN pip install --force-reinstall --no-cache-dir 'numpy==1.26.4'
@@ -382,7 +399,8 @@ COPY ./src/pipeline/reconstruction/process_pose_transforms.py                   
 COPY ./src/pipeline/reconstruction/update_camera_model.py                           ${CODE_PATH}/reconstruction
 COPY ./src/pipeline/reconstruction/run_map_anything.py                              ${CODE_PATH}/reconstruction
 #COPY ./src/pipeline/reconstruction/run_map_anything_wrapper.sh                      ${CODE_PATH}/reconstruction
-#COPY ./src/pipeline/reconstruction/demo_colmap_mapanything.py                       ${CODE_PATH}/map-anything/scripts/demo_colmap.py
+COPY ./src/pipeline/reconstruction/demo_colmap_mapanything.py                       ${CODE_PATH}/map-anything/scripts/demo_colmap.py
+# Use official map-anything np_to_pycolmap.py instead of our modified version
 #COPY ./src/pipeline/reconstruction/np_to_pycolmap.py                                ${CODE_PATH}/map-anything/mapanything/third_party/np_to_pycolmap.py
 COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py                            ${CODE_PATH}/training
 COPY ./src/pipeline/training/run_gsplat_trainer.sh                                  ${CODE_PATH}/training

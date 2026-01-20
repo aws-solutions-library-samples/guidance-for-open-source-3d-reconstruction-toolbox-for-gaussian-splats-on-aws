@@ -2,6 +2,7 @@ import boto3
 import uuid
 import json
 import os
+from decimal import Decimal
 
 def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=None, crop_mode=None, enable_spz=None, enable_sog=None, enable_usdz=None, ply_coords=None, spz_coords=None, sog_coords=None, usdz_coords=None):
     """Resume training for a selected splat by creating a new job with RUN_SFM=false"""
@@ -58,65 +59,78 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
         refine_uuid = uuid.uuid4()
         
         # Get original filename from source job for tracking in UI
-        # Try multiple possible locations where the original filename might be stored
+        # Priority: originalMediaFilename > s3.inputKey > filename > inputKey
         original_filename = None
-        if 'filename' in selected_job and selected_job['filename'] != 'model.tar.gz':
-            original_filename = selected_job['filename']
+        if 'originalMediaFilename' in selected_job:
+            original_filename = selected_job['originalMediaFilename']
         elif 's3' in selected_job and 'inputKey' in selected_job['s3']:
             input_key = selected_job['s3']['inputKey']
             if input_key != 'model.tar.gz':
-                original_filename = input_key
+                original_filename = input_key.split('/')[-1]  # Get filename from path
+        elif 'filename' in selected_job and selected_job['filename'] != 'model.tar.gz':
+            original_filename = selected_job['filename']
         elif 'inputKey' in selected_job and selected_job['inputKey'] != 'model.tar.gz':
-            original_filename = selected_job['inputKey']
+            original_filename = selected_job['inputKey'].split('/')[-1]
         
-        # If we still don't have an original filename, use a descriptive default
-        if not original_filename:
+        # If still no filename, try to get from parent job if this is already a refined job
+        if not original_filename or original_filename == 'model.tar.gz':
+            s3_input = selected_job.get('s3', {}).get('inputPrefix', '')
+            if '/output' in s3_input:
+                parent_job_id = s3_input.split('/')[-2]
+                try:
+                    parent_response = table.get_item(Key={'uuid': parent_job_id})
+                    if 'Item' in parent_response:
+                        parent_job = parent_response['Item']
+                        if 'originalMediaFilename' in parent_job:
+                            original_filename = parent_job['originalMediaFilename']
+                        elif 's3' in parent_job and 'inputKey' in parent_job['s3']:
+                            original_filename = parent_job['s3']['inputKey'].split('/')[-1]
+                except:
+                    pass
+        
+        # Final fallback
+        if not original_filename or original_filename == 'model.tar.gz':
             original_filename = f"refined_{job_id[:8]}.mp4"
         
-        # Create refinement job config based on selected job
-        print(f"DEBUG: Using parameters - instance: {instance_type}, spot: {use_spot_instance}")
-        print(f"DEBUG: Original filename for tracking: {original_filename}")
+        # Build refine config from original job, preserving nested structures
         refine_config = {
             "uuid": str(refine_uuid),
             "instanceType": instance_type,
             "useSpotInstance": use_spot_instance,
             "logVerbosity": str(selected_job.get('logVerbosity', shared_state.log_verbosity)),
-            "originalMediaFilename": original_filename,  # Preserve original filename for UI tracking
+            "originalMediaFilename": original_filename,
             "s3": {
                 "bucketName": shared_state.s3_bucket,
-                "inputPrefix": f"{str(selected_job.get('outputPrefix', shared_state.s3_output))}/{job_id}/output",
-                "inputKey": "model.tar.gz",  # Backend still uses model.tar.gz
+                "inputPrefix": f"{str(selected_job.get('s3', {}).get('outputPrefix', shared_state.s3_output))}/{job_id}/output",
+                "inputKey": "model.tar.gz",
                 "outputPrefix": shared_state.s3_output
             },
             "videoProcessing": selected_job.get('videoProcessing', {
-                "maxNumImages": str(shared_state.max_images),
-                "videoStartTime": str(selected_job.get('videoProcessing', {}).get('videoStartTime', shared_state.video_start_time)),
-                "videoStopTime" : str(selected_job.get('videoProcessing', {}).get('videoStopTime', shared_state.video_stop_time))
+                "maxNumImages": str(selected_job.get('maxNumImages', shared_state.max_images)),
+                "videoStartTime": selected_job.get('videoStartTime', shared_state.video_start_time),
+                "videoStopTime": selected_job.get('videoStopTime', shared_state.video_stop_time)
             }),
             "imageProcessing": selected_job.get('imageProcessing', {
-                "filterBlurryImages": shared_state.filter_blurry == "true"
+                "filterBlurryImages": str(selected_job.get('filterBlurryImages', shared_state.filter_blurry)) == "True"
             }),
             "reconstruction": {
-                "enable": False,  # Skip SFM for refinement
-                "softwareName": str(selected_job.get('reconstruction', {}).get('softwareName', selected_job.get('sfm', {}).get('softwareName', shared_state.sfm))),
-                "posePriors": selected_job.get('reconstruction', {}).get('posePriors', selected_job.get('sfm', {}).get('posePriors', {
-                    "usePosePriorColmapModelFiles": shared_state.use_colmap_model == "true",
+                "enable": False,
+                "softwareName": str(selected_job.get('reconstruction', {}).get('softwareName', selected_job.get('reconSoftwareName', shared_state.sfm))),
+                "posePriors": selected_job.get('reconstruction', {}).get('posePriors', {
+                    "usePosePriorColmapModelFiles": str(selected_job.get('usePosePriorColmapModelFiles', shared_state.use_colmap_model)) == "True",
                     "usePosePriorTransformJson": {
-                        "enable": shared_state.use_transform_json == "true",
-                        "sourceCoordinateName": shared_state.source_coordinate,
-                        "poseIsWorldToCam": shared_state.pose_world_to_cam == "true"
+                        "enable": str(selected_job.get('usePosePriorTransformJson', shared_state.use_transform_json)) == "True",
+                        "sourceCoordinateName": str(selected_job.get('sourceCoordinateName', shared_state.source_coordinate)),
+                        "poseIsWorldToCam": str(selected_job.get('poseIsWorldToCam', shared_state.pose_world_to_cam)) == "True"
                     }
-                })),
-                "enableEnhancedFeatureExtraction": selected_job.get('reconstruction', {}).get('enableEnhancedFeatureExtraction', selected_job.get('sfm', {}).get('enableEnhancedFeatureExtraction', shared_state.enhanced_feature == "true")),
-                "matchingMethod": str(selected_job.get('reconstruction', {}).get('matchingMethod', selected_job.get('sfm', {}).get('matchingMethod', shared_state.matching_method)))
+                }),
+                "enableEnhancedFeatureExtraction": str(selected_job.get('enableEnhancedFeatureExtraction', shared_state.enhanced_feature)) == "True",
+                "matchingMethod": str(selected_job.get('matchingMethod', shared_state.matching_method))
             },
             "training": {
-                "enable": True,  # Enable training for refinement
-                "maxSteps": "20000", # This will be overwritten in container using contants set for max_steps for optimal training
-                "model": str(original_model or shared_state.model),
-                "enableMultiGpu": selected_job.get('training', {}).get('enableMultiGpu', False),
-
-                **{k: v for k, v in selected_job.get('training', {}).items() if k not in ['enable', 'maxSteps', 'model', 'enableMultiGpu', 'refineSteps']}  # Preserve other parameters
+                "enable": True,
+                "maxSteps": "20000",
+                "model": str(original_model or shared_state.model)
             },
             "postProcessing": {
                 "cropOutputBounds": crop_bounds == "true" if isinstance(crop_bounds, str) else crop_bounds,
@@ -130,22 +144,37 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
                 "usdzCoords": usdz_coords
             },
             "sphericalCamera": {
-                "enable": selected_job.get('sphericalCamera') == 'True' if isinstance(selected_job.get('sphericalCamera'), str) else selected_job.get('sphericalCamera', {}).get('enable', shared_state.spherical_enable == "true"),
-                "cubeFacesToRemove": shared_state.faces if isinstance(shared_state.faces, list) else []
+                "enable": str(selected_job.get('sphericalCamera', shared_state.spherical_enable)) == "True",
+                "cubeFacesToRemove": selected_job.get('sphericalCubeFacesToRemove', [])
             },
             "segmentation": selected_job.get('segmentation', {
                 "backgroundRemoval": {
-                    "enable": shared_state.remove_bg == "true",
-                    "model": shared_state.bg_model,
-                    "maskThreshold": str(shared_state.mask_threshold)
+                    "enable": str(selected_job.get('removeBackground', shared_state.remove_bg)) == "True",
+                    "model": str(selected_job.get('backgroundRemovalModel', shared_state.bg_model)),
+                    "maskThreshold": str(selected_job.get('maskThreshold', shared_state.mask_threshold))
                 },
                 "objectRemoval": {
-                    "enable": shared_state.remove_objects == "true",
-                    "action": shared_state.object_removal_action,
-                    "objects": str(shared_state.objects_to_remove)
+                    "enable": str(selected_job.get('removeObject', shared_state.remove_objects)) == "True",
+                    "action": str(selected_job.get('objectRemovalAction', shared_state.object_removal_action)),
+                    "objects": str(selected_job.get('objectRemovalObjects', shared_state.objects_to_remove))
                 }
             })
         }
+        
+        print(f"DEBUG: Using parameters - instance: {instance_type}, spot: {use_spot_instance}")
+        print(f"DEBUG: Original filename for tracking: {original_filename}")
+        
+        # Convert Decimal to float for JSON serialization
+        def convert_decimals(obj):
+            if isinstance(obj, list):
+                return [convert_decimals(i) for i in obj]
+            elif isinstance(obj, dict):
+                return {k: convert_decimals(v) for k, v in obj.items()}
+            elif isinstance(obj, Decimal):
+                return float(obj)
+            return obj
+        
+        refine_config = convert_decimals(refine_config)
         
         # Upload refinement job JSON to workflow-input
         s3_client = boto3.client('s3')

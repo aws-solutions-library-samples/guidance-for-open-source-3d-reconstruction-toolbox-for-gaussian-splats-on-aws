@@ -28,6 +28,81 @@ import pycolmap
 from pycolmap import logging
 
 
+def check_for_valid_rigid_objects(mask_dir: Path, min_area_percentage: float = 0.01, min_blob_size: int = 1000) -> bool:
+    """
+    Check if mask directory contains masks with significant rigid objects.
+    Returns True only if at least one mask has a rigid object that is NOT small.
+    
+    Args:
+        mask_dir: Directory containing mask images
+        min_area_percentage: Minimum percentage of image area for valid object (default 1%)
+        min_blob_size: Minimum pixel count for valid blob (default 1000)
+    
+    Returns:
+        bool: True if valid rigid objects found, False otherwise
+    """
+    mask_files = [f for f in mask_dir.iterdir() if f.suffix.lower() == '.png']
+    
+    if not mask_files:
+        return False
+    
+    valid_objects_found = 0
+    
+    for mask_file in mask_files:
+        try:
+            # Read mask
+            mask_img = cv2.imread(str(mask_file), cv2.IMREAD_UNCHANGED)
+            if mask_img is None:
+                continue
+            
+            # Extract mask values
+            if mask_img.ndim == 3 and mask_img.shape[2] == 4:  # RGBA
+                mask_values = mask_img[:, :, 3] / 255.0
+            elif mask_img.ndim == 3:  # RGB
+                mask_values = cv2.cvtColor(mask_img, cv2.COLOR_BGR2GRAY) / 255.0
+            else:  # Grayscale
+                mask_values = mask_img / 255.0
+            
+            # Check if mask is essentially empty
+            if np.max(mask_values) < 0.001:
+                continue
+            
+            # Apply blob detection similar to erase_object_using_mask.py
+            binary_mask = (mask_values > 0.05).astype(np.uint8)
+            
+            # Close gaps between nearby blobs
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+            binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel_close)
+            
+            num_labels, labels = cv2.connectedComponents(binary_mask)
+            
+            if num_labels <= 1:
+                continue
+            
+            # Calculate minimum required pixels
+            total_pixels = mask_values.shape[0] * mask_values.shape[1]
+            min_required_pixels = int(total_pixels * min_area_percentage)
+            
+            # Check for valid blobs
+            for i in range(1, num_labels):
+                component_size = np.sum(labels == i)
+                if component_size >= min_blob_size and component_size >= min_required_pixels:
+                    valid_objects_found += 1
+                    break  # Found valid object in this mask, move to next mask
+            
+            # Early exit if we found at least one valid object
+            if valid_objects_found > 0:
+                logging.info(f"Found {valid_objects_found} mask(s) with valid rigid objects (≥{min_area_percentage*100}% of image area)")
+                return True
+                
+        except Exception as e:
+            logging.warning(f"Error checking mask {mask_file}: {e}")
+            continue
+    
+    logging.info(f"No valid rigid objects found in {len(mask_files)} masks (all objects < {min_area_percentage*100}% of image area)")
+    return False
+
+
 @dataclass
 class PanoRenderOptions:
     num_steps_yaw: int
@@ -383,6 +458,16 @@ def run(args):
                     logging.error(f"Failed to generate masks: {e}")
                     continue
                 
+                # Check if masks contain significant rigid objects before proceeding
+                has_valid_objects = check_for_valid_rigid_objects(subfolder_filter_output)
+                
+                if not has_valid_objects:
+                    logging.info(f"No significant rigid objects detected in {subfolder.name}, skipping object {args.object_action}")
+                    # Don't run eraser at all - keep original images as-is
+                    continue
+                
+                logging.info(f"Valid rigid objects detected in {subfolder.name}, proceeding with {args.object_action}")
+                
                 # Apply object removal based on action
                 if args.object_action == "remove":
                     # Remove objects using masks
@@ -400,11 +485,13 @@ def run(args):
                         logging.error(f"Failed to remove objects: {e}")
                         continue
                 else:  # erase action
-                    # Erase objects using masks
+                    # Erase objects using masks - specify output directory to avoid in-place modification
+                    erase_output_dir = subfolder_masked_output
                     erase_command = [
                         sys.executable, "-m", "pre_processing.segmentation.erase_object_using_mask",
                         "-id", str(subfolder),
                         "-md", str(subfolder_filter_output),
+                        "-od", str(erase_output_dir),  # Explicit output directory
                         "-mp", str(args.output_path / "stable-diffusion-xl-base-1.0"),
                         "-pp", str(Path(os.path.dirname(os.path.realpath(__file__))).parent.parent / 
                                    "AttentiveEraser" / "pipelines" / "pipeline_stable_diffusion_xl_attentive_eraser.py"),
@@ -420,8 +507,15 @@ def run(args):
                         logging.error(f"Failed to erase objects: {e}")
                         continue
         
-        # Use the processed images for further steps
-        if args.object_action == "remove":
+        # Use the processed images for further steps - only if eraser actually ran
+        eraser_ran = any((mask_human_output_dir / subfolder.name).exists() and 
+                        list((mask_human_output_dir / subfolder.name).iterdir()) 
+                        for subfolder in image_dir.iterdir() 
+                        if subfolder.is_dir() and subfolder.name.startswith('pano_camera'))
+        
+        if not eraser_ran:
+            logging.info("Object eraser was skipped (no valid objects), keeping original images")
+        elif args.object_action == "remove":
             # Create a backup of the original images
             original_images_backup = args.output_path / "original_images"
             if original_images_backup.exists():
@@ -438,29 +532,45 @@ def run(args):
                     shutil.copytree(subfolder, target_dir)
             
             logging.info("Replaced original images with processed images (object removal)")
+        else:  # erase action
+            # For erase action, resize ALL images to 960x960 to match eraser output
+            original_images_backup = args.output_path / "original_images"
+            if original_images_backup.exists():
+                shutil.rmtree(original_images_backup)
+            shutil.copytree(image_dir, original_images_backup)
+            
+            # First, copy non-black erased images (already 960x960)
+            for subfolder in mask_human_output_dir.iterdir():
+                if subfolder.is_dir() and subfolder.name.startswith('pano_camera'):
+                    target_dir = image_dir / subfolder.name
+                    
+                    refined_dir = subfolder / "refined_masks"
+                    if refined_dir.exists():
+                        for img_file in refined_dir.iterdir():
+                            if img_file.is_file() and img_file.suffix.lower() in ['.png', '.jpg', '.jpeg']:
+                                img = cv2.imread(str(img_file))
+                                if img is not None and np.max(img) > 10:  # Not black
+                                    target_file = target_dir / img_file.name
+                                    cv2.imwrite(str(target_file), img)
+                        logging.info(f"Copied non-black erased images from refined_masks in {subfolder.name}")
+            
+            # Now resize ALL remaining images (originals that weren't erased) to 960x960
+            for subfolder in image_dir.iterdir():
+                if subfolder.is_dir() and subfolder.name.startswith('pano_camera'):
+                    for img_file in subfolder.iterdir():
+                        if img_file.is_file() and img_file.suffix.lower() in ['.png', '.jpg', '.jpeg']:
+                            img = cv2.imread(str(img_file))
+                            if img is not None and (img.shape[0] != 960 or img.shape[1] != 960):
+                                img = cv2.resize(img, (960, 960), interpolation=cv2.INTER_LANCZOS4)
+                                cv2.imwrite(str(img_file), img)
+                    logging.info(f"Resized all images to 960x960 in {subfolder.name}")
+            
+            logging.info("Replaced/resized all images to 960x960 (skipped black images)")
         
-        # Update masks after object removal to match new images
-        # Copy object masks from filter_output_dir to mask_dir with correct naming
-        for subfolder in filter_output_dir.iterdir():
-            if subfolder.is_dir() and subfolder.name.startswith('pano_camera'):
-                target_mask_dir = mask_dir / subfolder.name / "refined_masks"
-                target_mask_dir.mkdir(exist_ok=True, parents=True)
-                
-                # Check for masks in both root and refined_masks subdirectory
-                mask_sources = [subfolder]
-                refined_subdir = subfolder / "refined_masks"
-                if refined_subdir.exists():
-                    mask_sources.append(refined_subdir)
-                
-                # Copy mask files with .png.png naming convention for COLMAP
-                for mask_source in mask_sources:
-                    for mask_file in mask_source.iterdir():
-                        if mask_file.is_file() and mask_file.suffix.lower() == '.png':
-                            # COLMAP expects mask as: image_name.png.png
-                            target_mask_path = target_mask_dir / f"{mask_file.name}.png"
-                            shutil.copy2(mask_file, target_mask_path)
-        
-        logging.info("Updated mask directory with object removal masks")
+        # DO NOT update masks after object removal - keep original perspective view masks
+        # The refined masks from object eraser are for inpainting only, not for COLMAP feature extraction
+        # COLMAP needs the original perspective view masks to extract features correctly
+        logging.info("Keeping original perspective view masks for COLMAP feature extraction")
         
         # Count processed images in subdirectories
         processed_count = 0
@@ -483,15 +593,44 @@ def run(args):
                     perspective_count += 1
     logging.info(f"Extracting features from {perspective_count} perspective images")
     
-    # Debug: List some mask files to verify structure
+    # Debug: Check if images are valid (not all black/white)
+    logging.info(f"DEBUG: Checking first few images for validity")
+    image_count = 0
+    for subfolder in image_dir.iterdir():
+        if subfolder.is_dir() and subfolder.name.startswith('pano_camera'):
+            for img_file in sorted(subfolder.iterdir())[:2]:  # Check first 2 images per camera
+                if img_file.is_file() and img_file.suffix.lower() in ['.png', '.jpg', '.jpeg']:
+                    img = cv2.imread(str(img_file), cv2.IMREAD_GRAYSCALE)
+                    if img is not None:
+                        mean_val = np.mean(img)
+                        std_val = np.std(img)
+                        min_val = np.min(img)
+                        max_val = np.max(img)
+                        logging.info(f"  Image {img_file.name}: mean={mean_val:.1f}, std={std_val:.1f}, min={min_val}, max={max_val}")
+                        image_count += 1
+                        if image_count >= 4:  # Check 4 images total
+                            break
+        if image_count >= 4:
+            break
+    
+    # Debug: List some mask files and verify they're not black
     logging.info(f"DEBUG: Checking mask directory structure at {mask_dir}")
     mask_count = 0
     sample_masks = []
+    black_mask_count = 0
     for mask_file in mask_dir.rglob('*.png'):
         mask_count += 1
         if mask_count <= 5:  # Show first 5 masks
             sample_masks.append(str(mask_file.relative_to(mask_dir)))
-    logging.info(f"DEBUG: Found {mask_count} mask files. Sample masks: {sample_masks}")
+            # Check if mask is black
+            mask_img = cv2.imread(str(mask_file), cv2.IMREAD_GRAYSCALE)
+            if mask_img is not None:
+                max_val = np.max(mask_img)
+                non_zero = np.count_nonzero(mask_img)
+                logging.info(f"  Mask {mask_file.name}: max_val={max_val}, non_zero_pixels={non_zero}/{mask_img.size}")
+                if max_val < 10:
+                    black_mask_count += 1
+    logging.info(f"DEBUG: Found {mask_count} mask files ({black_mask_count} are black). Sample masks: {sample_masks}")
     
     pycolmap.extract_features(
         str(database_path),
@@ -521,12 +660,25 @@ def run(args):
         return
 
     if args.matcher == "sequential":
-        pycolmap.match_sequential(
-            str(database_path),
-            pairing_options=pycolmap.SequentialPairingOptions(
-                loop_detection=True
-            ),
-        )
+        # Use local vocab tree for loop detection
+        vocab_tree_path = "/opt/ml/code/vocab_tree_flickr100K_words32K.bin"
+        if os.path.exists(vocab_tree_path):
+            logging.info(f"Using local vocab tree: {vocab_tree_path}")
+            pycolmap.match_sequential(
+                str(database_path),
+                pairing_options=pycolmap.SequentialPairingOptions(
+                    loop_detection=True,
+                    vocab_tree_path=vocab_tree_path
+                ),
+            )
+        else:
+            logging.warning(f"Vocab tree not found at {vocab_tree_path}, disabling loop detection")
+            pycolmap.match_sequential(
+                str(database_path),
+                pairing_options=pycolmap.SequentialPairingOptions(
+                    loop_detection=False
+                ),
+            )
     elif args.matcher == "exhaustive":
         pycolmap.match_exhaustive(str(database_path))
     elif args.matcher == "vocabtree":

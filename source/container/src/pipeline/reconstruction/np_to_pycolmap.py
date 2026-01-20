@@ -233,25 +233,45 @@ def batch_np_matrix_to_pycolmap_wo_track(
     # Reconstruction object, following the format of PyCOLMAP/COLMAP
     reconstruction = pycolmap.Reconstruction()
 
+    # Add 3D points
     for vidx in range(P):
         reconstruction.add_point3D(points3d[vidx], pycolmap.Track(), points_rgb[vidx])
 
     camera = None
-    # frame idx - only add cameras, we'll write images manually
+    # Add cameras and images WITHOUT rig/frame (workaround for pycolmap 3.13.0)
     for fidx in range(N):
-        # set camera
+        # Add camera
         if camera is None or (not shared_camera):
             pycolmap_intri = _build_pycolmap_intri(fidx, intrinsics, camera_type)
-
             camera = pycolmap.Camera(
                 model=camera_type, width=image_size[0], height=image_size[1], params=pycolmap_intri, camera_id=fidx + 1
             )
-
-            # add camera
             reconstruction.add_camera(camera)
+        
+        # Add image and register pose directly
+        camera_id = 1 if shared_camera else fidx + 1
+        cam_from_world = pycolmap.Rigid3d(
+            pycolmap.Rotation3d(extrinsics[fidx][:3, :3]), extrinsics[fidx][:3, 3]
+        )
+        
+        # Create image without frame_id to avoid rig/frame requirements
+        image = pycolmap.Image(
+            image_id=fidx + 1,
+            name=f"image_{fidx + 1}",
+            camera_id=camera_id
+        )
+        
+        # Try to add image - if it fails due to frame requirement, catch and continue
+        try:
+            reconstruction.add_image(image)
+            reconstruction.register_image(fidx + 1, cam_from_world)
+        except ValueError as e:
+            # If pycolmap 3.13.0 requires frames, we need to write files directly
+            # Return None to signal caller to use alternative method
+            print(f"Warning: pycolmap 3.13.0 rig/frame system incompatible, returning None")
+            return None
 
-    # Return reconstruction and data needed for manual image writing
-    return reconstruction, extrinsics, shared_camera
+    return reconstruction
 
 
 def _build_pycolmap_intri(fidx, intrinsics, camera_type, extra_params=None):

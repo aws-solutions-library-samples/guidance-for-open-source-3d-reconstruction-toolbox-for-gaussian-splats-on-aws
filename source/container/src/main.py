@@ -139,7 +139,12 @@ if __name__ == "__main__":
 
         # Check if video or zip of images given
         VIDEO = validate_input_media(config['FILENAME'])
-
+        import subprocess
+        cmd_args = ['ns-train', '-h']
+        subprocess.run(
+                cmd_args,
+                check=True
+            )
         if IS_BATCH:
             # AWS Batch environment setup
             os.environ['SM_MODEL_DIR'] = '/tmp/model'
@@ -903,7 +908,8 @@ if __name__ == "__main__":
     # Remove Objects
     ##################################
     try:
-        if config['REMOVE_OBJECT'] == "true" and config['RUN_RECON'] == "true":
+        # Skip object removal if using spherical camera (handled in panorama_sfm.py)
+        if config['REMOVE_OBJECT'] == "true" and config['RUN_RECON'] == "true" and config['SPHERICAL_CAMERA'] != "true":
             model = None
             # OBJECT REMOVAL COMPONENT FOR HUMAN
             try:
@@ -1229,23 +1235,6 @@ if __name__ == "__main__":
                     cwd=current_dir_path,
                     requires_gpu=True
                 )
-                args = [
-                    'bundle_adjuster',
-                    '--input_path', sparse_model_path,
-                    '--output_path', sparse_model_path,
-                    '--BundleAdjustment.refine_principal_point', '0'
-                ]
-                if int(pipeline.config.num_gpus) > 0:
-                    args.extend(['--use_gpu', '1'])
-                pipeline.create_component(
-                    name="ColmapSfM-Ba",
-                    comp_type=ComponentType.RECONSTRUCTION,
-                    comp_environ=ComponentEnvironment.EXECUTABLE,
-                    command="colmap",
-                    args=args,
-                    cwd=current_dir_path,
-                    requires_gpu=False
-                )
             else:
                 pipeline.report_error(
                     745, f"Reconstruction software not implemented yet:{config['RECON_SOFTWARE_NAME']}"
@@ -1348,12 +1337,11 @@ if __name__ == "__main__":
                         if os.path.exists(model_ckpt_path):
                             args.extend([
                                 "--load-dir", model_ckpt_path,
-                                "--load-scheduler", "False"
+                                "--load-scheduler", "False",
                             ])
+                            log.info(f"Stage-2 training: loading weights from {model_ckpt_path} but starting fresh training schedule")
                         args.extend([
                             "--timestamp", RESUME_TRAIN_EXPERIMENT_NAME,
-                            #"--pipeline.model.continue-cull-post-densification", "False",
-                            #"--pipeline.model.cull-alpha-thresh", "0.005",
                             "--max-num-iterations", str(REFINE_STEPS_SPLATFACTO)
                         ])
                     else:
@@ -1376,16 +1364,23 @@ if __name__ == "__main__":
                 else:
                     pipeline.report_error(765, "Trainer specified does not match proper configuration")
 
+                # Set command based on model type
+                if config['MODEL'] == "splatfacto-w-light":
+                    command = "/opt/ml/code/training/run_splatfacto_w_wrapper.py"
+                else:
+                    command = "ns-train"
+
                 args.extend([
                     data_model,
                     "--data", config['DATASET_PATH'],
                     "--downscale-factor", "1",
+                    "--auto-scale-poses", "False"
                 ])
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
                     comp_environ=ComponentEnvironment.EXECUTABLE,
-                    command="ns-train",
+                    command=command,
                     args=args,
                     cwd=current_dir_path,
                     requires_gpu=True
@@ -1407,7 +1402,7 @@ if __name__ == "__main__":
                     "--data_factor", "1",
                     "--steps_scaler", str(steps_scaler),
                     "--disable_viewer",
-                    #"--packed",
+                    #"--packed", # currently a bug with this parameter
                     "--eval_steps", str(int(config['MAX_STEPS'])),
                     "--data-dir", config['DATASET_PATH']
                 ]
@@ -1549,16 +1544,17 @@ if __name__ == "__main__":
                         requires_gpu=True
                     )
                 elif config['MODEL'] == "splatfacto-w-light": 
+                    # Use Python wrapper to load gsplat==1.4.0 for splatfacto-w-light export
                     args = [
                         "--load_config", model_config_path,
                         "--output_dir", output_path,
-                        "--camera_idx", "0" #str(math.ceil(float(config['MAX_NUM_IMAGES'])/2))
+                        "--camera_idx", "0"
                     ]
                     pipeline.create_component(
                         name="Nerfstudio-Export",
                         comp_type=ComponentType.TRAINING,
                         comp_environ=ComponentEnvironment.PYTHON,
-                        command="splatfacto-w/export_script.py",
+                        command="training/run_splatfacto_w_export.py",
                         args=args,
                         cwd=current_dir_path,
                         requires_gpu=True
@@ -1623,7 +1619,7 @@ if __name__ == "__main__":
         # Nerfstudio models (non-multi-GPU)
         if ENABLE_MULTI_GPU == "false":
             if config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
-                config['MODEL'] == "splatfacto-mcmc" or config['MODEL'] == "splatfacto-w-light" or config['MODEL'] == "nerfacto":
+                config['MODEL'] == "splatfacto-mcmc" or config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto-w-light":
                 if config['RUN_RECON'] == "false":
                     # Resume training - use config from dataset directory for splatfacto models
                     if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
@@ -1641,11 +1637,18 @@ if __name__ == "__main__":
                     "--load-config", config_path,
                     "--output-path", EVAL_METRIC_PATH
                 ]
+                # Use wrapper for splatfacto-w-light
+                if config['MODEL'] == "splatfacto-w-light":
+                    command = "/opt/ml/code/training/run_splatfacto_w_eval.py"
+                    comp_environ = ComponentEnvironment.EXECUTABLE
+                else:
+                    command = "ns-eval"
+                    comp_environ = ComponentEnvironment.EXECUTABLE
                 pipeline.create_component(
                     name="Nerfstudio-Metrics",
                     comp_type=ComponentType.TRAINING,
-                    comp_environ=ComponentEnvironment.EXECUTABLE,
-                    command="ns-eval",
+                    comp_environ=comp_environ,
+                    command=command,
                     args=args,
                     cwd=current_dir_path,
                     requires_gpu=False
@@ -1698,11 +1701,16 @@ if __name__ == "__main__":
                     "--output-path", os.path.join(output_path, "render.mp4"),
                     "--frame-rate", "10"
                 ]
+                # Use wrapper for splatfacto-w-light
+                if config['MODEL'] == "splatfacto-w-light":
+                    command = "/opt/ml/code/training/run_splatfacto_w_render.py"
+                else:
+                    command = "ns-render"
                 pipeline.create_component(
                     name="Ply-to-Video",
                     comp_type=ComponentType.POST_PROCESSING,
                     comp_environ=ComponentEnvironment.EXECUTABLE,
-                    command="ns-render",
+                    command=command,
                     args=args,
                     cwd=current_dir_path,
                     requires_gpu=False
@@ -2475,12 +2483,15 @@ if __name__ == "__main__":
                         raise RuntimeError(f"Dataset disappeared: {config['DATASET_PATH']}")
                     log.info(f"Dataset contents before training: {os.listdir(config['DATASET_PATH'])}")
                     # Set the image cache to disk if there are a lot of images to prevent OOM
-                    if str(config['MODEL']) != "nerfacto" and str(config['MODEL']) != "3dgrt" and str(config['MODEL']) != "3dgut":
+                    if config['MODEL'] != "nerfacto" and config['MODEL'] != "3dgrt" and config['MODEL'] != "3dgut":
                         num_images = len(os.listdir(image_path))
                         if num_images > GPU_MAX_IMAGES:
                             index = component.args.index("colmap")
                             if index != -1:
-                                component.args.insert(index, "disk")
+                                if config['MODEL'] != "splatfacto-w-light":
+                                    component.args.insert(index, "disk")
+                                else:
+                                    component.args.insert(index, "cpu")
                                 component.args.insert(index, "--pipeline.datamanager.cache-images")
                     if ENABLE_MULTI_GPU == "false":
                         if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
@@ -2501,47 +2512,6 @@ if __name__ == "__main__":
                         else: # 3dgrut
                             if has_alpha_channel(os.path.join(image_path, os.listdir(image_path)[0])):
                                 process_images(image_path)
-                    elif ENABLE_MULTI_GPU == "true":
-                        '''
-                        # Special handling for gsplat multi-GPU training - copy data to SageMaker location
-                        # Extract dataset path from args
-                        dataset_path = None
-                        for j, arg in enumerate(component.args):
-                            if arg == "--data-dir" and j + 1 < len(component.args):
-                                dataset_path = component.args[j + 1]
-                                break
-                        if dataset_path:
-                            sagemaker_data_path = '/opt/ml/input/data/train'
-                            os.makedirs(sagemaker_data_path, exist_ok=True)
-                            
-                            # Copy required data to SageMaker expected location
-                            # Note: gsplat expects data-dir to contain sparse/0, images, and transforms.json
-                            for item in ['images', 'transforms.json']:
-                                src_path = os.path.join(dataset_path, item)
-                                dst_path = os.path.join(sagemaker_data_path, item)
-                                
-                                if os.path.exists(src_path) and not os.path.exists(dst_path):
-                                    if os.path.isdir(src_path):
-                                        shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
-                                        log.info(f"Copied directory {src_path} to {dst_path}")
-                                    else:
-                                        shutil.copy2(src_path, dst_path)
-                                        log.info(f"Copied file {src_path} to {dst_path}")
-                            
-                            # Copy sparse/0 directory directly (colmap/sparse/0 -> sparse/0)
-                            src_sparse = os.path.join(dataset_path, 'colmap', 'sparse', '0')
-                            dst_sparse = os.path.join(sagemaker_data_path, 'sparse', '0')
-                            if os.path.exists(src_sparse) and not os.path.exists(dst_sparse):
-                                os.makedirs(os.path.dirname(dst_sparse), exist_ok=True)
-                                shutil.copytree(src_sparse, dst_sparse, dirs_exist_ok=True)
-                                log.info(f"Copied sparse/0 directory from {src_sparse} to {dst_sparse}")
-                            
-                            # Update the data-dir argument to point to SageMaker location
-                            for j, arg in enumerate(component.args):
-                                if arg == "--data-dir":
-                                    component.args[j + 1] = sagemaker_data_path
-                                    break
-                        '''
                     try:
                         # Clean up CUDA memory before training
                         cleanup_cuda_memory()
