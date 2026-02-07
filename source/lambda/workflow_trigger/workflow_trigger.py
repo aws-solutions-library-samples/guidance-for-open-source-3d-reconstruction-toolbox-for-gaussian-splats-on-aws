@@ -50,9 +50,7 @@ def validate_config(config: dict):
         "videoProcessing": {
             "maxNumImages": None,
             "videoStartTime": None,
-            "videoStopTime": None
-        },
-        "imageProcessing": {
+            "videoStopTime": None,
             "filterBlurryImages": None
         },
         "reconstruction": {
@@ -197,11 +195,12 @@ def lambda_handler(event, context):
                     "logVerbosity": str(json_content['logVerbosity']),
                     "s3Input": f"s3://{json_content["s3"]["bucketName"]}/{json_content["s3"]["inputPrefix"]}/{json_content["s3"]["inputKey"]}",
                     "s3Output": f"s3://{json_content["s3"]["bucketName"]}/{json_content["s3"]["outputPrefix"]}",
-                    "filename": str(json_content.get("filename", json_content["s3"]["inputKey"])),
+                    "filename": str(json_content.get("originalMediaFilename", json_content.get("filename", json_content["s3"]["inputKey"]))),
+                    "originalMediaFilename": str(json_content.get("originalMediaFilename", json_content.get("filename", json_content["s3"]["inputKey"]))),
                     "maxNumImages": str(json_content["videoProcessing"]["maxNumImages"]),
                     "videoStartTime": str(json_content["videoProcessing"]["videoStartTime"]),
                     "videoStopTime": str(json_content["videoProcessing"]["videoStopTime"]),
-                    "filterBlurryImages": str(json_content["imageProcessing"]["filterBlurryImages"]),
+                    "filterBlurryImages": str(json_content["videoProcessing"]["filterBlurryImages"]),
                     "runRecon": str(json_content["reconstruction"]["enable"]),
                     "reconSoftwareName": str(json_content["reconstruction"]["softwareName"]),
                     "usePosePriorColmapModelFiles": str(json_content["reconstruction"]["posePriors"]["usePosePriorColmapModelFiles"]),
@@ -229,7 +228,8 @@ def lambda_handler(event, context):
                     "maskThreshold": str(json_content["segmentation"]["backgroundRemoval"]["maskThreshold"]),
                     "removeObject": str(json_content["segmentation"]["objectRemoval"]["enable"]),
                     "objectRemovalAction": str(json_content["segmentation"]["objectRemoval"]["action"]),
-                    "objectRemovalObjects": str(json_content["segmentation"]["objectRemoval"]["objects"])
+                    "objectRemovalObjects": str(json_content["segmentation"]["objectRemoval"]["objects"]),
+                    "preserveSceneScale": str(json_content.get("preserveSceneScale", "false"))
                 }
 
                 try:
@@ -276,7 +276,7 @@ def lambda_handler(event, context):
                     "MAX_NUM_IMAGES": str(json_content["videoProcessing"]["maxNumImages"]),
                     "VIDEO_START_TIME": str(json_content["videoProcessing"]["videoStartTime"]),
                     "VIDEO_STOP_TIME": str(json_content["videoProcessing"]["videoStopTime"]),
-                    "FILTER_BLURRY_IMAGES": str(json_content["imageProcessing"]["filterBlurryImages"]),
+                    "FILTER_BLURRY_IMAGES": str(json_content["videoProcessing"]["filterBlurryImages"]),
                     "RUN_RECON": str(json_content["reconstruction"]["enable"]),
                     "RECON_SOFTWARE_NAME": str(json_content["reconstruction"]["softwareName"]),
                     "USE_POSE_PRIOR_COLMAP_MODEL_FILES": str(json_content["reconstruction"]["posePriors"]["usePosePriorColmapModelFiles"]),
@@ -304,7 +304,8 @@ def lambda_handler(event, context):
                     "MASK_THRESHOLD": str(json_content["segmentation"]["backgroundRemoval"]["maskThreshold"]),
                     "REMOVE_OBJECT": str(json_content["segmentation"]["objectRemoval"]["enable"]),
                     "OBJECT_REMOVAL_ACTION": str(json_content["segmentation"]["objectRemoval"]["action"]),
-                    "OBJECT_REMOVAL_OBJECTS": str(json_content["segmentation"]["objectRemoval"]["objects"])
+                    "OBJECT_REMOVAL_OBJECTS": str(json_content["segmentation"]["objectRemoval"]["objects"]),
+                    "PRESERVE_SCENE_SCALE": str(json_content.get("preserveSceneScale", "false"))
                 },
                 "sns": {
                     "topicArn": os.environ["SNS_TOPIC_ARN"],

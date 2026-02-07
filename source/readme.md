@@ -1,5 +1,76 @@
 ## Submitting a job through the backend
 
+### Job Schema Structure
+The job metadata JSON file must follow this structure:
+
+```json
+{
+    "uuid": "<unique-job-id>",
+    "instanceType": "ml.g5.4xlarge",
+    "useSpotInstance": "false",
+    "logVerbosity": "info",
+    "originalMediaFilename": "<optional-original-filename>",
+    "s3": {
+        "bucketName": "<bucket-name>",
+        "inputPrefix": "media-input",
+        "inputKey": "<media-filename>",
+        "outputPrefix": "workflow-output"
+    },
+    "videoProcessing": {
+        "maxNumImages": "300",
+        "videoStartTime": "0",
+        "videoStopTime": "None",
+        "filterBlurryImages": true
+    },
+    "reconstruction": {
+        "enable": true,
+        "softwareName": "glomap",
+        "posePriors": {
+            "usePosePriorColmapModelFiles": false,
+            "usePosePriorTransformJson": {
+                "enable": false,
+                "sourceCoordinateName": "arkit",
+                "poseIsWorldToCam": true
+            }
+        },
+        "enableEnhancedFeatureExtraction": false,
+        "matchingMethod": "sequential"
+    },
+    "training": {
+        "enable": true,
+        "maxSteps": "15000",
+        "model": "splatfacto"
+    },
+    "postProcessing": {
+        "cropOutputBounds": false,
+        "cropMode": "environment",
+        "enableSpz": true,
+        "enableSog": true,
+        "enableUsdz": true,
+        "plyCoords": "rhyu",
+        "spzCoords": "rhyu",
+        "sogCoords": "rhyu",
+        "usdzCoords": "rhyu"
+    },
+    "sphericalCamera": {
+        "enable": false,
+        "cubeFacesToRemove": []
+    },
+    "segmentation": {
+        "backgroundRemoval": {
+            "enable": false,
+            "model": "u2net",
+            "maskThreshold": "0.6"
+        },
+        "objectRemoval": {
+            "enable": false,
+            "action": "erase",
+            "objects": "['human']"
+        }
+    }
+}
+```
+
 ### Utility to create JSON job file
 The metadata file can be created manually following the structure documented above or created automatically and submitted using `source/generate-splat.py`. Modify the script contents to output a valid metadata file before uploading your media to s3.
 

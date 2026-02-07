@@ -108,9 +108,7 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
             "videoProcessing": selected_job.get('videoProcessing', {
                 "maxNumImages": str(selected_job.get('maxNumImages', shared_state.max_images)),
                 "videoStartTime": selected_job.get('videoStartTime', shared_state.video_start_time),
-                "videoStopTime": selected_job.get('videoStopTime', shared_state.video_stop_time)
-            }),
-            "imageProcessing": selected_job.get('imageProcessing', {
+                "videoStopTime": selected_job.get('videoStopTime', shared_state.video_stop_time),
                 "filterBlurryImages": str(selected_job.get('filterBlurryImages', shared_state.filter_blurry)) == "True"
             }),
             "reconstruction": {
@@ -130,7 +128,8 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
             "training": {
                 "enable": True,
                 "maxSteps": "20000",
-                "model": str(original_model or shared_state.model)
+                "model": str(original_model or shared_state.model),
+                "preserveSceneScale": str(selected_job.get('preserveSceneScale', shared_state.preserve_scene_scale)) == "True"
             },
             "postProcessing": {
                 "cropOutputBounds": crop_bounds == "true" if isinstance(crop_bounds, str) else crop_bounds,

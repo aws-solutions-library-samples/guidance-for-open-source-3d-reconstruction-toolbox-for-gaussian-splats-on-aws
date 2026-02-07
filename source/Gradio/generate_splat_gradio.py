@@ -81,6 +81,7 @@ class SharedState:
         self.crop_mode = "environment"
         self.video_start_time = 0.0
         self.video_stop_time = None
+        self.preserve_scene_scale = "false"
 
 # Create a singleton instance
 shared_state = SharedState()
@@ -296,7 +297,7 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
                 filter_blurry, max_images, sfm_enable, enhanced_feature, matching_method, use_colmap_model,
                 use_transform_json, training_enable, max_steps, spherical_enable, remove_bg, remove_objects,
                 object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam, log_verbosity, mask_threshold, 
-                crop_output_bounds, crop_mode, enable_spz, enable_sog, video_start_time, video_stop_time):
+                crop_output_bounds, crop_mode, enable_spz, enable_sog, video_start_time, video_stop_time, preserve_scene_scale):
     unique_uuid = uuid.uuid4()
     original_filename = os.path.basename(video_file) if video_file else "No file selected"
     
@@ -321,9 +322,7 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
         "videoProcessing": {
             "maxNumImages": str(max_images),
             "videoStartTime": video_start_time if video_start_time is not None else None,
-            "videoStopTime": video_stop_time if video_stop_time is not None else None
-        },
-        "imageProcessing": {
+            "videoStopTime": video_stop_time if video_stop_time is not None else None,
             "filterBlurryImages": filter_blurry == "true"
         },
         "reconstruction": {
@@ -343,7 +342,8 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
         "training": {
             "enable": training_enable == "true",
             "maxSteps": str(max_steps),
-            "model": training_model
+            "model": training_model,
+            "preserveSceneScale": preserve_scene_scale == "true"
         },
         "postProcessing": {
             "cropOutputBounds": crop_output_bounds == "true" if isinstance(crop_output_bounds, str) else crop_output_bounds,
@@ -443,8 +443,6 @@ def generate_splat(s3_bucket_name, s3_input_prefix, s3_output_prefix, file_obj,
             },
             "videoProcessing": {
                 "maxNumImages": str(max_images),
-            },
-            "imageProcessing": {
                 "filterBlurryImages": filter_blurry == "true"
             },
             "reconstruction": {
@@ -464,7 +462,8 @@ def generate_splat(s3_bucket_name, s3_input_prefix, s3_output_prefix, file_obj,
             "training": {
                 "enable": training_enable == "true",
                 "maxSteps": str(max_steps),
-                "model": training_model
+                "model": training_model,
+                "preserveSceneScale": shared_state.preserve_scene_scale == "true"
             },
             "postProcessing": {
                 "cropOutputBounds": shared_state.crop_output_bounds == "true",
@@ -593,9 +592,7 @@ def create_upload_aws_tab():
                             "videoProcessing": {
                                 "maxNumImages": str(shared_state.max_images),
                                 "videoStartTime": shared_state.video_start_time if shared_state.video_start_time is not None else None,
-                                "videoStopTime": shared_state.video_stop_time if shared_state.video_stop_time is not None else None
-                            },
-                            "imageProcessing": {
+                                "videoStopTime": shared_state.video_stop_time if shared_state.video_stop_time is not None else None,
                                 "filterBlurryImages": shared_state.filter_blurry == "true"
                             },
                             "reconstruction": {
@@ -615,7 +612,8 @@ def create_upload_aws_tab():
                             "training": {
                                 "enable": shared_state.training_enable == "true",
                                 "maxSteps": str(shared_state.max_steps),
-                                "model": shared_state.model
+                                "model": shared_state.model,
+                                "preserveSceneScale": shared_state.preserve_scene_scale == "true"
                             },
                             "postProcessing": {
                                 "cropOutputBounds": shared_state.crop_output_bounds == "true",
@@ -770,6 +768,11 @@ def create_advanced_settings_tab():
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### Video Processing")
+                filter_blurry = gr.Radio(
+                label="Filter Blurry Images",
+                choices=["true", "false"],
+                value="true"
+                )
                 max_images = gr.Number(
                 label="Max Images",
                 value=300,
@@ -787,14 +790,6 @@ def create_advanced_settings_tab():
                     value=None,
                     minimum=0.0,
                     info="End time in seconds (leave zero/blank for full video)"
-                )
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("### Image Processing")
-                filter_blurry = gr.Radio(
-                label="Filter Blurry Images",
-                choices=["true", "false"],
-                value="true"
                 )
         with gr.Row():
             with gr.Column():
@@ -927,6 +922,11 @@ def create_advanced_settings_tab():
                     ],
                     value="splatfacto"
                 )
+                preserve_scene_scale = gr.Radio(
+                    label="Preserve Scene Scale",
+                    choices=["true", "false"],
+                    value="false"
+                )
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### Post Processing")
@@ -1008,7 +1008,7 @@ def create_advanced_settings_tab():
                      shared_state.spherical_enable,
                      shared_state.remove_bg, shared_state.remove_objects,
                      shared_state.object_removal_action, shared_state.objects_to_remove, shared_state.source_coordinate, shared_state.pose_world_to_cam,
-                     shared_state.log_verbosity, shared_state.mask_threshold, shared_state.ply_coords, shared_state.spz_coords, shared_state.sog_coords, shared_state.usdz_coords) = args
+                     shared_state.log_verbosity, shared_state.mask_threshold, shared_state.ply_coords, shared_state.spz_coords, shared_state.sog_coords, shared_state.usdz_coords, shared_state.preserve_scene_scale) = args
                     return "Advanced settings updated"
 
                 # Get all advanced settings components after they're defined
@@ -1020,7 +1020,7 @@ def create_advanced_settings_tab():
                     crop_output_bounds, crop_mode,
                     spherical_enable, remove_bg, remove_objects,
                     object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam,
-                    log_verbosity, mask_threshold, ply_coords, spz_coords, sog_coords, usdz_coords
+                    log_verbosity, mask_threshold, ply_coords, spz_coords, sog_coords, usdz_coords, preserve_scene_scale
                 ]
                 
                 def save_configuration(config_name, *settings):
@@ -1060,7 +1060,8 @@ def create_advanced_settings_tab():
                         'ply_coords': settings[29],
                         'spz_coords': settings[30],
                         'sog_coords': settings[31],
-                        'usdz_coords': settings[32]
+                        'usdz_coords': settings[32],
+                        'preserve_scene_scale': settings[33]
                     }
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -1077,7 +1078,7 @@ def create_advanced_settings_tab():
                 
                 def load_configuration(config_name):
                     if not config_name:
-                        return ["Please select a configuration"] + [gr.update() for _ in range(30)]
+                        return ["Please select a configuration"] + [gr.update() for _ in range(34)]
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
                     config_file = os.path.join(configs_dir, f"{config_name}.json")
@@ -1120,6 +1121,7 @@ def create_advanced_settings_tab():
                         shared_state.spz_coords = config_data.get('spz_coords', 'rhyu')
                         shared_state.sog_coords = config_data.get('sog_coords', 'rhyu')
                         shared_state.usdz_coords = config_data.get('usdz_coords', 'rhyu')
+                        shared_state.preserve_scene_scale = config_data.get('preserve_scene_scale', 'false')
                         
                         return [
                             f"Configuration '{config_name}' loaded successfully",
@@ -1155,7 +1157,8 @@ def create_advanced_settings_tab():
                             config_data.get('ply_coords', 'rhyu'),
                             config_data.get('spz_coords', 'rhyu'),
                             config_data.get('sog_coords', 'rhyu'),
-                            config_data.get('usdz_coords', 'rhyu')
+                            config_data.get('usdz_coords', 'rhyu'),
+                            config_data.get('preserve_scene_scale', 'false')
                         ]
                     except Exception as e:
                         return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(34)]
@@ -2468,31 +2471,36 @@ def get_job_progress_data():
                     print(f"Error calculating elapsed time for {job_id}: {e}")
                     elapsed_time = "N/A"
             else:
-                # Use stored elapsed time for completed jobs
-                elapsed_str = str(item.get('elapsedTimestamp', '0:00:00'))
+                # Use elapsedTimestamp for completed jobs
                 try:
+                    elapsed_str = str(item.get('elapsedTimestamp', '0:00:00'))
+                    total_seconds = 0
                     if ':' in elapsed_str:
-                        # Handle format like "1 day, 9:46:28" or "3 days, 9:46:28" or "0:46:28"
                         if 'day' in elapsed_str:
-                            # Parse "X day(s), H:MM:SS" format
                             days_part, time_part = elapsed_str.split(', ')
                             days = int(days_part.split()[0])
                             time_parts = time_part.split(':')
                             hours = int(time_parts[0]) + (days * 24)
                             minutes = int(time_parts[1])
+                            seconds = float(time_parts[2].split('.')[0])
                         else:
-                            # Parse "H:MM:SS" format
                             time_parts = elapsed_str.split(':')
                             if len(time_parts) >= 3:
                                 hours = int(time_parts[0])
                                 minutes = int(time_parts[1])
+                                seconds = float(time_parts[2].split('.')[0])
                             else:
-                                hours = minutes = 0
+                                hours = minutes = seconds = 0
+                        total_seconds = hours * 3600 + minutes * 60 + seconds
+                    
+                    if total_seconds > 0:
+                        hours = int(total_seconds // 3600)
+                        minutes = int((total_seconds % 3600) // 60)
                         elapsed_time = f"{hours}h {minutes}m"
                     else:
                         elapsed_time = "N/A"
                 except Exception as e:
-                    print(f"Error parsing elapsed time '{elapsed_str}' for job {job_id}: {e}")
+                    print(f"Error calculating elapsed time for job {job_id}: {e}")
                     elapsed_time = "N/A"
             
             # Extract evaluation metrics
@@ -2591,7 +2599,7 @@ def calculate_job_costs(files_data):
                                     seconds = float(time_parts[2].split('.')[0])
                                 else:
                                     hours = minutes = seconds = 0
-                            total_seconds = hours * 3600 + minutes + seconds
+                            total_seconds = hours * 3600 + minutes * 60 + seconds
                     except Exception as e:
                         print(f"Error parsing elapsed time '{elapsed_str}' for cost calculation: {e}")
                         total_seconds = 0
@@ -2875,7 +2883,8 @@ def create_debug_tab():
                         shared_state.enable_spz,
                         shared_state.enable_sog,
                         shared_state.video_start_time,
-                        shared_state.video_stop_time
+                        shared_state.video_stop_time,
+                        shared_state.preserve_scene_scale
                     )
 
         # Wire up the event handlers
@@ -3007,6 +3016,14 @@ def create_combined_monitor_viewer_tab():
                 with gr.Row():
                     gr.Markdown("### 📁 Job Output Files")
                     files_close_btn = gr.Button("✕ Close", size="sm", elem_classes=["close-button"])
+                
+                # Add thumbnail display
+                job_thumbnail = gr.Image(
+                    label="Job Thumbnail",
+                    show_label=False,
+                    height=200,
+                    interactive=False
+                )
                 
                 gr.Markdown("Click on a file to open it in the viewer.")
                 
@@ -3210,10 +3227,18 @@ def create_combined_monitor_viewer_tab():
                     # Check if all phases are complete (accounting for skipped phases)
                     if recon_disabled:
                         all_complete = all(elapsed is not None for i, (_, elapsed) in enumerate(phase_list) if i != 1)
-                        total_time = sum(float(elapsed) for i, (_, elapsed) in enumerate(phase_list) if elapsed is not None and i != 1)
+                        # Use componentGroupElapsedTime if available, otherwise sum individual phases
+                        if 'componentGroupElapsedTime' in item:
+                            total_time = sum(float(t) for i, t in enumerate(item['componentGroupElapsedTime']) if i != 1)
+                        else:
+                            total_time = sum(float(elapsed) for i, (_, elapsed) in enumerate(phase_list) if elapsed is not None and i != 1)
                     else:
                         all_complete = all(elapsed is not None for _, elapsed in phase_list)
-                        total_time = sum(float(elapsed) for _, elapsed in phase_list if elapsed is not None)
+                        # Use componentGroupElapsedTime if available, otherwise sum individual phases
+                        if 'componentGroupElapsedTime' in item:
+                            total_time = sum(float(t) for t in item['componentGroupElapsedTime'])
+                        else:
+                            total_time = sum(float(elapsed) for _, elapsed in phase_list if elapsed is not None)
                     
                     # For older jobs without phase times, check if job is complete
                     if not any_phase_started and job_status in ['complete', 'completed']:
@@ -3390,16 +3415,16 @@ def create_combined_monitor_viewer_tab():
                 try:
                     if hasattr(data, 'empty'):
                         if data.empty:
-                            return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", ""
+                            return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None
                         data_list = data.values.tolist()
                     else:
                         if not data or len(data) == 0:
-                            return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", ""
+                            return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None
                         data_list = data
                     
                     row_idx = evt.index[0]
                     if row_idx >= len(data_list):
-                        return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", ""
+                        return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None
                     
                     selected_row = data_list[row_idx]
                     job_id = selected_row[0]
@@ -3438,6 +3463,12 @@ def create_combined_monitor_viewer_tab():
                     phase_html = get_phase_progress_html(job_id)
                     metadata_html = get_job_metadata(job_id)
                     
+                    # Generate thumbnail URL
+                    bucket_name = shared_state.s3_bucket
+                    output_prefix = shared_state.s3_output or "workflow-output"
+                    thumbnail_key = f"{output_prefix}/{job_id}/render_thumbnail.png"
+                    thumbnail_url = generate_presigned_url(bucket_name, thumbnail_key)
+                    
                     print(f"Phase HTML length: {len(phase_html)}, Metadata HTML length: {len(metadata_html)}")
                     
                     # Open files modal if there are files
@@ -3450,7 +3481,8 @@ def create_combined_monitor_viewer_tab():
                             gr.update(interactive=enable_refine),
                             gr.update(interactive=enable_cancel),
                             phase_html,
-                            metadata_html
+                            metadata_html,
+                            thumbnail_url
                         )
                     else:
                         return (
@@ -3461,18 +3493,19 @@ def create_combined_monitor_viewer_tab():
                             gr.update(interactive=enable_refine),
                             gr.update(interactive=enable_cancel),
                             phase_html,
-                            metadata_html
+                            metadata_html,
+                            None
                         )
                 except Exception as e:
                     print(f"Error in job selection: {e}")
                     import traceback
                     traceback.print_exc()
-                    return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", ""
+                    return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None
             
             jobs_table.select(
                 fn=on_job_select_combined,
                 inputs=[jobs_table],
-                outputs=[selected_job_data, files_modal_html, files_modal, files_table, refine_job_btn, cancel_job_btn, phase_progress_display, job_config_display]
+                outputs=[selected_job_data, files_modal_html, files_modal, files_table, refine_job_btn, cancel_job_btn, phase_progress_display, job_config_display, job_thumbnail]
             )
             
             # Cancel job handlers

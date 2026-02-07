@@ -51,7 +51,6 @@ ERROR CODES
 710, "Improper file type given for prior pose transformations. Only '.zip' is supported."
 715, "Issue transforming pose to colmap component"
 720, "Issue creating video to images component"
-725, "Issue creating remove blurry images component"
 730, "Issue creating background removal component"
 735, "Issue creating spherical image component"
 740, "Issue creating human subject removal component"
@@ -139,12 +138,7 @@ if __name__ == "__main__":
 
         # Check if video or zip of images given
         VIDEO = validate_input_media(config['FILENAME'])
-        import subprocess
-        cmd_args = ['ns-train', '-h']
-        subprocess.run(
-                cmd_args,
-                check=True
-            )
+
         if IS_BATCH:
             # AWS Batch environment setup
             os.environ['SM_MODEL_DIR'] = '/tmp/model'
@@ -603,6 +597,7 @@ if __name__ == "__main__":
     ##################################
     if int(pipeline.config.num_gpus) > 1:
         ENABLE_MULTI_GPU = "true"
+        os.environ['MAX_JOBS'] = '4'
         # Read SageMaker resource config for multi-container setup
         resource_config_path = '/opt/ml/input/config/resourceconfig.json'
         if os.path.exists(resource_config_path):
@@ -723,103 +718,86 @@ if __name__ == "__main__":
         elif VIDEO is False and config['BACKGROUND_REMOVAL_MODEL'] == "sam2" and config['REMOVE_BACKGROUND']=="true" and \
             config['RUN_RECON'] == 'true':
             sys.exit("Error: SAM2 Background removal is only supported for video input")
-        else: # Just extract the frames, remove background later
-            num_imgs = int(config['MAX_NUM_IMAGES'])
-            if config['FILTER_BLURRY_IMAGES'] == "true":
-                num_imgs = int(num_imgs*1.1)
-            args = [
-                "-i", input_file_path,
-                "-o", image_path,
-                "-n", str(num_imgs),
-                "-nw", str(pipeline.config.num_threads),
-                "-ll", config['LOG_VERBOSITY'].upper(),
-                "-st", config['VIDEO_START_TIME']
-            ]
-            
-            # Only add end time if it's not None/none/empty/negative
-            video_stop_time = str(config['VIDEO_STOP_TIME']).strip() if config['VIDEO_STOP_TIME'] is not None else ""
-            
-            if video_stop_time and video_stop_time.lower() not in ['none', 'null', '', 'nan', '-1']:
-                try:
-                    # Check if it's a valid positive number
-                    if float(video_stop_time) > 0:
-                        log.info(f"DEBUG: Adding -et parameter with value: '{video_stop_time}'")
-                        args.extend(["-et", video_stop_time])
-                except ValueError:
-                    pass  # Skip if not a valid number
-            
-            pipeline.create_component(
-                name="VideoToImages",
-                comp_type=ComponentType.PRE_PROCESSING,
-                comp_environ=ComponentEnvironment.PYTHON,
-                command="pre_processing/simple_video_to_images.py",
-                args=args,
-                cwd=current_dir_path,
-                requires_gpu=False
-            )
+        else:
+            # Use sharp-frame-extractor if blur filtering is enabled, otherwise use simple extraction
+            if config['FILTER_BLURRY_IMAGES'] == "true" and config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'false' and \
+               config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'false':
+                # Add 8% to max images to compensate for blur filtering reduction
+                adjusted_max_images = str(int(int(config['MAX_NUM_IMAGES']) * 1.08))
+                args = [
+                    "-i", input_file_path,
+                    "-o", image_path,
+                    "-n", adjusted_max_images,
+                    "-ll", config['LOG_VERBOSITY'].upper()
+                ]
+                pipeline.create_component(
+                    name="VideoToImages",
+                    comp_type=ComponentType.PRE_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="pre_processing/video/sharp_video_to_images.py",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
+            elif config['FILTER_BLURRY_IMAGES'] == "false" and config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'false' and \
+               config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'false'and config['RUN_RECON'] == 'true':
+                # Standard extraction without blur filtering
+                num_imgs = int(config['MAX_NUM_IMAGES'])
+                args = [
+                    "-i", input_file_path,
+                    "-o", image_path,
+                    "-n", str(num_imgs),
+                    "-nw", str(pipeline.config.num_threads),
+                    "-ll", config['LOG_VERBOSITY'].upper(),
+                    "-st", config['VIDEO_START_TIME']
+                ]
+                
+                video_stop_time = str(config['VIDEO_STOP_TIME']).strip() if config['VIDEO_STOP_TIME'] is not None else ""
+                if video_stop_time and video_stop_time.lower() not in ['none', 'null', '', 'nan', '-1']:
+                    try:
+                        if float(video_stop_time) > 0:
+                            args.extend(["-et", video_stop_time])
+                    except ValueError:
+                        pass
+                
+                pipeline.create_component(
+                    name="VideoToImages",
+                    comp_type=ComponentType.PRE_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="pre_processing/video/simple_video_to_images.py",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
     except Exception as e:
         error_message = f"Issue creating video to images component: {e}"
         pipeline.report_error(720, error_message)
 
     ##################################
     # PRE-PROCESS COMPONENT:
-    # Remove Blurry Images
+    # Rotate Portrait Images
     ##################################
     try:
-        # REMOVE BLURRY IMAGES COMPONENT
-        # Skip blur filtering when using pose priors to maintain correspondence
-        if config['FILTER_BLURRY_IMAGES'] == "true" and config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'false' and \
-           config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'false' and config['RUN_RECON'] == 'true':
-            # For zip archives, count images and use a percentage-based approach
-            if VIDEO is False and input_filename_extension.lower() == ".zip":
-                # Count the number of images in the directory
-                image_extensions = ('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')
-                image_files = [f for f in os.listdir(image_path) 
-                              if os.path.isfile(os.path.join(image_path, f)) 
-                              and any(f.lower().endswith(ext) for ext in image_extensions)]
-                total_images = len(image_files)
-
-                # If we have images, set num_frames_target to 90% of total (adjust as needed)
-                num_to_keep = int(config['MAX_NUM_IMAGES'])
-                if total_images > 0:
-                    num_to_keep = max(int(config['MAX_NUM_IMAGES']), int(total_images * 0.9))
-                    log.info(f"Filtering blurry images from zip archive: keeping {num_to_keep} out of {total_images} images")
-                else:
-                    log.warning(f"No images found in {image_path}, using default target of {num_to_keep}")
-
-                args = [
-                    "-I", image_path,
-                    "-r", "30",
-                    "-n", str(num_to_keep),
-                    "-O", image_path
-                ]
-            else:
-                # For videos, use the MAX_NUM_IMAGES parameter as before
-                args = [
-                    "-I", image_path,
-                    "-r", "30",
-                    "-n", str(config['MAX_NUM_IMAGES']),
-                    "-O", image_path,
-                    "--log-level", config['LOG_VERBOSITY'].upper()
-                ]
-
-            if config['LOG_VERBOSITY'] == "debug":
-                args.extend(["-v"])
-                
+        if config['RUN_RECON'] == 'true' and (config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'false' and \
+           config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'false'):
+            log.info(f"Creating RotatePortraitImages component for image_path: {image_path}")
+            args = [
+                "-i", image_path,
+                "-d", config['DATASET_PATH']
+            ]
             pipeline.create_component(
-                name="RemoveBlurryImages",
+                name="RotatePortraitImages",
                 comp_type=ComponentType.PRE_PROCESSING,
                 comp_environ=ComponentEnvironment.PYTHON,
-                command="pre_processing/filter_blurry_images.py",
+                command="pre_processing/video/rotate_portrait_images.py",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
             )
-        elif config['FILTER_BLURRY_IMAGES'] == "true":
-            log.info("Skipping blur filtering because pose priors are enabled - must maintain image correspondence or resuming training")
+            log.info("RotatePortraitImages component created successfully")
     except Exception as e:
-        error_message = f"Issue creating remove blurry images component: {e}"
-        pipeline.report_error(725, error_message)
+        error_message = f"Issue creating rotate portrait images component: {e}"
+        pipeline.report_error(721, error_message)
 
     ##################################
     # PRE-PROCESS COMPONENT:
@@ -1108,8 +1086,6 @@ if __name__ == "__main__":
                         args.extend([
                             "--log_level", "1"
                         ])
-                    if int(pipeline.config.num_gpus) > 0:
-                        args.extend(['--use_gpu', '1'])
                     pipeline.create_component(
                         name="ColmapSfM-Triangulator",
                         comp_type=ComponentType.RECONSTRUCTION,
@@ -1125,8 +1101,6 @@ if __name__ == "__main__":
                         '--output_path', sparse_model_path,
                         '--BundleAdjustment.refine_principal_point', '0'
                     ]
-                    if int(pipeline.config.num_gpus) > 0:
-                        args.extend(['--use_gpu', '1'])
                     pipeline.create_component(
                         name="ColmapSfM-Ba",
                         comp_type=ComponentType.RECONSTRUCTION,
@@ -1224,7 +1198,9 @@ if __name__ == "__main__":
                         )
             elif config['RECON_SOFTWARE_NAME'] == "map_anything": #MapAnything
                 args = [
-                    "--scene_dir", config['DATASET_PATH']
+                    "--scene_dir", config['DATASET_PATH'],
+                    "--skip_point2d",
+                    "--voxel_size", "0.01"
                 ]
                 pipeline.create_component(
                     name="Map-Anything",
@@ -1370,11 +1346,12 @@ if __name__ == "__main__":
                 else:
                     command = "ns-train"
 
+                auto_scale_value = "True" if config.get('PRESERVE_SCENE_SCALE', 'false') == 'false' else "False"
                 args.extend([
                     data_model,
                     "--data", config['DATASET_PATH'],
                     "--downscale-factor", "1",
-                    "--auto-scale-poses", "False"
+                    "--auto-scale-poses", auto_scale_value
                 ])
                 pipeline.create_component(
                     name="Train",
@@ -1924,10 +1901,14 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['MODEL'] != "nerfacto":
+            # Check if video was portrait
+            orientation_file = os.path.join(config['DATASET_PATH'], '.video_orientation')
+            is_portrait = os.path.exists(orientation_file)
+            
             if config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
-                rotation = '180,0,0'
+                rotation = '180,0,0' if not is_portrait else '180,0,90'
             else:
-                rotation = '270,0,0'
+                rotation = '270,0,0' if not is_portrait else '270,0,90'
             args = [
                 orig_ply_path,
                 orig_ply_path, 
@@ -2008,7 +1989,11 @@ if __name__ == "__main__":
     try:
         if config['ENABLE_SOG'] == "true" and config['MODEL'] != "nerfacto" and \
             config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
-                rotation = '90,0,0'
+                # Check if video was portrait
+                orientation_file = os.path.join(config['DATASET_PATH'], '.video_orientation')
+                is_portrait = os.path.exists(orientation_file)
+                
+                rotation = '90,0,0' if not is_portrait else '90,0,90'
                 args = [
                     sog_ply_path,
                     sog_ply_path,
@@ -2185,10 +2170,14 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
+            # Check if video was portrait
+            orientation_file = os.path.join(config['DATASET_PATH'], '.video_orientation')
+            is_portrait = os.path.exists(orientation_file)
+            
             if config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
-                rotation = '0,-180,0'
+                rotation = '0,-180,0' if not is_portrait else '0,-180,90'
             else:
-                rotation = '90,-180,0'
+                rotation = '90,-180,0' if not is_portrait else '90,-180,90'
             args = [
                 spz_ply_path,
                 spz_ply_path,
@@ -2433,12 +2422,6 @@ if __name__ == "__main__":
                                         log.info(f"Updated video input path to: {new_video_path}")
                                         break
                                 pipeline.run_component(i)
-                case "Map-Anything":
-                    #if int(num_imgs) <= int(MAP_ANYTHING_MAX_IMAGES):
-                    component.args.extend([
-                        "--memory_efficient_inference"
-                    ])
-                    pipeline.run_component(i)
                 case "RemoveHumanSubjectMask":
                     # REMOVE HUMAN SUBJECT CONDITIONAL COMPONENT
                     # Run Component
@@ -2483,11 +2466,11 @@ if __name__ == "__main__":
                         raise RuntimeError(f"Dataset disappeared: {config['DATASET_PATH']}")
                     log.info(f"Dataset contents before training: {os.listdir(config['DATASET_PATH'])}")
                     # Set the image cache to disk if there are a lot of images to prevent OOM
-                    if config['MODEL'] != "nerfacto" and config['MODEL'] != "3dgrt" and config['MODEL'] != "3dgut":
+                    if config['MODEL'] != "nerfacto" and config['MODEL'] != "3dgrt" and config['MODEL'] != "3dgut" and ENABLE_MULTI_GPU == "false":
                         num_images = len(os.listdir(image_path))
                         if num_images > GPU_MAX_IMAGES:
-                            index = component.args.index("colmap")
-                            if index != -1:
+                            if "colmap" in component.args:
+                                index = component.args.index("colmap")
                                 if config['MODEL'] != "splatfacto-w-light":
                                     component.args.insert(index, "disk")
                                 else:

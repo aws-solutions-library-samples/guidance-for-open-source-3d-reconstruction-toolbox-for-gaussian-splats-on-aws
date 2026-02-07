@@ -55,6 +55,11 @@ Optional Arguments:
 
 import os
 import sys
+
+# Disable xformers before importing any diffusers/torch modules
+os.environ['XFORMERS_DISABLED'] = '1'
+os.environ['XFORMERS_MORE_DETAILS'] = '0'
+
 import torch
 import argparse
 import logging

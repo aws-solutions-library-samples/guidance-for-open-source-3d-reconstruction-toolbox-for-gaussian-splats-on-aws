@@ -39,5 +39,6 @@
     "SOG_COORDS": "rhyu",
     "ENABLE_USDZ": "true",
     "USDZ_COORDS": "rhyu",
-    "ENABLE_VIDEO_EXPORT": "True"
+    "ENABLE_VIDEO_EXPORT": "True",
+    "PRESERVE_SCENE_SCALE": "false"
 }

@@ -37,21 +37,24 @@ ENV NODE_VERSION="22"
 ENV EIGEN_VERSION="3.4"
 ENV COLMAP_VERSION="3.13.0"
 ENV GLOMAP_VERSION="1.2.0"
-ENV SPLAT_TRANSFORM_VERSION="0.16.0"
+ENV SPLAT_TRANSFORM_VERSION="0.17.1"
+ENV MAPANYTHING_VERSION="1.1"
+ENV SPZ_VERSION="2.1.0"
 
 # Fixed versions
 ENV CERES_HASH="0c70ed3a1a2d6ba47c06c7e8b3b040880bc474db"
 ENV NERFSTUDIO_HASH="50e0e3c70c775e89333256213363badbf074f29d"
 ENV GSPLAT_HASH="b60e917c95afc449c5be33a634f1f457e116ff5e"
-ENV THREEDGRUT_HASH="16b7b19bf79e66991280d244f8b6300a32d7fff4"
-ENV BGREMOVER_HASH="a894cb3fb2588ff2018814ce826e38c586b47950"
+#ENV GSPLAT_HASH="6f378361f32ba4f1be86f65ae0db4948efb37dd5"
+ENV THREEDGRUT_HASH="d78f773b72851395383b43e1b5cbe355a7c68d1f"
+ENV BGREMOVER_HASH="d88ef74457f0c2f1e0eab5b391ce8851b95e8d65"
 ENV SAM2_HASH="2b90b9f5ceec907a1c18123530e92e794ad901a4"
-ENV MAPANYTHING_HASH="ece461117701c786187f09da1bcf152de5c76f5d"
 
 # Only build for supported GPU architectures
 # G4dn=7.5, P4d=8.0, g5=8.6, g6/g6e=8.9
 ENV TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9"
 ENV TCNN_CUDA_ARCHITECTURES=75;80;86;89
+ENV NINJA_JOBS=3
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/lib
 ENV PATH=/usr/local/cuda-${CUDA_VERSION}/bin:${PATH}
 ENV LD_LIBRARY_PATH=/usr/local/cuda-${CUDA_VERSION}/lib64:${LD_LIBRARY_PATH}
@@ -142,6 +145,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     libatlas-base-dev \
     libsuitesparse-dev \
     gcc-10 g++-10 \
+    gfortran \
     libssl-dev \
     libbz2-dev \
     libexpat1-dev \
@@ -158,7 +162,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     && rm -rf /var/lib/apt/lists/*
 
 # Install and upgrade pip and dependencies with retry logic
-RUN pip install --upgrade pip setuptools wheel
+RUN pip install --break-system-packages --upgrade pip setuptools wheel
 
 # Install Python and make it the default
 RUN cd /usr/src \
@@ -184,8 +188,8 @@ WORKDIR ${CODE_PATH}
 # Install typing-extensions first to avoid naming conflict
 RUN pip install typing-extensions>=4.10.0
 
-# Install PyTorch for Cuda
-RUN pip install torch==${TORCH_VERSION} torchvision==${TORCH_VISION_VERSION} torchaudio==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cu${CUDA_VERSION_}
+# Install PyTorch for CUDA 13.0 (required after custom Python install)
+RUN pip install torch==${TORCH_VERSION}+cu${CUDA_VERSION_} torchvision==${TORCH_VISION_VERSION}+cu${CUDA_VERSION_} torchaudio==${TORCH_VERSION}+cu${CUDA_VERSION_} --index-url https://download.pytorch.org/whl/cu${CUDA_VERSION_}
 
 # Downgrade setuptools to <v70, otherwise will get ImportError: cannot import name 'packaging' from 'pkg_resources'
 RUN pip install "setuptools<70.0.0" wheel ninja boto3 packaging rich natsort trimesh onnxruntime onnxruntime-gpu
@@ -197,7 +201,7 @@ RUN pip install git+https://github.com/NVlabs/tiny-cuda-nn.git#subdirectory=bind
 RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.sh \
     && mkdir /opt/cmake \
     && sh cmake-${CMAKE_VERSION}-linux-x86_64.sh --prefix=/opt/cmake --skip-license \
-    && ln -s /opt/cmake/bin/cmake /usr/local/bin/cmake \
+    && ln -sf /opt/cmake/bin/cmake /usr/local/bin/cmake \
     && rm cmake-${CMAKE_VERSION}-linux-x86_64.sh \
     && git clone --single-branch --depth=1 --branch ${EIGEN_VERSION} https://gitlab.com/libeigen/eigen.git \
     && mkdir -p ${CODE_PATH}/eigen/build \
@@ -207,7 +211,6 @@ RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cm
     && cd ${CODE_PATH}
 
 # Install cuDSS library
-ENV CUDSS_VERSION="0.1.0"
 RUN wget https://developer.download.nvidia.com/compute/cudss/${CUDSS_VERSION}/local_installers/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}_${CUDSS_VERSION}-1_amd64.deb \
     && dpkg -i cudss-local-repo-ubuntu2204-${CUDSS_VERSION}_${CUDSS_VERSION}-1_amd64.deb \
     && cp /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/cudss-*-keyring.gpg /usr/share/keyrings/ \
@@ -238,6 +241,7 @@ RUN git clone https://github.com/nerfstudio-project/nerfstudio.git \
     && sed -i '/pycolmap/d' pyproject.toml \
     && sed -i '/gsplat/s/^/# /' pyproject.toml \
     && sed -i '/# TODO(1480) enable when pycolmap windows wheels are available/,+1d' pyproject.toml \
+    && sed -i '/@torch_compile()/d' nerfstudio/models/splatfacto.py \
     && pip install -e . \
     && cd ${CODE_PATH}
 
@@ -280,10 +284,8 @@ RUN mkdir -p /opt/gsplat_pycolmap \
 RUN wget https://github.com/colmap/colmap/archive/refs/tags/${COLMAP_VERSION}.zip \
     && unzip ${COLMAP_VERSION}.zip && rm ${COLMAP_VERSION}.zip \
     && cd colmap-${COLMAP_VERSION}/ && mkdir build && cd build \
-    && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DMARCH_NATIVE=OFF && ninja install \
+    && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DMARCH_NATIVE=OFF && ninja -j${NINJA_JOBS} install \
     && cd ${CODE_PATH}/colmap-${COLMAP_VERSION} \
-    #&& sed -i 's/cmake_minimum_required(VERSION [0-9]\+\.[0-9]\+)/cmake_minimum_required(VERSION 3.15)/' CMakeLists.txt \
-    #&& sed -i '/\.value("CUDA", ceres::DenseLinearAlgebraLibraryType::CUDA);/c\          ;' src/pycolmap/estimators/ceres_bindings.cc \
     && python -m pip install . \
     && cd ${CODE_PATH}
 
@@ -297,7 +299,7 @@ RUN wget https://github.com/colmap/glomap/archive/refs/tags/${GLOMAP_VERSION}.ta
     tar -xvzf ${GLOMAP_VERSION}.tar.gz && cd glomap-${GLOMAP_VERSION} \
     && mkdir build && cd build \
     && cmake .. -GNinja -DCUDA_ENABLED=ON -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DMARCH_NATIVE=OFF -DCeres_DIR=${CODE_PATH}/ceres-bin \
-    && ninja && ninja install \
+    && ninja -j${NINJA_JOBS} && ninja -j${NINJA_JOBS} install \
     && cd ${CODE_PATH} \
     && wget "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -O "awscliv2.zip" \
     && unzip awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip
@@ -305,13 +307,17 @@ RUN wget https://github.com/colmap/glomap/archive/refs/tags/${GLOMAP_VERSION}.ta
 # Install utilities and ensure numpy==1.26.4 for compatibility
 RUN pip install --no-cache-dir scipy 'numpy==1.26.4' Pillow>=10.3.0 'timm>=1.0.0' einops omegaconf fvcore iopath rembg
 
+# Install sharp-frame-extractor separately after scipy is available
+RUN pip install --no-cache-dir sharp-frame-extractor
+
 # Install Background Removal and SAM2 in single layer
 RUN git clone https://github.com/nadermx/backgroundremover.git \
     && cd ${CODE_PATH}/backgroundremover \
     && git reset --hard ${BGREMOVER_HASH} \
     && sed -i '53s/^        print/        #print/' ${CODE_PATH}/backgroundremover/backgroundremover/u2net/detect.py \
+    && sed -i 's/from moviepy import VideoFileClip/from moviepy.editor import VideoFileClip/' ${CODE_PATH}/backgroundremover/backgroundremover/bg.py \
     && pip install --no-cache-dir -r ${CODE_PATH}/backgroundremover/requirements.txt \
-    && pip install --force-reinstall --no-cache-dir 'numpy==1.26.4' \
+    && pip install --force-reinstall --no-cache-dir 'numpy==1.26.4' 'moviepy==1.0.3' \
     && git clone https://github.com/facebookresearch/sam2.git ${CODE_PATH}/sam \
     && cd ${CODE_PATH}/sam \
     && git reset --hard ${SAM2_HASH} \
@@ -336,13 +342,23 @@ RUN git clone --recursive https://github.com/nv-tlabs/3dgrut.git \
     && sed -i 's/checkpoint = torch.load(checkpoint_path)/checkpoint = torch.load(checkpoint_path, weights_only=False)/' threedgrut/render.py \
     && sed -i 's/checkpoint = torch.load(conf.resume)/checkpoint = torch.load(conf.resume, weights_only=False)/' threedgrut/trainer.py \
     && sed -i '/fused-ssim/d' requirements.txt \
+    && sed -i 's/^xformers/#xformers/' requirements.txt \
     && python -m pip install -r requirements.txt \
     && cd ${CODE_PATH} \
     && git clone https://github.com/Anonym0u3/AttentiveEraser.git \
     && cd ${CODE_PATH}/AttentiveEraser \
     && sed -i 's/^torchvision/#torchvision/' requirements.txt \
+    && sed -i 's/^transformers/#transformers/' requirements.txt \
+    && sed -i 's/^xformers/#xformers/' requirements.txt \
+    && sed -i 's/^diffusers/#diffusers/' requirements.txt \
     && pip install -r requirements.txt \
     && cd ${CODE_PATH}
+
+# Disable xformers - incompatible with Python 3.12 + PyTorch 2.9.1 + CUDA 13.0
+# Diffusers will use standard PyTorch attention as fallback
+ENV XFORMERS_DISABLED=1
+ENV XFORMERS_MORE_DETAILS=0
+RUN pip uninstall -y xformers || true
 
 # Copy and apply patch for 3DGRUT to fix all CUDA extension import issues with v13
 COPY ./src/pipeline/training/patch_tracer.py ${CODE_PATH}/
@@ -361,24 +377,53 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 # Install PlayCanvas splat-transform globally for SOG capability
 RUN npm install -g @playcanvas/splat-transform@${SPLAT_TRANSFORM_VERSION}
 
-# Install Map-Anything with pycolmap 3.10.0 in separate location
+# Install Map-Anything v1.1 with pycolmap 3.10.0 in separate location
 RUN mkdir -p /opt/mapanything_pycolmap \
     && pip install --target=/opt/mapanything_pycolmap --no-deps pycolmap==3.10.0 \
-    && git clone https://github.com/facebookresearch/map-anything.git
+    && wget https://github.com/facebookresearch/map-anything/archive/refs/tags/v${MAPANYTHING_VERSION}.tar.gz \
+    && tar -xzf v${MAPANYTHING_VERSION}.tar.gz \
+    && mv map-anything-${MAPANYTHING_VERSION} map-anything \
+    && rm v${MAPANYTHING_VERSION}.tar.gz
 WORKDIR ${CODE_PATH}/map-anything
-RUN pip install -e .
+RUN sed -i 's/model = init_model("da3", device=device)/model = init_model("da3")/' scripts/demo_colmap.py
+RUN pip install -e ".[depth-anything-3]"
+
+# Remove xformers if map-anything installed it
+RUN pip uninstall -y xformers || true
 WORKDIR ${CODE_PATH}
 
 # Fix version compatibility issues with diffusers and transformers
-RUN pip install --force-reinstall --no-cache-dir transformers==4.44.2 diffusers==0.30.3
+#RUN pip install --force-reinstall --no-cache-dir transformers==4.44.2 diffusers==0.30.3
+
 RUN pip install git+https://github.com/cvg/LightGlue.git hydra-core
 
-# CRITICAL FIX: Reinstall pycolmap after map-anything to ensure ABI compatibility
+# Remove xformers if LightGlue installed it
+RUN pip uninstall -y xformers || true
+
+# Reinstall pycolmap after map-anything to ensure ABI compatibility
 # Map-anything may have installed incompatible dependencies that conflict with pycolmap
 RUN pip install --force-reinstall --no-cache-dir --no-deps pycolmap
 
-# Final numpy version lock to ensure compatibility with numba and splatfacto-w
-RUN pip install --force-reinstall --no-cache-dir 'numpy==1.26.4'
+# Final numpy version lock to ensure compatibility with numpy and splatfacto-w
+RUN pip install --force-reinstall --no-cache-dir 'numpy==1.26.4' 'moviepy==1.0.3'
+
+# Reinstall PyTorch and torchvision to ensure CUDA compatibility (dependencies may have overwritten)
+#RUN pip uninstall -y torch torchvision torchaudio && \
+#    pip install --no-cache-dir torch==${TORCH_VERSION} torchvision==${TORCH_VISION_VERSION} torchaudio==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cu${CUDA_VERSION_}
+
+# Install diffusers without torch dependencies to avoid overwriting
+RUN pip install --no-cache-dir --no-deps diffusers && pip install --no-cache-dir accelerate safetensors regex requests transformers
+
+# Final NumPy constraint to fix Numba compatibility (requires NumPy < 2.0)
+RUN pip install --force-reinstall --no-cache-dir 'numpy<2.0,>=1.26.4'
+
+# CRITICAL: Aggressively remove xformers completely after ALL installations
+RUN pip uninstall -y xformers || true && \
+    rm -rf /usr/local/lib/python3.12/site-packages/xformers* && \
+    rm -rf /usr/local/lib/python3.12/site-packages/xFormers* && \
+    find /usr/local -name "*xformers*" -exec rm -rf {} + 2>/dev/null || true && \
+    python3 -c "import sys; sys.exit(0 if 'xformers' not in sys.modules else 1)" && \
+    echo "xformers successfully removed"
 
 # The main entrypoint and arguments are added into the container in the State Machine (e.g. ENTRYPOINT [ "python", "main.py" ])
 # Copy over application files
@@ -386,9 +431,8 @@ RUN mkdir -p ${CODE_PATH}/reconstruction
 RUN mkdir -p ${CODE_PATH}/training
 RUN mkdir -p ${CODE_PATH}/spherical
 RUN mkdir -p ${CODE_PATH}/pre_processing/segmentation
+RUN mkdir -p ${CODE_PATH}/pre_processing/video
 RUN mkdir -p ${CODE_PATH}/post_processing
-RUN mkdir -p ${CODE_PATH}/video_processing
-RUN mkdir -p ${CODE_PATH}/image_processing
 
 COPY ./src/main.py                                                                  ${CODE_PATH}
 COPY ./src/config.json                                                              ${CODE_PATH}
@@ -398,10 +442,6 @@ COPY ./src/pipeline/reconstruction/extract_poses_imgs.py                        
 COPY ./src/pipeline/reconstruction/process_pose_transforms.py                       ${CODE_PATH}/reconstruction
 COPY ./src/pipeline/reconstruction/update_camera_model.py                           ${CODE_PATH}/reconstruction
 COPY ./src/pipeline/reconstruction/run_map_anything.py                              ${CODE_PATH}/reconstruction
-#COPY ./src/pipeline/reconstruction/run_map_anything_wrapper.sh                      ${CODE_PATH}/reconstruction
-COPY ./src/pipeline/reconstruction/demo_colmap_mapanything.py                       ${CODE_PATH}/map-anything/scripts/demo_colmap.py
-# Use official map-anything np_to_pycolmap.py instead of our modified version
-#COPY ./src/pipeline/reconstruction/np_to_pycolmap.py                                ${CODE_PATH}/map-anything/mapanything/third_party/np_to_pycolmap.py
 COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py                            ${CODE_PATH}/training
 COPY ./src/pipeline/training/run_gsplat_trainer.sh                                  ${CODE_PATH}/training
 COPY ./src/pipeline/reconstruction/spherical/panorama_sfm.py                        ${CODE_PATH}/spherical
@@ -410,8 +450,10 @@ COPY ./src/pipeline/pre_processing/segmentation/remove_background.py            
 COPY ./src/pipeline/pre_processing/segmentation/erase_object_using_mask.py          ${CODE_PATH}/pre_processing/segmentation
 COPY ./src/pipeline/pre_processing/segmentation/generate_masks_from_filtered.py     ${CODE_PATH}/pre_processing/segmentation
 COPY ./src/pipeline/pre_processing/segmentation/remove_background_sam2.py           ${CODE_PATH}/sam
-COPY ./src/pipeline/pre_processing/filter_blurry_images.py                          ${CODE_PATH}/pre_processing
-COPY ./src/pipeline/pre_processing/simple_video_to_images.py                        ${CODE_PATH}/pre_processing
+COPY ./src/pipeline/pre_processing/video/filter_blurry_images.py                    ${CODE_PATH}/pre_processing/video
+COPY ./src/pipeline/pre_processing/video/simple_video_to_images.py                  ${CODE_PATH}/pre_processing/video
+COPY ./src/pipeline/pre_processing/video/sharp_video_to_images.py                   ${CODE_PATH}/pre_processing/video
+COPY ./src/pipeline/pre_processing/video/rotate_portrait_images.py                  ${CODE_PATH}/pre_processing/video
 COPY ./src/pipeline/post_processing/rotate_splat.py                                 ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/mirror_splat.py                                 ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/gsplat_pt_to_ply.py                             ${CODE_PATH}/post_processing
@@ -427,9 +469,14 @@ COPY ./src/pipeline/post_processing/create_derivative_plys.py                   
 COPY ./src/pipeline/post_processing/convert_ply_to_sog.py                           ${CODE_PATH}/post_processing
 
 # Build the SPZ tool
-#RUN git clone https://github.com/nianticlabs/spz.git
-#WORKDIR spz
+#RUN wget https://github.com/nianticlabs/spz/archive/refs/tags/v${SPZ_VERSION}.tar.gz \
+#    && tar -xzf v${SPZ_VERSION}.tar.gz \
+#    && mv spz-${SPZ_VERSION} spz \
+#    && rm v${SPZ_VERSION}.tar.gz
+#WORKDIR ${CODE_PATH}/spz
 #RUN pip install .
+#WORKDIR ${CODE_PATH}
+
 # Use the initial SPZ version for compatibility with the Gradio Viewer
 RUN cd ${CODE_PATH}/post_processing/spz/src \
     && mkdir build \
@@ -448,9 +495,6 @@ RUN mkdir -p /opt/gsplat_pycolmap \
     && pip install --target=/opt/gsplat_pycolmap --no-deps git+https://github.com/rmbrualla/pycolmap@cc7ea4b7301720ac29287dbe450952511b32125e \
     && rm -rf /opt/gsplat_pycolmap/numpy* \
     && pip install --target=/opt/gsplat_pycolmap --upgrade 'numpy==1.26.4'
-
-# Make map_anything wrapper script executable
-#RUN chmod +x ${CODE_PATH}/reconstruction/run_map_anything_wrapper.sh
 
 # Verify installed versions match expected versions
 RUN echo "=== VERSION VERIFICATION ===" \

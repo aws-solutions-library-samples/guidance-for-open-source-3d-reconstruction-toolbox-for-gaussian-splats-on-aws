@@ -89,6 +89,7 @@
             {"Name": "REMOVE_OBJECT", "Value.$": "$.envVars.REMOVE_OBJECT"},
             {"Name": "OBJECT_REMOVAL_ACTION", "Value.$": "$.envVars.OBJECT_REMOVAL_ACTION"},
             {"Name": "OBJECT_REMOVAL_OBJECTS", "Value.$": "$.envVars.OBJECT_REMOVAL_OBJECTS"},
+            {"Name": "PRESERVE_SCENE_SCALE", "Value.$": "$.envVars.PRESERVE_SCENE_SCALE"},
             {"Name": "DDB_TABLE_NAME", "Value.$": "$.stateMachine.ddbTableName"},
             {"Name": "AWS_DEFAULT_REGION", "Value.$": "$.stateMachine.awsRegion"}
           ]
@@ -211,6 +212,7 @@
           "REMOVE_OBJECT.$": "$.envVars.REMOVE_OBJECT",
           "OBJECT_REMOVAL_ACTION.$": "$.envVars.OBJECT_REMOVAL_ACTION",
           "OBJECT_REMOVAL_OBJECTS.$": "$.envVars.OBJECT_REMOVAL_OBJECTS",
+          "PRESERVE_SCENE_SCALE.$": "$.envVars.PRESERVE_SCENE_SCALE",
           "DDB_TABLE_NAME.$": "$.stateMachine.ddbTableName",
           "AWS_DEFAULT_REGION.$": "$.stateMachine.awsRegion"
         }

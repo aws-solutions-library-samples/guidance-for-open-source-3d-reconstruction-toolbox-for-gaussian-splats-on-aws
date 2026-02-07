@@ -58,11 +58,11 @@ file_contents = {
     },
     "videoProcessing": {
         "maxNumImages": "300",
-    },
-    "imageProcessing": {
+        "videoStartTime": "0",
+        "videoStopTime": "None",
         "filterBlurryImages": "true"
     },
-    "sfm": {
+    "reconstruction": {
         "enable": "true",
         "softwareName": "glomap",
         "enableEnhancedFeatureExtraction": "false",
@@ -79,13 +79,18 @@ file_contents = {
     "training": {
         "enable": "true",
         "maxSteps": "15000",
-        "model": "splatfacto",
-        "enableMultiGpu": "false",
+        "model": "splatfacto"
     },
     "postProcessing": {
-        "rotateSplat": "true",
-        "refineOutputBounds": "true",
-        "refinementMode": "environment"
+        "cropOutputBounds": "false",
+        "cropMode": "environment",
+        "enableSpz": "true",
+        "enableSog": "true",
+        "enableUsdz": "true",
+        "plyCoords": "rhyu",
+        "spzCoords": "rhyu",
+        "sogCoords": "rhyu",
+        "usdzCoords": "rhyu"
     },
     "sphericalCamera": {
         "enable": "false",

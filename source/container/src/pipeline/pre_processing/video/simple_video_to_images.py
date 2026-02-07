@@ -120,7 +120,6 @@ def extract_frames(
         logging.info(f"FPS: {fps:.2f}")
         logging.info(f"Duration: {duration:.2f} seconds")
         logging.info(f"Processing range: {start_time:.2f}s to {end_time if end_time else duration:.2f}s")
-        logging.info(f"Video orientation: {'Portrait' if height > width else 'Landscape'}")
 
         # Calculate frame indices to extract
         frame_indices = np.linspace(start_frame, end_frame-1, num_frames, dtype=int)

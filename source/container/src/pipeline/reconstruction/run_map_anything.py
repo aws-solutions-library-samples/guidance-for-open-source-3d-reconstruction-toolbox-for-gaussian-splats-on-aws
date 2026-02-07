@@ -11,14 +11,14 @@ import shutil
 import os
 from pathlib import Path
 
-def run_map_anything(scene_dir: str, memory_efficient_inference: bool = True, use_ba: bool = False):
+def run_map_anything(scene_dir: str, skip_point2d: bool = False, voxel_size: str = "0.01"):
     """
     Run Map-Anything SfM pipeline
     
     Args:
         scene_dir: Path to scene directory containing images
-        memory_efficient_inference: Use memory efficient inference (slower but handles more images)
-        use_ba: Use bundle adjustment for refinement
+        skip_point2d: Skip Point2D backprojection for faster export
+        voxel_size: Explicit voxel size in meters
     """
     # Set PYTHONPATH to use map-anything specific pycolmap 3.10.0
     env = os.environ.copy()
@@ -27,93 +27,82 @@ def run_map_anything(scene_dir: str, memory_efficient_inference: bool = True, us
         env['PYTHONPATH'] = f"{mapanything_pycolmap}:{env.get('PYTHONPATH', '')}"
         print(f"Using map-anything pycolmap 3.10.0 from: {mapanything_pycolmap}")
     
+    images_dir = os.path.join(scene_dir, "images")
+    output_dir = os.path.join(scene_dir, "sparse")
+    
     cmd = [
         "python", "map-anything/scripts/demo_colmap.py",
-        f"--scene_dir={scene_dir}",
-        "--use_ba",
-        "--max_query_pts=2048", #orig 4096,2048
-        "--query_frame_num=6", #orig 8,5
-        "--shared_camera"
+        f"--images_dir={images_dir}",
+        f"--output_dir={output_dir}"
     ]
     
-    if memory_efficient_inference:
-        cmd.append("--memory_efficient_inference")
+    if skip_point2d:
+        cmd.append("--skip_point2d")
     
-    if use_ba:
-        cmd.append("--use_ba")
+    cmd.append(f"--voxel_size={voxel_size}")
     
     print(f"Running Map-Anything: {' '.join(cmd)}")
-    try:
-        result = subprocess.run(cmd, check=True, env=env)
-    except subprocess.CalledProcessError as e:
-        if use_ba:
-            print(f"Map-Anything failed with bundle adjustment, retrying without BA...")
-            cmd.remove("--use_ba")
-            result = subprocess.run(cmd, check=True, env=env)
-        else:
-            raise
+    result = subprocess.run(cmd, check=True, env=env)
     
     # Debug: Check what was created
     sparse_dir = Path(scene_dir) / "sparse"
     sparse_0_dir = sparse_dir / "0"
+    nested_sparse_dir = sparse_dir / "sparse"
     
     print(f"\n=== DEBUG: Map-Anything Output ===")
     print(f"Scene dir: {scene_dir}")
     print(f"Sparse dir exists: {sparse_dir.exists()}")
     if sparse_dir.exists():
-        print(f"Files in sparse/: {list(sparse_dir.iterdir())}")
+        print(f"Files in sparse/: {[f.name for f in sparse_dir.iterdir()]}")
     
-    print(f"Sparse/0 dir exists: {sparse_0_dir.exists()}")
+    # MapAnything outputs to scene_dir/sparse/sparse/, we need it in scene_dir/sparse/0/
+    if nested_sparse_dir.exists():
+        # Create sparse/0 if it doesn't exist
+        sparse_0_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Move COLMAP files from sparse/sparse/ to sparse/0/
+        colmap_files = ['cameras.bin', 'images.bin', 'points3D.bin']
+        for filename in colmap_files:
+            src = nested_sparse_dir / filename
+            if src.exists():
+                dst = sparse_0_dir / filename
+                shutil.move(str(src), str(dst))
+                print(f"  Moved {filename} from sparse/sparse/ to sparse/0/")
+        
+        # Handle points.ply
+        points_ply = nested_sparse_dir / "points.ply"
+        if points_ply.exists():
+            sparse_ply = sparse_0_dir / "sparse.ply"
+            shutil.copy(str(points_ply), str(sparse_ply))
+            print(f"  Copied points.ply to sparse/0/sparse.ply")
+        
+        # Remove empty nested sparse directory
+        if nested_sparse_dir.exists() and not any(nested_sparse_dir.iterdir()):
+            nested_sparse_dir.rmdir()
+            print(f"  Removed empty nested sparse directory")
+    
     if sparse_0_dir.exists():
         files = list(sparse_0_dir.iterdir())
         print(f"Files in sparse/0/: {[f.name for f in files]}")
-        for f in files:
-            if f.is_file():
-                print(f"  {f.name}: {f.stat().st_size} bytes")
     
-    # Move COLMAP files from sparse/ to sparse/0/ if needed
-    colmap_files = ['cameras.bin', 'images.bin', 'points3D.bin']
-    files_in_root = [f for f in colmap_files if (sparse_dir / f).exists()]
+    # Map-anything saves processed images to sparse/images
+    # Replace original images with processed ones to match camera parameters
+    processed_images_dir = sparse_dir / "images"
+    original_images_dir = Path(scene_dir) / "images"
     
-    if files_in_root:
-        print(f"\nMoving COLMAP files from sparse/ to sparse/0/")
-        os.makedirs(sparse_0_dir, exist_ok=True)
-        for filename in colmap_files:
-            src = sparse_dir / filename
-            dst = sparse_0_dir / filename
-            if src.exists():
-                shutil.move(str(src), str(dst))
-                print(f"  Moved {filename}")
+    if processed_images_dir.exists() and processed_images_dir != original_images_dir:
+        print(f"\nReplacing original images with map-anything processed images")
+        # Backup original images
+        backup_dir = Path(scene_dir) / "images_original"
+        if original_images_dir.exists():
+            shutil.move(str(original_images_dir), str(backup_dir))
+            print(f"  Backed up original images to: {backup_dir}")
         
-        # Verify files were moved
-        print(f"\nAfter move - Files in sparse/0/: {[f.name for f in sparse_0_dir.iterdir()]}")
-        
-        # Verify image names in COLMAP model match actual images
-        try:
-            import pycolmap
-            reconstruction = pycolmap.Reconstruction(str(sparse_0_dir))
-            images_dir = Path(scene_dir) / "images"
-            actual_images = set([f.name for f in images_dir.glob("*.[jp][pn]g")])
-            colmap_images = set([img.name for img in reconstruction.images.values()])
-            
-            print(f"\nImage verification:")
-            print(f"  Actual images in images/: {len(actual_images)}")
-            print(f"  Images in COLMAP model: {len(colmap_images)}")
-            
-            missing = colmap_images - actual_images
-            if missing:
-                print(f"  WARNING: {len(missing)} images in COLMAP model not found in images/ directory")
-                print(f"  Sample missing: {list(missing)[:3]}")
-                print(f"  Sample actual: {list(actual_images)[:3]}")
-        except Exception as e:
-            print(f"  Could not verify image names: {e}")
+        # Move processed images to expected location
+        shutil.move(str(processed_images_dir), str(original_images_dir))
+        print(f"  Moved processed images to: {original_images_dir}")
+        print(f"  Image count: {len(list(original_images_dir.glob('*.[jp][pn]g')))}")
     
-    images_dir = Path(scene_dir) / "images"
-    if images_dir.exists():
-        image_files = list(images_dir.glob("*.[jp][pn]g"))
-        print(f"Images in images/: {len(image_files)} files")
-        if image_files:
-            print(f"  Sample: {image_files[0].name}")
     print(f"=== END DEBUG ===")
     
     return result.returncode
@@ -121,9 +110,8 @@ def run_map_anything(scene_dir: str, memory_efficient_inference: bool = True, us
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Map-Anything SfM pipeline")
     parser.add_argument("--scene_dir", type=str, required=True, help="Path to scene directory")
-    parser.add_argument("--memory_efficient_inference", action="store_true", default=True, help="Use memory efficient inference")
-    parser.add_argument("--use_ba", action="store_true", default=False, help="Use bundle adjustment")
-    
+    parser.add_argument("--skip_point2d", action="store_true", default=False, help="Skip Point2D backprojection for faster export")  
+    parser.add_argument("--voxel_size", type=str, default="0.01", help="Explicit voxel size in meters")  
     args = parser.parse_args()
     
-    sys.exit(run_map_anything(args.scene_dir, args.memory_efficient_inference, args.use_ba))
+    sys.exit(run_map_anything(args.scene_dir, args.skip_point2d, args.voxel_size))
