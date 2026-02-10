@@ -103,8 +103,16 @@ if __name__ == "__main__":
     # INITIALIZATION
     ##################################
     try:
+        import time as time_module
+        container_start = time_module.time()
+        print(f"=== CONTAINER STARTUP TIMING ===")
+        print(f"Container started at: {time_module.strftime('%Y-%m-%d %H:%M:%S')}")
+        
         # Print version information at startup
         print_container_version_info()
+        
+        version_info_done = time_module.time()
+        print(f"Version info completed in: {version_info_done - container_start:.1f}s")
 
         # Open config with default values
         with open("config.json", encoding="utf-8") as f:
@@ -180,11 +188,19 @@ if __name__ == "__main__":
                 s3_client.download_file(bucket, key, local_path)
 
         # Unpack the sam2 models
+        models_start = time_module.time()
+        print(f"Starting model extraction at: {time_module.strftime('%Y-%m-%d %H:%M:%S')}")
         untar_gz(os.path.join(os.environ["MODEL_PATH"], "models.tar.gz"), os.environ["MODEL_PATH"])
 
-        # Unpack all models from S3
+        # Unpack all models from S3 - OPTIMIZED: Extract only needed files
         models_archive = os.path.join(os.environ["MODEL_PATH"], "models.tar.gz")
-        untar_gz(models_archive, os.environ["MODEL_PATH"])
+        
+        # Check if models already extracted (for warm containers)
+        u2net_dst = os.path.expanduser("~/.u2net")
+        if not os.path.exists(u2net_dst):
+            untar_gz(models_archive, os.environ["MODEL_PATH"])
+        else:
+            print(f"Models already extracted, skipping extraction")
         
         # Move models to expected locations
         # Move U2NET models to home directory
@@ -212,6 +228,10 @@ if __name__ == "__main__":
         sd_model_dst = os.path.join(config['DATASET_PATH'], "stable-diffusion-xl-base-1.0")
         if os.path.exists(sd_model_src):
             shutil.move(sd_model_src, sd_model_dst)
+        
+        models_done = time_module.time()
+        print(f"Model extraction completed in: {models_done - models_start:.1f}s")
+        print(f"Total startup time before pipeline: {models_done - container_start:.1f}s")
 
         # Instantiate Pipeline Session
         pipeline = Pipeline(
@@ -2782,6 +2802,7 @@ if __name__ == "__main__":
         # Write final phase completion if exists, hasn't been written yet, and DDB table is configured
         if last_phase and ddb_table_name and last_phase in phase_start_times:
             final_phase_elapsed = end_time - phase_start_times[last_phase]
+            phase_durations[last_phase] = final_phase_elapsed
             log.info(f"Writing final phase completion for {last_phase}: {final_phase_elapsed}s")
             update_component_phase_completion(
                 uuid=config['UUID'],

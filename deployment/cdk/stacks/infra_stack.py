@@ -88,7 +88,8 @@ class GSWorkflowBaseStack(Stack):
             env=env,
             ecr_repo_name=self.ecr_repo_name,
             s3_bucket_name=self.bucket_name,
-            container_role_name=self.container_role_name
+            container_role_name=self.container_role_name,
+            ddb_table_name=self.ddb_table_name
         )
         CfnOutput(self, "ECRRepoName", value=self.ecr.repository.repository_name)
         CfnOutput(self, "ContainerRoleArn", value=self.ecr.container_role.role_arn)

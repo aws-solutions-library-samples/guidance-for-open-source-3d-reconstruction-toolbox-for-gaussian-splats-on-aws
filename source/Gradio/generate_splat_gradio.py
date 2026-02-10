@@ -45,7 +45,7 @@ class SharedState:
         self.s3_output = "workflow-output"
         self.media_input = "media-input"
         self.instance = "ml.g5.4xlarge"
-        self.use_spot_instance = "false"
+        self.use_spot_instance = "true"  # Default to Batch for faster startup
         self.sfm = "glomap"
         self.model = "splatfacto"
         self.faces = "[]"
@@ -1656,33 +1656,36 @@ def get_job_metadata(job_id):
             
             # Calculate estimated cost if we have the necessary data
             estimated_cost = "N/A"
-            if 'instanceType' in item and 'elapsedTimestamp' in item:
+            if 'instanceType' in item:
                 instance_type = str(item['instanceType'])
-                elapsed_str = str(item['elapsedTimestamp'])
                 is_spot = str(item.get('useSpotInstance', 'false')).lower() == 'true'
                 
                 try:
-                    # Parse elapsed time (format: "H:MM:SS.microseconds" or "X day(s), H:MM:SS.microseconds")
-                    if ':' in elapsed_str:
-                        # Handle format like "1 day, 9:46:28" or "3 days, 9:46:28" or "0:46:28"
-                        if 'day' in elapsed_str:
-                            # Parse "X day(s), H:MM:SS" format
-                            days_part, time_part = elapsed_str.split(', ')
-                            days = int(days_part.split()[0])
-                            time_parts = time_part.split(':')
-                            hours = int(time_parts[0]) + (days * 24)
-                            minutes = int(time_parts[1])
-                            seconds = float(time_parts[2].split('.')[0])
-                        else:
-                            # Parse "H:MM:SS" format
-                            time_parts = elapsed_str.split(':')
-                            if len(time_parts) >= 3:
-                                hours = int(time_parts[0])
+                    # Use componentGroupElapsedTime (actual processing time) instead of elapsedTimestamp (includes startup)
+                    total_seconds = 0
+                    if 'componentGroupElapsedTime' in item:
+                        total_seconds = sum(float(t) for t in item['componentGroupElapsedTime'])
+                    elif 'elapsedTimestamp' in item:
+                        elapsed_str = str(item['elapsedTimestamp'])
+                        if ':' in elapsed_str:
+                            if 'day' in elapsed_str:
+                                days_part, time_part = elapsed_str.split(', ')
+                                days = int(days_part.split()[0])
+                                time_parts = time_part.split(':')
+                                hours = int(time_parts[0]) + (days * 24)
                                 minutes = int(time_parts[1])
-                                seconds = float(time_parts[2].split('.')[0])  # Remove microseconds
+                                seconds = float(time_parts[2].split('.')[0])
                             else:
-                                hours = minutes = seconds = 0
-                        total_seconds = hours * 3600 + minutes * 60 + seconds
+                                time_parts = elapsed_str.split(':')
+                                if len(time_parts) >= 3:
+                                    hours = int(time_parts[0])
+                                    minutes = int(time_parts[1])
+                                    seconds = float(time_parts[2].split('.')[0])
+                                else:
+                                    hours = minutes = seconds = 0
+                            total_seconds = hours * 3600 + minutes * 60 + seconds
+                    
+                    if total_seconds > 0:
                         estimated_cost = estimate_job_cost(instance_type, total_seconds, is_spot)
                 except Exception as e:
                     print(f"Error calculating cost: {e}")
@@ -2306,7 +2309,10 @@ def calculate_job_costs_from_jobs(jobs_data):
                     
                     total_seconds = 0
                     try:
-                        if ':' in elapsed_str:
+                        # Use componentGroupElapsedTime if available
+                        if 'componentGroupElapsedTime' in item:
+                            total_seconds = sum(float(t) for t in item['componentGroupElapsedTime'])
+                        elif ':' in elapsed_str:
                             if 'day' in elapsed_str:
                                 days_part, time_part = elapsed_str.split(', ')
                                 days = int(days_part.split()[0])
@@ -2580,7 +2586,10 @@ def calculate_job_costs(files_data):
                     # Parse elapsed time
                     total_seconds = 0
                     try:
-                        if ':' in elapsed_str:
+                        # Use componentGroupElapsedTime if available
+                        if 'componentGroupElapsedTime' in item:
+                            total_seconds = sum(float(t) for t in item['componentGroupElapsedTime'])
+                        elif ':' in elapsed_str:
                             # Handle format like "1 day, 9:46:28" or "3 days, 9:46:28" or "0:46:28"
                             if 'day' in elapsed_str:
                                 # Parse "X day(s), H:MM:SS" format

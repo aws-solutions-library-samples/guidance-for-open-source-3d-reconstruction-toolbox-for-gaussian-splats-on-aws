@@ -37,7 +37,9 @@ class Ecr(Construct):
             env: Environment,
             ecr_repo_name: str,
             s3_bucket_name: str,
-            container_role_name: str, **kwargs) -> None:
+            container_role_name: str,
+            ddb_table_name: str,
+            **kwargs) -> None:
         super().__init__(scope, id, **kwargs)
 
         # Create the ECR repository
@@ -57,10 +59,11 @@ class Ecr(Construct):
             env,
             self.repository,
             s3_bucket_name,
-            container_role_name
+            container_role_name,
+            ddb_table_name
         )
 
-    def create_container_role(self, env, ecr_repo_name, s3_bucket_name, container_role_name) -> iam.Role:
+    def create_container_role(self, env, ecr_repo_name, s3_bucket_name, container_role_name, ddb_table_name) -> iam.Role:
         """Function to create the Container Iam Role"""
         # Define the IAM policy
         #container_policy_statement_ecr1 = iam.PolicyStatement(
@@ -107,6 +110,27 @@ class Ecr(Construct):
             ]
         )
 
+        container_policy_statement_dynamodb = iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "dynamodb:BatchGetItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable",
+                "dynamodb:GetItem",
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+                "dynamodb:PutItem",
+                "dynamodb:Query",
+                "dynamodb:Scan",
+                "dynamodb:UpdateItem"
+            ],
+            resources=[
+                f"arn:aws:dynamodb:{env.region}:{env.account}:table/{ddb_table_name}"
+            ]
+        )
+
         # Add KMS permissions for S3 and ECR encryption
         #container_policy_statement_kms = iam.PolicyStatement(
         #    effect=iam.Effect.ALLOW,
@@ -128,6 +152,7 @@ class Ecr(Construct):
                 #container_policy_statement_ecr1,
                 container_policy_statement_ecr2,
                 container_policy_statement_s3,
+                container_policy_statement_dynamodb,
                 #container_policy_statement_kms
             ]
         )
