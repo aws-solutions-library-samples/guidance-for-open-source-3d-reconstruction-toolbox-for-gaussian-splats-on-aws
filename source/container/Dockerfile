@@ -356,9 +356,9 @@ RUN git clone --recursive https://github.com/nv-tlabs/3dgrut.git \
 
 # Disable xformers - incompatible with Python 3.12 + PyTorch 2.9.1 + CUDA 13.0
 # Diffusers will use standard PyTorch attention as fallback
-ENV XFORMERS_DISABLED=1
-ENV XFORMERS_MORE_DETAILS=0
-RUN pip uninstall -y xformers || true
+#ENV XFORMERS_DISABLED=1
+#ENV XFORMERS_MORE_DETAILS=0
+#RUN pip uninstall -y xformers || true
 
 # Copy and apply patch for 3DGRUT to fix all CUDA extension import issues with v13
 COPY ./src/pipeline/training/patch_tracer.py ${CODE_PATH}/
@@ -389,8 +389,8 @@ RUN sed -i 's/model = init_model("da3", device=device)/model = init_model("da3")
 RUN pip install -e ".[depth-anything-3]"
 
 # Remove xformers if map-anything installed it
-RUN pip uninstall -y xformers || true
-WORKDIR ${CODE_PATH}
+#RUN pip uninstall -y xformers || true
+#WORKDIR ${CODE_PATH}
 
 # Fix version compatibility issues with diffusers and transformers
 #RUN pip install --force-reinstall --no-cache-dir transformers==4.44.2 diffusers==0.30.3
@@ -405,19 +405,15 @@ RUN pip uninstall -y xformers || true
 RUN pip install --force-reinstall --no-cache-dir --no-deps pycolmap
 
 # Final numpy version lock to ensure compatibility with numpy and splatfacto-w
-RUN pip install --force-reinstall --no-cache-dir 'numpy==1.26.4' 'moviepy==1.0.3'
-
-# Reinstall PyTorch and torchvision to ensure CUDA compatibility (dependencies may have overwritten)
-#RUN pip uninstall -y torch torchvision torchaudio && \
-#    pip install --no-cache-dir torch==${TORCH_VERSION} torchvision==${TORCH_VISION_VERSION} torchaudio==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cu${CUDA_VERSION_}
+#RUN pip install --force-reinstall --no-cache-dir 'numpy==1.26.4' 
 
 # Install diffusers without torch dependencies to avoid overwriting
 RUN pip install --no-cache-dir --no-deps diffusers && pip install --no-cache-dir accelerate safetensors regex requests transformers
 
 # Final NumPy constraint to fix Numba compatibility (requires NumPy < 2.0)
-RUN pip install --force-reinstall --no-cache-dir 'numpy<2.0,>=1.26.4'
+RUN pip install --force-reinstall --no-cache-dir 'numpy<2.0,>=1.26.4' 'moviepy==1.0.3'
 
-# CRITICAL: Aggressively remove xformers completely after ALL installations
+# Aggressively remove xformers completely after ALL installations
 RUN pip uninstall -y xformers || true && \
     rm -rf /usr/local/lib/python3.12/site-packages/xformers* && \
     rm -rf /usr/local/lib/python3.12/site-packages/xFormers* && \
@@ -462,7 +458,8 @@ COPY ./src/pipeline/post_processing/extract_center_cube.py                      
 COPY ./src/pipeline/post_processing/refine_center_object.py                         ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/spz                                             ${CODE_PATH}/post_processing/spz
 COPY ./src/pipeline/post_processing/coordinate_systems.py                           ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/clean_ply.py                                    ${CODE_PATH}/post_processing
+COPY ./src/pipeline/post_processing/remove_ply_comments.py                          ${CODE_PATH}/post_processing
+COPY ./src/pipeline/post_processing/clean_point_cloud.py                            ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/extract_video_thumbnail.py                      ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/images_to_video.py                              ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/create_derivative_plys.py                       ${CODE_PATH}/post_processing

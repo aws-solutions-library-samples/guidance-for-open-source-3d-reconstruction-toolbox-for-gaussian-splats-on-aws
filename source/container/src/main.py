@@ -63,8 +63,9 @@ ERROR CODES
 771, "Issue calculating metrics"
 775, "Issue rendering trajectory video"
 776, "Issue extracting video thumbnail"
+777, "Issue cleaning point cloud"
 780, "Issue cropping splat bounding box"
-781, "Issue cleaning PLY file"
+781, "Issue removing PLY comments"
 782, "Issue creating derivative ply files"
 783, "Issue transforming coordinates"
 784, "Issue mirroring PLY"
@@ -1845,7 +1846,33 @@ if __name__ == "__main__":
 
     ##################################
     # POST-PROCESS COMPONENT:
-    # Clean PLY file - remove comments for SPZ compatibility
+    # Clean point cloud - remove outlier noise from point cloud
+    ##################################
+    try:
+        if config['MODEL'] != "nerfacto":
+            args = [
+                ply_path,
+                "--output", ply_path,
+                "--level", "medium",
+                "--min-cluster", "100"
+                "--no-confirm"
+            ]
+            pipeline.create_component(
+                name="Clean-Point-Cloud",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="post_processing/clean_point_cloud.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue cleaning point cloud: {e}"
+        pipeline.report_error(777, error_message)
+
+    ##################################
+    # POST-PROCESS COMPONENT:
+    # Remove PLY comments - remove comments for SPZ compatibility
     ##################################
     try:
         if config['MODEL'] != "nerfacto":
@@ -1853,16 +1880,16 @@ if __name__ == "__main__":
                 "-i", ply_path
             ]
             pipeline.create_component(
-                name="Clean-PLY",
+                name="Remove-PLY-Comments",
                 comp_type=ComponentType.POST_PROCESSING,
                 comp_environ=ComponentEnvironment.PYTHON,
-                command="post_processing/clean_ply.py",
+                command="post_processing/remove_ply_comments.py",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
             )
     except Exception as e:
-        error_message = f"Issue cleaning PLY file: {e}"
+        error_message = f"Issue removing PLY comments: {e}"
         pipeline.report_error(781, error_message)
 
     ##################################

@@ -6,5 +6,5 @@
     "s3TriggerKey": "workflow-input",
     "adminEmail": "",
     "maintainS3ObjectsOnStackDeletion": "true",
-    "enableCodeBuildContainerBuild": "false"
+    "enableCodeBuildContainerBuild": "true"
 }

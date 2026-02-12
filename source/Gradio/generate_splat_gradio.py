@@ -79,6 +79,7 @@ class SharedState:
         self.model_3d = None
         self.crop_output_bounds = "false"
         self.crop_mode = "environment"
+        self.clean_splat = "false"
         self.video_start_time = 0.0
         self.video_stop_time = None
         self.preserve_scene_scale = "false"
@@ -940,6 +941,11 @@ def create_advanced_settings_tab():
                     choices=["environment", "rigid_body"],
                     value="environment"
                 )
+                clean_splat = gr.Radio(
+                    label="Clean Splat (Remove Noise)",
+                    choices=["true", "false"],
+                    value="false"
+                )
                 enable_spz = gr.Radio(
                     label="Enable SPZ Export",
                     choices=["true", "false"],
@@ -1004,7 +1010,7 @@ def create_advanced_settings_tab():
                      shared_state.enhanced_feature, shared_state.matching_method,
                      shared_state.use_colmap_model, shared_state.use_transform_json,
                      shared_state.training_enable, shared_state.max_steps, shared_state.enable_spz, shared_state.enable_sog, shared_state.enable_usdz,
-                     shared_state.crop_output_bounds, shared_state.crop_mode,
+                     shared_state.crop_output_bounds, shared_state.crop_mode, shared_state.clean_splat,
                      shared_state.spherical_enable,
                      shared_state.remove_bg, shared_state.remove_objects,
                      shared_state.object_removal_action, shared_state.objects_to_remove, shared_state.source_coordinate, shared_state.pose_world_to_cam,
@@ -1017,7 +1023,7 @@ def create_advanced_settings_tab():
                     max_images, video_start_time, video_stop_time, sfm_enable, enhanced_feature, matching_method,
                     use_colmap_model, use_transform_json, training_enable,
                     max_steps, enable_spz, enable_sog, enable_usdz,
-                    crop_output_bounds, crop_mode,
+                    crop_output_bounds, crop_mode, clean_splat,
                     spherical_enable, remove_bg, remove_objects,
                     object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam,
                     log_verbosity, mask_threshold, ply_coords, spz_coords, sog_coords, usdz_coords, preserve_scene_scale
@@ -1048,7 +1054,8 @@ def create_advanced_settings_tab():
                         'enable_usdz': settings[17],
                         'crop_output_bounds': settings[18],
                         'crop_mode': settings[19],
-                        'spherical_enable': settings[20],
+                        'clean_splat': settings[20],
+                        'spherical_enable': settings[21],
                         'remove_bg': settings[21],
                         'remove_objects': settings[22],
                         'object_removal_action': settings[23],
@@ -1108,6 +1115,7 @@ def create_advanced_settings_tab():
                         shared_state.enable_usdz = config_data.get('enable_usdz', 'true')
                         shared_state.crop_output_bounds = config_data.get('crop_output_bounds', 'false')
                         shared_state.crop_mode = config_data.get('crop_mode', 'environment')
+                        shared_state.clean_splat = config_data.get('clean_splat', 'false')
                         shared_state.spherical_enable = config_data.get('spherical_enable', 'false')
                         shared_state.remove_bg = config_data.get('remove_bg', 'false')
                         shared_state.remove_objects = config_data.get('remove_objects', 'false')
@@ -1145,6 +1153,7 @@ def create_advanced_settings_tab():
                             config_data.get('enable_usdz', 'true'),
                             config_data.get('crop_output_bounds', 'false'),
                             config_data.get('crop_mode', 'environment'),
+                            config_data.get('clean_splat', 'false'),
                             config_data.get('spherical_enable', 'false'),
                             config_data.get('remove_bg', 'false'),
                             config_data.get('remove_objects', 'false'),

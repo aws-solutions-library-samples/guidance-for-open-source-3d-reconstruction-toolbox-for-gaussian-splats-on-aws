@@ -32,3 +32,9 @@ variable "project_prefix" {
   description = "The project prefix to add to resource names."
   type        = string
 }
+
+variable "enable_code_build_container_build" {
+  description = "Whether to use CodeBuild for container builds instead of local Docker"
+  type        = string
+  default     = "false"
+}

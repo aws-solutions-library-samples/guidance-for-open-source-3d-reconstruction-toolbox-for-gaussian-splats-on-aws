@@ -96,6 +96,7 @@ module "post_deployment" {
   account_id = var.account_id
   region = var.region
   project_prefix = var.project_prefix
+  enable_code_build_container_build = var.enable_code_build_container_build
 }
 
 # Adding guidance solution ID via AWS CloudFormation resource

@@ -69,3 +69,9 @@ variable "deployment_phase" {
     error_message = "Valid values for deployment_phase are 'base' or 'post'."
   }
 }
+
+variable "enable_code_build_container_build" {
+  description = "Whether to use CodeBuild for container builds instead of local Docker"
+  default     = "false"
+  type        = string
+}

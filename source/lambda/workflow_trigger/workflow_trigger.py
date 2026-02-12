@@ -75,6 +75,7 @@ def validate_config(config: dict):
         "postProcessing": {
             "cropOutputBounds": None,
             "cropMode": None,
+            "cleanSplat": None,
             "enableSpz": None,
             "enableSog": None,
             "enableUsdz": None,
@@ -214,6 +215,7 @@ def lambda_handler(event, context):
                     "maxSteps": str(json_content["training"]["maxSteps"]),
                     "cropOutputBounds": str(json_content["postProcessing"]["cropOutputBounds"]),
                     "cropMode": str(json_content["postProcessing"]["cropMode"]),
+                    "cleanSplat": str(json_content["postProcessing"].get("cleanSplat", "false")),
                     "enableSpz": str(json_content["postProcessing"]["enableSpz"]),
                     "enableSog": str(json_content["postProcessing"]["enableSog"]),
                     "enableUsdz": str(json_content["postProcessing"].get("enableUsdz", "true")),
@@ -290,6 +292,7 @@ def lambda_handler(event, context):
                     "MAX_STEPS": str(json_content["training"]["maxSteps"]),
                     "CROP_OUTPUT_BOUNDS": str(json_content["postProcessing"]["cropOutputBounds"]).lower(),
                     "CROP_MODE": str(json_content["postProcessing"]["cropMode"]),
+                    "CLEAN_SPLAT": str(json_content["postProcessing"].get("cleanSplat", "false")).lower(),
                     "ENABLE_SPZ": str(json_content["postProcessing"]["enableSpz"]),
                     "ENABLE_SOG": str(json_content["postProcessing"]["enableSog"]),
                     "ENABLE_USDZ": str(json_content["postProcessing"]["enableUsdz"]),

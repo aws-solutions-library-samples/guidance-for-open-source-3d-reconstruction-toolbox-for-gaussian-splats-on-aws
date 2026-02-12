@@ -65,6 +65,8 @@ resource "local_file" "updated_outputs" {
 
 # Package the docker image
 resource "null_resource" "docker_packaging" {
+  count = var.enable_code_build_container_build == "true" ? 0 : 1
+  
   triggers = {
     # Trigger rebuild when source files change
     dockerfile_hash = filemd5("${path.root}/../../source/container/Dockerfile")
@@ -176,6 +178,171 @@ resource "null_resource" "invoke_lambda" {
 
   depends_on = [
     aws_lambda_function.model_deployment_lambda,
-    null_resource.docker_packaging
+    null_resource.docker_packaging,
+    null_resource.codebuild_trigger
+  ]
+}
+
+# CodeBuild resources for container build
+data "archive_file" "docker_source" {
+  count       = var.enable_code_build_container_build == "true" ? 1 : 0
+  type        = "zip"
+  source_dir  = "${path.root}/../../source/container"
+  output_path = "${path.module}/docker_source.zip"
+}
+
+resource "aws_s3_object" "docker_source" {
+  count  = var.enable_code_build_container_build == "true" ? 1 : 0
+  bucket = local.bucket_name
+  key    = "codebuild/docker_source.zip"
+  source = data.archive_file.docker_source[0].output_path
+  etag   = data.archive_file.docker_source[0].output_md5
+}
+
+resource "aws_iam_role" "codebuild_role" {
+  count = var.enable_code_build_container_build == "true" ? 1 : 0
+  name  = "${var.project_prefix}-codebuild-role-${local.tf_random_suffix}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "codebuild.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "codebuild_policy" {
+  count = var.enable_code_build_container_build == "true" ? 1 : 0
+  role  = aws_iam_role.codebuild_role[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:${var.region}:${var.account_id}:log-group:/aws/codebuild/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion"
+        ]
+        Resource = "arn:aws:s3:::${local.bucket_name}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:PutImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload"
+        ]
+        Resource = "arn:aws:ecr:${var.region}:${var.account_id}:repository/${local.repo_name}"
+      }
+    ]
+  })
+}
+
+resource "aws_codebuild_project" "docker_build" {
+  count        = var.enable_code_build_container_build == "true" ? 1 : 0
+  name         = "docker-build-${local.repo_name}"
+  service_role = aws_iam_role.codebuild_role[0].arn
+
+  artifacts {
+    type = "NO_ARTIFACTS"
+  }
+
+  environment {
+    compute_type                = "BUILD_GENERAL1_LARGE"
+    image                       = "aws/codebuild/standard:7.0"
+    type                        = "LINUX_CONTAINER"
+    privileged_mode             = true
+    image_pull_credentials_type = "CODEBUILD"
+
+    environment_variable {
+      name  = "AWS_ACCOUNT_ID"
+      value = var.account_id
+    }
+    environment_variable {
+      name  = "AWS_REGION"
+      value = var.region
+    }
+    environment_variable {
+      name  = "ECR_REPO_NAME"
+      value = local.repo_name
+    }
+    environment_variable {
+      name  = "CODE_PATH"
+      value = "/opt/ml/code"
+    }
+    environment_variable {
+      name  = "MODEL_PATH"
+      value = "/opt/ml/model"
+    }
+  }
+
+  source {
+    type      = "S3"
+    location  = "${local.bucket_name}/codebuild/docker_source.zip"
+    buildspec = yamlencode({
+      version = "0.2"
+      phases = {
+        pre_build = {
+          commands = [
+            "echo Logging in to Amazon ECR...",
+            "aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+          ]
+        }
+        build = {
+          commands = [
+            "echo Building Docker image...",
+            "docker build --build-arg CODE_PATH=$CODE_PATH --build-arg MODEL_PATH=$MODEL_PATH -t $ECR_REPO_NAME:latest .",
+            "docker tag $ECR_REPO_NAME:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:latest"
+          ]
+        }
+        post_build = {
+          commands = [
+            "echo Pushing Docker image to ECR...",
+            "docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:latest",
+            "echo Docker image pushed successfully"
+          ]
+        }
+      }
+    })
+  }
+}
+
+resource "null_resource" "codebuild_trigger" {
+  count = var.enable_code_build_container_build == "true" ? 1 : 0
+
+  triggers = {
+    run_at = timestamp()
+  }
+
+  provisioner "local-exec" {
+    command = "aws codebuild start-build --project-name ${aws_codebuild_project.docker_build[0].name} --region ${var.region}"
+  }
+
+  depends_on = [
+    aws_codebuild_project.docker_build,
+    aws_s3_object.docker_source
   ]
 }

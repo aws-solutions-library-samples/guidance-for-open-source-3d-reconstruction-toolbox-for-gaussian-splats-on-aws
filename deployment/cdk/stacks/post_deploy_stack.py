@@ -21,6 +21,7 @@
 """Post deployment stack to build the container and deploy model components"""
 
 from stacks.components.container_deployment import ContainerDeployment
+from stacks.components.container_deployment_codebuild import ContainerDeploymentCodeBuild
 from aws_cdk import (
     Stack,
     Environment,
@@ -118,16 +119,29 @@ class GSWorkflowPostDeployStack(Stack):
                 )
             )
 
-            # Container Deployment Construct
-            container_deployment = ContainerDeployment(
-                scope=self,
-                id="ContainerDeployment",
-                env=env,
-                config_data=config_data,
-                output_data=output_data['GSWorkflowBaseStack'],
-                build_args=build_args,
-                dockerfile_path=dockerfile_path
-            )
+            # Container Deployment Construct - use CodeBuild if flag is enabled
+            use_codebuild = config_data.get('enableCodeBuildContainerBuild', 'false').lower() == 'true'
+            
+            if use_codebuild:
+                container_deployment = ContainerDeploymentCodeBuild(
+                    scope=self,
+                    id="ContainerDeployment",
+                    env=env,
+                    config_data=config_data,
+                    output_data=output_data['GSWorkflowBaseStack'],
+                    build_args=build_args,
+                    dockerfile_path=dockerfile_path
+                )
+            else:
+                container_deployment = ContainerDeployment(
+                    scope=self,
+                    id="ContainerDeployment",
+                    env=env,
+                    config_data=config_data,
+                    output_data=output_data['GSWorkflowBaseStack'],
+                    build_args=build_args,
+                    dockerfile_path=dockerfile_path
+                )
 
             # Add outputs
             CfnOutput(
