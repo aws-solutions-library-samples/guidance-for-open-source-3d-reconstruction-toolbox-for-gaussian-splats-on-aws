@@ -1854,7 +1854,7 @@ if __name__ == "__main__":
                 ply_path,
                 "--output", ply_path,
                 "--level", "medium",
-                "--min-cluster", "100"
+                "--min-cluster", "100",
                 "--no-confirm"
             ]
             pipeline.create_component(
