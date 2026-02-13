@@ -116,7 +116,8 @@ if __name__ == "__main__":
         print(f"Version info completed in: {version_info_done - container_start:.1f}s")
 
         # Open config with default values
-        with open("config.json", encoding="utf-8") as f:
+        config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.json")
+        with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
         config_names = list(config.keys())
         config_values = list(config.values())
@@ -1849,23 +1850,24 @@ if __name__ == "__main__":
     # Clean point cloud - remove outlier noise from point cloud
     ##################################
     try:
-        if config['MODEL'] != "nerfacto":
-            args = [
-                ply_path,
-                "--output", ply_path,
-                "--level", "medium",
-                "--min-cluster", "100",
-                "--no-confirm"
-            ]
-            pipeline.create_component(
-                name="Clean-Point-Cloud",
-                comp_type=ComponentType.POST_PROCESSING,
-                comp_environ=ComponentEnvironment.PYTHON,
-                command="post_processing/clean_point_cloud.py",
-                args=args,
-                cwd=current_dir_path,
-                requires_gpu=False
-            )
+        if config['CLEAN_SPLAT'] == "true":
+            if config['MODEL'] != "nerfacto":
+                args = [
+                    ply_path,
+                    "--output", ply_path,
+                    "--level", "low",
+                    "--min-cluster", "100",
+                    "--no-confirm"
+                ]
+                pipeline.create_component(
+                    name="Clean-Point-Cloud",
+                    comp_type=ComponentType.POST_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="post_processing/clean_point_cloud.py",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
     except Exception as e:
         error_message = f"Issue cleaning point cloud: {e}"
         pipeline.report_error(777, error_message)

@@ -1993,6 +1993,11 @@ def create_s3_browser_tab():
                 choices=["environment", "rigid_body"],
                 value=shared_state.crop_mode
             )
+            refine_clean_splat = gr.Radio(
+                label="Clean Splat (Remove Noise)",
+                choices=["true", "false"],
+                value=shared_state.clean_splat
+            )
             refine_enable_spz = gr.Radio(
                 label="Enable SPZ Export",
                 choices=["true", "false"],
@@ -2254,13 +2259,13 @@ def create_s3_browser_tab():
         )
         
         # Submit refinement job with user selections
-        def submit_refine_job(selected_data, instance, compute, crop, crop_mode, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords):
-            result = refine_splat(selected_data, instance, compute, crop, crop_mode, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords)
+        def submit_refine_job(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords):
+            result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords)
             return gr.update(visible=False), gr.update(visible=False), result
         
         refine_submit_btn.click(
             fn=submit_refine_job,
-            inputs=[selected_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords],
+            inputs=[selected_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords],
             outputs=[refine_modal_html, refine_modal, action_status]
         )
         
@@ -3101,6 +3106,11 @@ def create_combined_monitor_viewer_tab():
                     choices=["environment", "rigid_body"],
                     value=shared_state.crop_mode
                 )
+                refine_clean_splat = gr.Radio(
+                    label="Clean Splat (Remove Noise)",
+                    choices=["true", "false"],
+                    value=shared_state.clean_splat
+                )
                 refine_enable_spz = gr.Radio(
                     label="Enable SPZ Export",
                     choices=["true", "false"],
@@ -3774,13 +3784,13 @@ def create_combined_monitor_viewer_tab():
                 outputs=[refine_modal_html, refine_modal]
             )
             
-            def submit_refine_job_monitor(selected_data, instance, compute, crop, crop_mode, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords):
-                result = refine_splat(selected_data, instance, compute, crop, crop_mode, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords)
+            def submit_refine_job_monitor(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords):
+                result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords)
                 return gr.update(visible=False), gr.update(visible=False), result
             
             refine_submit_btn.click(
                 fn=submit_refine_job_monitor,
-                inputs=[selected_job_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords],
+                inputs=[selected_job_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords],
                 outputs=[refine_modal_html, refine_modal, refine_status]
             )
             

@@ -162,9 +162,9 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     && rm -rf /var/lib/apt/lists/*
 
 # Install and upgrade pip and dependencies with retry logic
-RUN pip install --break-system-packages --upgrade pip setuptools wheel
+#RUN pip install --break-system-packages --upgrade pip setuptools wheel
 
-# Install Python and make it the default
+# Install Python version and make it the default
 RUN cd /usr/src \
     && wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz \
     && tar -xzf Python-${PYTHON_VERSION}.tgz \
@@ -186,13 +186,13 @@ ENV PYTHONPATH=/usr/local/lib/python${PYTHON_VERSION_}/site-packages:/usr/local/
 WORKDIR ${CODE_PATH}
 
 # Install typing-extensions first to avoid naming conflict
-RUN pip install typing-extensions>=4.10.0
+#RUN pip install typing-extensions>=4.10.0
 
 # Install PyTorch for CUDA 13.0 (required after custom Python install)
 RUN pip install torch==${TORCH_VERSION}+cu${CUDA_VERSION_} torchvision==${TORCH_VISION_VERSION}+cu${CUDA_VERSION_} torchaudio==${TORCH_VERSION}+cu${CUDA_VERSION_} --index-url https://download.pytorch.org/whl/cu${CUDA_VERSION_}
 
 # Downgrade setuptools to <v70, otherwise will get ImportError: cannot import name 'packaging' from 'pkg_resources'
-RUN pip install "setuptools<70.0.0" wheel ninja boto3 packaging rich natsort trimesh onnxruntime onnxruntime-gpu
+RUN pip install "typing-extensions>=4.10.0" "setuptools<70.0.0" wheel packaging ninja
 
 # Install tiny-cuda-nn latest stable (requires torch to be installed first)
 RUN pip install git+https://github.com/NVlabs/tiny-cuda-nn.git#subdirectory=bindings/torch
@@ -305,7 +305,7 @@ RUN wget https://github.com/colmap/glomap/archive/refs/tags/${GLOMAP_VERSION}.ta
     && unzip awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip
 
 # Install utilities and ensure numpy==1.26.4 for compatibility
-RUN pip install --no-cache-dir scipy 'numpy==1.26.4' Pillow>=10.3.0 'timm>=1.0.0' einops omegaconf fvcore iopath rembg
+RUN pip install --no-cache-dir scipy 'numpy==1.26.4' Pillow>=10.3.0 'timm>=1.0.0' einops omegaconf fvcore iopath rembg rich natsort trimesh onnxruntime onnxruntime-gpu boto3 
 
 # Install sharp-frame-extractor separately after scipy is available
 RUN pip install --no-cache-dir sharp-frame-extractor

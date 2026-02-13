@@ -1,4 +1,24 @@
 #!/usr/bin/env python3
+# MIT License
+#
+# Copyright (c) 2025 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY
+
 """
 Point Cloud Cleaner - Removes outlier points from PLY files using statistical outlier removal
 and cluster-based filtering.
@@ -6,6 +26,10 @@ and cluster-based filtering.
 Usage:
     python clean_pointcloud.py <input.ply> [--level {low,medium,high}] [--output <output.ply>]
                                            [--min-cluster <size>] [--no-confirm]
+                                               python clean_pointcloud.py point_cloud.ply
+    python clean_pointcloud.py point_cloud.ply --level high
+    python clean_pointcloud.py point_cloud.ply --level high --min-cluster 200
+    python clean_pointcloud.py point_cloud.ply --no-confirm  # Skip interactive mode
 """
 
 import argparse

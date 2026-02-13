@@ -4,7 +4,7 @@ import json
 import os
 from decimal import Decimal
 
-def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=None, crop_mode=None, enable_spz=None, enable_sog=None, enable_usdz=None, ply_coords=None, spz_coords=None, sog_coords=None, usdz_coords=None):
+def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=None, crop_mode=None, clean_splat=None, enable_spz=None, enable_sog=None, enable_usdz=None, ply_coords=None, spz_coords=None, sog_coords=None, usdz_coords=None):
     """Resume training for a selected splat by creating a new job with RUN_SFM=false"""
     try:
         # Import shared_state for other configuration values
@@ -14,6 +14,7 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
         # Use provided values or fall back to shared_state
         crop_bounds = crop_bounds if crop_bounds is not None else shared_state.crop_output_bounds
         crop_mode = crop_mode if crop_mode is not None else shared_state.crop_mode
+        clean_splat = clean_splat if clean_splat is not None else shared_state.clean_splat
         enable_spz = enable_spz if enable_spz is not None else shared_state.enable_spz
         enable_sog = enable_sog if enable_sog is not None else shared_state.enable_sog
         enable_usdz = enable_usdz if enable_usdz is not None else shared_state.enable_usdz
@@ -134,6 +135,7 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
             "postProcessing": {
                 "cropOutputBounds": crop_bounds == "true" if isinstance(crop_bounds, str) else crop_bounds,
                 "cropMode": crop_mode,
+                "cleanSplat": clean_splat == "true" if isinstance(clean_splat, str) else clean_splat,
                 "enableSpz": enable_spz == "true" if isinstance(enable_spz, str) else enable_spz,
                 "enableSog": enable_sog == "true" if isinstance(enable_sog, str) else enable_sog,
                 "enableUsdz": enable_usdz == "true" if isinstance(enable_usdz, str) else enable_usdz,
