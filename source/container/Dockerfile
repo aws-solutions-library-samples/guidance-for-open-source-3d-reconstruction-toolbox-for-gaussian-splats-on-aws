@@ -45,7 +45,6 @@ ENV SPZ_VERSION="2.1.0"
 ENV CERES_HASH="0c70ed3a1a2d6ba47c06c7e8b3b040880bc474db"
 ENV NERFSTUDIO_HASH="50e0e3c70c775e89333256213363badbf074f29d"
 ENV GSPLAT_HASH="b60e917c95afc449c5be33a634f1f457e116ff5e"
-#ENV GSPLAT_HASH="6f378361f32ba4f1be86f65ae0db4948efb37dd5"
 ENV THREEDGRUT_HASH="d78f773b72851395383b43e1b5cbe355a7c68d1f"
 ENV BGREMOVER_HASH="d88ef74457f0c2f1e0eab5b391ce8851b95e8d65"
 ENV SAM2_HASH="2b90b9f5ceec907a1c18123530e92e794ad901a4"
@@ -73,7 +72,6 @@ ENV CODE_PATH="/opt/ml/code"
 
 # Create model path ENV VAR for container
 ARG MODEL_PATH
-#ENV MODEL_PATH="/opt/ml/model"
 ENV MODEL_PATH="/opt/ml/input/data/model"
 
 # Create build argument for container
@@ -160,9 +158,6 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     libvulkan-dev \
     mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
-
-# Install and upgrade pip and dependencies with retry logic
-#RUN pip install --break-system-packages --upgrade pip setuptools wheel
 
 # Install Python version and make it the default
 RUN cd /usr/src \
@@ -354,12 +349,6 @@ RUN git clone --recursive https://github.com/nv-tlabs/3dgrut.git \
     && pip install -r requirements.txt \
     && cd ${CODE_PATH}
 
-# Disable xformers - incompatible with Python 3.12 + PyTorch 2.9.1 + CUDA 13.0
-# Diffusers will use standard PyTorch attention as fallback
-#ENV XFORMERS_DISABLED=1
-#ENV XFORMERS_MORE_DETAILS=0
-#RUN pip uninstall -y xformers || true
-
 # Copy and apply patch for 3DGRUT to fix all CUDA extension import issues with v13
 COPY ./src/pipeline/training/patch_tracer.py ${CODE_PATH}/
 RUN python3 ${CODE_PATH}/patch_tracer.py \
@@ -385,16 +374,9 @@ RUN mkdir -p /opt/mapanything_pycolmap \
     && mv map-anything-${MAPANYTHING_VERSION} map-anything \
     && rm v${MAPANYTHING_VERSION}.tar.gz
 WORKDIR ${CODE_PATH}/map-anything
-RUN sed -i 's/model = init_model("da3", device=device)/model = init_model("da3")/' scripts/demo_colmap.py
-RUN pip install -e ".[depth-anything-3]"
+RUN pip install -e .
 
-# Remove xformers if map-anything installed it
-#RUN pip uninstall -y xformers || true
-#WORKDIR ${CODE_PATH}
-
-# Fix version compatibility issues with diffusers and transformers
-#RUN pip install --force-reinstall --no-cache-dir transformers==4.44.2 diffusers==0.30.3
-
+# Install light glue
 RUN pip install git+https://github.com/cvg/LightGlue.git hydra-core
 
 # Remove xformers if LightGlue installed it
@@ -402,10 +384,7 @@ RUN pip uninstall -y xformers || true
 
 # Reinstall pycolmap after map-anything to ensure ABI compatibility
 # Map-anything may have installed incompatible dependencies that conflict with pycolmap
-RUN pip install --force-reinstall --no-cache-dir --no-deps pycolmap
-
-# Final numpy version lock to ensure compatibility with numpy and splatfacto-w
-#RUN pip install --force-reinstall --no-cache-dir 'numpy==1.26.4' 
+RUN pip install --force-reinstall --no-cache-dir --no-deps pycolmap 
 
 # Install diffusers without torch dependencies to avoid overwriting
 RUN pip install --no-cache-dir --no-deps diffusers && pip install --no-cache-dir accelerate safetensors regex requests transformers

@@ -163,7 +163,9 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
         }
         
         print(f"DEBUG: Using parameters - instance: {instance_type}, spot: {use_spot_instance}")
+        print(f"DEBUG: clean_splat parameter: {clean_splat}, type: {type(clean_splat)}")
         print(f"DEBUG: Original filename for tracking: {original_filename}")
+        print(f"DEBUG: postProcessing config: cropOutputBounds={crop_bounds}, cropMode={crop_mode}, cleanSplat={clean_splat}")
         
         # Convert Decimal to float for JSON serialization
         def convert_decimals(obj):
@@ -176,6 +178,9 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
             return obj
         
         refine_config = convert_decimals(refine_config)
+        
+        # Debug: Print the postProcessing section
+        print(f"DEBUG: Final postProcessing config: {refine_config.get('postProcessing', {})}")
         
         # Upload refinement job JSON to workflow-input
         s3_client = boto3.client('s3')

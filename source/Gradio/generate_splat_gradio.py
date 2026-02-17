@@ -298,7 +298,7 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
                 filter_blurry, max_images, sfm_enable, enhanced_feature, matching_method, use_colmap_model,
                 use_transform_json, training_enable, max_steps, spherical_enable, remove_bg, remove_objects,
                 object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam, log_verbosity, mask_threshold, 
-                crop_output_bounds, crop_mode, enable_spz, enable_sog, video_start_time, video_stop_time, preserve_scene_scale):
+                crop_output_bounds, crop_mode, clean_splat, enable_spz, enable_sog, video_start_time, video_stop_time, preserve_scene_scale):
     unique_uuid = uuid.uuid4()
     original_filename = os.path.basename(video_file) if video_file else "No file selected"
     
@@ -349,6 +349,7 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
         "postProcessing": {
             "cropOutputBounds": crop_output_bounds == "true" if isinstance(crop_output_bounds, str) else crop_output_bounds,
             "cropMode": crop_mode if isinstance(crop_mode, str) else "environment",
+            "cleanSplat": clean_splat == "true" if isinstance(clean_splat, str) else clean_splat,
             "enableSpz": enable_spz == "true",
             "enableSog": enable_sog == "true",
             "enableUsdz": shared_state.enable_usdz == "true",
@@ -469,6 +470,7 @@ def generate_splat(s3_bucket_name, s3_input_prefix, s3_output_prefix, file_obj,
             "postProcessing": {
                 "cropOutputBounds": shared_state.crop_output_bounds == "true",
                 "cropMode": shared_state.crop_mode,
+                "cleanSplat": shared_state.clean_splat == "true",
                 "enableSpz": enable_spz == "true",
                 "enableSog": enable_sog == "true",
                 "enableUsdz": shared_state.enable_usdz == "true",
@@ -619,6 +621,7 @@ def create_upload_aws_tab():
                             "postProcessing": {
                                 "cropOutputBounds": shared_state.crop_output_bounds == "true",
                                 "cropMode": shared_state.crop_mode,
+                                "cleanSplat": shared_state.clean_splat == "true",
                                 "enableSpz": shared_state.enable_spz == "true",
                                 "enableSog": shared_state.enable_sog == "true",
                                 "enableUsdz": shared_state.enable_usdz == "true",
@@ -2903,6 +2906,7 @@ def create_debug_tab():
                         shared_state.mask_threshold,
                         shared_state.crop_output_bounds,
                         shared_state.crop_mode,
+                        shared_state.clean_splat,
                         shared_state.enable_spz,
                         shared_state.enable_sog,
                         shared_state.video_start_time,

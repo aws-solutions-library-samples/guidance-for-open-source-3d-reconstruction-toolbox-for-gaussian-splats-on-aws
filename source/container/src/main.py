@@ -1821,32 +1821,6 @@ if __name__ == "__main__":
 
     ##################################
     # POST-PROCESS COMPONENT:
-    # Crop splat bounds
-    ##################################
-    try:
-        # Apply refinement of output bounds to remove noise if configured
-        if config['CROP_OUTPUT_BOUNDS'] == "true" and config['MODEL'] != "nerfacto":   
-            args = [
-                ply_path,
-                ply_path,
-                "--log-level", config['LOG_VERBOSITY'].upper(),
-                "--mode", config['CROP_MODE']
-            ]
-            pipeline.create_component(
-                name="Crop-Splat",
-                comp_type=ComponentType.POST_PROCESSING,
-                comp_environ=ComponentEnvironment.PYTHON,
-                command="post_processing/crop_splat.py",
-                args=args,
-                cwd=current_dir_path,
-                requires_gpu=False
-            )
-    except Exception as e:
-        error_message = f"Issue cropping splat bounding box: {e}"
-        pipeline.report_error(780, error_message)
-
-    ##################################
-    # POST-PROCESS COMPONENT:
     # Clean point cloud - remove outlier noise from point cloud
     ##################################
     try:
@@ -1871,6 +1845,32 @@ if __name__ == "__main__":
     except Exception as e:
         error_message = f"Issue cleaning point cloud: {e}"
         pipeline.report_error(777, error_message)
+
+    ##################################
+    # POST-PROCESS COMPONENT:
+    # Crop splat bounds
+    ##################################
+    try:
+        # Apply refinement of output bounds to remove noise if configured
+        if config['CROP_OUTPUT_BOUNDS'] == "true" and config['MODEL'] != "nerfacto":   
+            args = [
+                ply_path,
+                ply_path,
+                "--log-level", config['LOG_VERBOSITY'].upper(),
+                "--mode", config['CROP_MODE']
+            ]
+            pipeline.create_component(
+                name="Crop-Splat",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="post_processing/crop_splat.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue cropping splat bounding box: {e}"
+        pipeline.report_error(780, error_message)
 
     ##################################
     # POST-PROCESS COMPONENT:
