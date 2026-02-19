@@ -3029,12 +3029,7 @@ def create_combined_monitor_viewer_tab():
                     cancel_no_btn = gr.Button("No, Keep Running", variant="secondary")
                     cancel_yes_btn = gr.Button("Yes, Cancel Job", variant="stop")
             
-            cancel_status = gr.Textbox(
-                label="Cancel Status",
-                value="",
-                visible=True,
-                lines=2
-            )
+
             
             # Files modal
             files_modal_html = gr.HTML(visible=False, elem_id="files-modal-overlay")
@@ -3175,12 +3170,7 @@ def create_combined_monitor_viewer_tab():
                     refine_cancel_btn = gr.Button("Cancel", variant="secondary")
                     refine_submit_btn = gr.Button("Submit Refinement Job", variant="primary")
             
-            refine_status = gr.Textbox(
-                label="Refine Status",
-                value="",
-                visible=True,
-                lines=3
-            )
+
             
             # Cost table at bottom
             gr.Markdown("### 💰 Job Costs")
@@ -3408,8 +3398,8 @@ def create_combined_monitor_viewer_tab():
                                     label="SOG Viewer Status",
                                     interactive=False,
                                     value="",
-                                    lines=3,
-                                    max_lines=5
+                                    lines=1,
+                                    max_lines=1
                                 )
                             
                             with gr.Tab("Video Preview"):
@@ -3543,13 +3533,12 @@ def create_combined_monitor_viewer_tab():
             # Cancel job handlers
             def show_cancel_modal(selected_data):
                 if not selected_data:
-                    return gr.update(visible=False), gr.update(visible=False), "", ""
+                    return gr.update(visible=False), gr.update(visible=False), ""
                 job_id = selected_data[0][:8] if selected_data[0] else "Unknown"
                 return (
                     gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999;'></div>"),
                     gr.update(visible=True),
-                    f"Are you sure you want to cancel job **{job_id}...**?",
-                    ""
+                    f"Are you sure you want to cancel job **{job_id}...**?"
                 )
             
             def cancel_job_execution(selected_data):
@@ -3560,14 +3549,27 @@ def create_combined_monitor_viewer_tab():
                     
                     job_id = selected_data[0]
                     
-                    # Construct execution ARN from state machine name and job UUID
-                    # Format: arn:aws:states:region:account:execution:stateMachineName:executionName
                     sfn_client = boto3.client('stepfunctions', region_name=shared_state.aws_region)
-                    account_id = boto3.client('sts').get_caller_identity().get('Account')
-                    state_machine_name = f"3dgs-state-machine-{shared_state.stack_unique_id}"
-                    execution_arn = f"arn:aws:states:{shared_state.aws_region}:{account_id}:execution:{state_machine_name}:{job_id}"
                     
-                    # Stop the state machine execution
+                    # Look up the state machine ARN from SSM (same way Lambda does)
+                    ssm_client = boto3.client('ssm', region_name=shared_state.aws_region)
+                    ssm_param_name = f"3dgs-sfn-arn-{shared_state.stack_unique_id}"
+                    state_machine_arn = ssm_client.get_parameter(Name=ssm_param_name)['Parameter']['Value']
+                    
+                    # Find the running execution that contains this job UUID
+                    execution_arn = None
+                    paginator = sfn_client.get_paginator('list_executions')
+                    for page in paginator.paginate(stateMachineArn=state_machine_arn, statusFilter='RUNNING'):
+                        for ex in page['executions']:
+                            if job_id in ex['name'] or job_id in ex.get('executionArn', ''):
+                                execution_arn = ex['executionArn']
+                                break
+                        if execution_arn:
+                            break
+                    
+                    if not execution_arn:
+                        raise Exception(f"No running execution found for job {job_id[:8]}")
+                    
                     sfn_client.stop_execution(
                         executionArn=execution_arn,
                         error='UserCancelled',
@@ -3583,18 +3585,20 @@ def create_combined_monitor_viewer_tab():
                         ExpressionAttributeValues={':status': 'Cancelled'}
                     )
                     
-                    return gr.update(visible=False), gr.update(visible=False), f"✅ Job {job_id[:8]}... cancelled successfully"
+                    gr.Info(f"✅ Job {job_id[:8]}... cancelled successfully")
+                    return gr.update(visible=False), gr.update(visible=False)
                     
                 except Exception as e:
                     print(f"Error cancelling job: {e}")
                     import traceback
                     traceback.print_exc()
-                    return gr.update(visible=False), gr.update(visible=False), f"❌ Error cancelling job: {str(e)}"
+                    gr.Warning(f"❌ Error cancelling job: {str(e)}")
+                    return gr.update(visible=False), gr.update(visible=False)
             
             cancel_job_btn.click(
                 fn=show_cancel_modal,
                 inputs=[selected_job_data],
-                outputs=[cancel_modal_html, cancel_modal, cancel_job_info, cancel_status]
+                outputs=[cancel_modal_html, cancel_modal, cancel_job_info]
             )
             
             cancel_no_btn.click(
@@ -3605,7 +3609,7 @@ def create_combined_monitor_viewer_tab():
             cancel_yes_btn.click(
                 fn=cancel_job_execution,
                 inputs=[selected_job_data],
-                outputs=[cancel_modal_html, cancel_modal, cancel_status]
+                outputs=[cancel_modal_html, cancel_modal]
             )
             
             # Close files modal
@@ -3745,10 +3749,13 @@ def create_combined_monitor_viewer_tab():
             )
             
             # Add to favorites button in left panel
+            def add_favorite_from_selector(filename, job_data):
+                result = add_to_favorites([job_data[0], filename]) if filename and job_data else "No file selected"
+                gr.Info(result)
+            
             add_favorite_file_btn.click(
-                fn=lambda filename, job_data: add_to_favorites([job_data[0], filename]) if filename and job_data else "No file selected",
-                inputs=[file_selector, selected_job_data],
-                outputs=[refine_status]
+                fn=add_favorite_from_selector,
+                inputs=[file_selector, selected_job_data]
             )
             
             # Close viewer modal
@@ -3764,23 +3771,26 @@ def create_combined_monitor_viewer_tab():
                 outputs=[download_iframe]
             )
             
-            # Add to favorites
+            # Add to favorites (from selected_file_data)
+            def add_favorite_from_file_data(file_data):
+                result = add_to_favorites(file_data) if file_data else "No file selected"
+                gr.Info(result)
+            
             add_favorite_file_btn.click(
-                fn=lambda file_data: add_to_favorites(file_data) if file_data else "No file selected",
-                inputs=[selected_file_data],
-                outputs=[refine_status]
+                fn=add_favorite_from_file_data,
+                inputs=[selected_file_data]
             )
             
             # Refine modal handlers
             def show_refine_modal_monitor(selected_data):
                 if not selected_data:
-                    return gr.update(visible=False), gr.update(visible=False), ""
-                return gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999; pointer-events: none;'></div>"), gr.update(visible=True), ""
+                    return gr.update(visible=False), gr.update(visible=False)
+                return gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999; pointer-events: none;'></div>"), gr.update(visible=True)
             
             refine_job_btn.click(
                 fn=show_refine_modal_monitor,
                 inputs=[selected_job_data],
-                outputs=[refine_modal_html, refine_modal, refine_status]
+                outputs=[refine_modal_html, refine_modal]
             )
             
             refine_cancel_btn.click(
@@ -3790,12 +3800,13 @@ def create_combined_monitor_viewer_tab():
             
             def submit_refine_job_monitor(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords):
                 result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords)
-                return gr.update(visible=False), gr.update(visible=False), result
+                gr.Info(result)
+                return gr.update(visible=False), gr.update(visible=False)
             
             refine_submit_btn.click(
                 fn=submit_refine_job_monitor,
                 inputs=[selected_job_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords],
-                outputs=[refine_modal_html, refine_modal, refine_status]
+                outputs=[refine_modal_html, refine_modal]
             )
             
             # Connect favorite buttons to viewer modal
@@ -3884,6 +3895,10 @@ def create_combined_monitor_viewer_tab():
                     } 
                 }"""
             )
+            
+            gr.HTML(
+                '<div style="text-align:center; margin:10px 0;"><a href="https://superspl.at/editor" target="_blank" style="display:inline-block; background:#f97316; color:white; padding:8px 16px; text-decoration:none; border-radius:6px; font-size:14px; font-weight:500;">🚀 Open SuperSplat Editor</a></div>'
+            )
 
 # Add the PlayCanvas JavaScript code globally
 playcanvas_js = """
@@ -3921,8 +3936,8 @@ async () => {
         
         const pixelRatio = window.devicePixelRatio || 1;
         app.graphicsDevice.maxPixelRatio = pixelRatio;
-        app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
-        app.setCanvasResolution(pc.RESOLUTION_AUTO);
+        app.setCanvasFillMode(pc.FILLMODE_NONE);
+        app.setCanvasResolution(pc.RESOLUTION_FIXED);
         
         // Handle resize for high DPI
         const handleResize = () => {
@@ -4080,11 +4095,7 @@ async () => {
             app.root.addChild(entity);
         }
         
-        const info = document.createElement('div');
-        info.style.cssText = 'position: absolute; top: 10px; right: 10px; color: white; background: rgba(0,0,0,0.7); padding: 8px; border-radius: 4px; font-size: 12px; z-index: 1000;';
-        //info.innerHTML = `PlayCanvas SOG Viewer<br>File: ${fileName}<br>Size: ${fileSize}<br>Status: SOG Loaded Successfully<br>Mouse: Rotate | Wheel: Zoom | Right-click: Pan`;
-        container.style.position = 'relative';
-        container.appendChild(info);
+
     };
     
     // Check for pending SOG data when tab becomes visible
