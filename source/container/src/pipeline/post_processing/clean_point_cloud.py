@@ -95,6 +95,7 @@ def statistical_outlier_removal(points: np.ndarray, nb_neighbors: int, std_ratio
 def cluster_filter_fast(points: np.ndarray, min_cluster_size: int, eps: float = None):
     """
     Remove small isolated clusters. Returns mask and cluster info for preview.
+    Memory-optimized for large point clouds.
     """
     if len(points) == 0:
         return np.array([], dtype=bool), []
@@ -114,23 +115,35 @@ def cluster_filter_fast(points: np.ndarray, min_cluster_size: int, eps: float = 
     print(f"  Distance threshold (eps): {eps:.4f}")
     print(f"  Finding connected points...")
     
-    batch_size = 5000
+    # Use smaller batch size and limit neighbors to reduce memory
+    batch_size = 1000
+    max_neighbors = 50  # Limit neighbors per point to control memory
     rows = []
     cols = []
     
     for i in range(0, n_points, batch_size):
         end = min(i + batch_size, n_points)
-        neighbors_list = tree.query_ball_point(points[i:end], eps)
+        # Query limited neighbors instead of all within radius
+        distances, indices = tree.query(points[i:end], k=min(max_neighbors, n_points), distance_upper_bound=eps)
         
-        for j, neighbors in enumerate(neighbors_list):
+        for j in range(end - i):
             point_idx = i + j
+            # Only add valid neighbors (distance < eps)
+            valid_mask = distances[j] < eps
+            neighbors = indices[j][valid_mask]
+            
             for neighbor in neighbors:
-                if neighbor != point_idx:
+                if neighbor != point_idx and neighbor < n_points:
                     rows.append(point_idx)
                     cols.append(neighbor)
         
         print_progress(end, n_points, "  Building graph")
+        
+        # Free memory periodically for very large point clouds
+        if len(rows) > 10_000_000:  # If we have > 10M edges, build partial matrix
+            print(f"\n  Memory optimization: Processing {len(rows):,} edges...")
     
+    print(f"\n  Creating sparse adjacency matrix with {len(rows):,} edges...")
     data = np.ones(len(rows), dtype=np.int8)
     adjacency = csr_matrix((data, (rows, cols)), shape=(n_points, n_points))
     

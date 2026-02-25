@@ -1,8 +1,11 @@
 import boto3
+import re
 import uuid
 import json
 import os
 from decimal import Decimal
+
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
 
 def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=None, crop_mode=None, clean_splat=None, enable_spz=None, enable_sog=None, enable_usdz=None, ply_coords=None, spz_coords=None, sog_coords=None, usdz_coords=None):
     """Resume training for a selected splat by creating a new job with RUN_SFM=false"""
@@ -28,6 +31,10 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
         
         job_id = selected_data[0]  # First column is job ID
         filename = selected_data[1]  # Second column is filename
+        
+        # Validate job_id is a well-formed UUID before using as DynamoDB key
+        if not _UUID_RE.match(str(job_id)):
+            return f"Error: Invalid job ID format"
         
         # Get job metadata from DynamoDB
         dynamodb = boto3.resource('dynamodb', region_name=shared_state.aws_region)

@@ -21,6 +21,8 @@
 # A Gradio interface and server to submit and view splats
 
 import os
+import re
+import html
 import uuid
 import json
 import boto3
@@ -29,6 +31,14 @@ import threading
 import gradio as gr
 import boto3.s3.transfer
 from refine_splat import refine_splat
+
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+
+def _validate_uuid(value: str) -> str:
+    """Validate that value is a well-formed UUID to prevent injection."""
+    if not _UUID_RE.match(str(value)):
+        raise ValueError(f"Invalid UUID format")
+    return str(value)
 
 print(f"Gradio Version: {gr.__version__}")
 
@@ -1076,7 +1086,10 @@ def create_advanced_settings_tab():
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
                     os.makedirs(configs_dir, exist_ok=True)
-                    config_file = os.path.join(configs_dir, f"{config_name.strip()}.json")
+                    safe_name = re.sub(r'[^\w\-. ]', '', config_name.strip())[:64]
+                    config_file = os.path.join(configs_dir, f"{safe_name}.json")
+                    if not os.path.realpath(config_file).startswith(os.path.realpath(configs_dir) + os.sep):
+                        return "Error: Invalid configuration name", gr.update()
                     
                     try:
                         with open(config_file, 'w') as f:
@@ -1091,7 +1104,10 @@ def create_advanced_settings_tab():
                         return ["Please select a configuration"] + [gr.update() for _ in range(34)]
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
-                    config_file = os.path.join(configs_dir, f"{config_name}.json")
+                    safe_name = re.sub(r'[^\w\-. ]', '', config_name)[:64]
+                    config_file = os.path.join(configs_dir, f"{safe_name}.json")
+                    if not os.path.realpath(config_file).startswith(os.path.realpath(configs_dir) + os.sep):
+                        return ["Error: Invalid configuration name"] + [gr.update() for _ in range(34)]
                     
                     try:
                         with open(config_file, 'r') as f:
@@ -1450,8 +1466,8 @@ def create_playcanvas_sog_viewer(presigned_url, filename):
         <script>
         window.sogData = {{
             fileData: '{file_data}',
-            fileName: '{filename}',
-            fileSize: '{file_size}'
+            fileName: '{html.escape(filename)}',
+            fileSize: '{html.escape(file_size)}'
         }};
         window.sogLoaded = false;
         </script>
@@ -1656,7 +1672,7 @@ def get_job_metadata(job_id):
             print(f"Table error: {str(table_error)}")
             return f"<div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #e8e8e8; color: #333;'>DynamoDB table '{table_name}' not found or not accessible in {shared_state.aws_region}</div>"
         
-        response = table.get_item(Key={'uuid': job_id})
+        response = table.get_item(Key={'uuid': _validate_uuid(job_id)})
         print(f"DynamoDB response: {response}")
         
         if 'Item' in response:
@@ -1719,7 +1735,7 @@ def get_job_metadata(job_id):
             table_content = f"<table style='border-collapse: collapse; width: 100%; min-width: 600px;'>{''.join(table_rows)}</table>"
             return f"<h3 style='margin: 0 0 8px 0;'>Job Configuration</h3><div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #e8e8e8; color: #333; line-height: 1.4; width: 100%; overflow-x: auto;'>{table_content}</div>"
         else:
-            error_content = f"No metadata found for job ID: {job_id}<br/><br/>This could mean:<br/>- The job hasn't been processed yet<br/>- The job was created before metadata tracking<br/>- The job ID is incorrect"
+            error_content = f"No metadata found for job ID: {html.escape(str(job_id))}<br/><br/>This could mean:<br/>- The job hasn't been processed yet<br/>- The job was created before metadata tracking<br/>- The job ID is incorrect"
             return f"<div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #e8e8e8; color: #333; line-height: 1.4;'>{error_content}</div>"
             
     except Exception as e:
@@ -1760,7 +1776,10 @@ def add_to_favorites(selected_data):
         # Save to favorites directory
         favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
         os.makedirs(favorites_dir, exist_ok=True)
-        favorite_path = os.path.join(favorites_dir, favorite_filename)
+        safe_favorite_filename = os.path.basename(favorite_filename)
+        favorite_path = os.path.join(favorites_dir, safe_favorite_filename)
+        if not os.path.realpath(favorite_path).startswith(os.path.realpath(favorites_dir) + os.sep):
+            return "Error: Invalid filename"
         
         # Copy the file to favorites directory
         if job_id == 'local':
@@ -1875,6 +1894,9 @@ def create_s3_browser_tab():
         
         # Connect favorite button handlers to open viewer modal
         def open_favorite_in_modal(path, name):
+            favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
+            if not os.path.realpath(path).startswith(os.path.realpath(favorites_dir) + os.sep):
+                return (gr.update(), gr.update(), gr.update(), "Error: Invalid file path")
             if name.lower().endswith('.sog'):
                 import base64
                 with open(path, 'rb') as f:
@@ -2283,7 +2305,7 @@ def get_job_output_files(job_id):
     try:
         dynamodb = boto3.resource('dynamodb', region_name=shared_state.aws_region)
         table = dynamodb.Table(shared_state.ddb_table_name)
-        response = table.get_item(Key={'uuid': job_id})
+        response = table.get_item(Key={'uuid': _validate_uuid(job_id)})
         
         if 'Item' not in response:
             return []
@@ -3193,7 +3215,7 @@ def create_combined_monitor_viewer_tab():
                 try:
                     dynamodb = boto3.resource('dynamodb', region_name=shared_state.aws_region)
                     table = dynamodb.Table(shared_state.ddb_table_name)
-                    response = table.get_item(Key={'uuid': job_id})
+                    response = table.get_item(Key={'uuid': _validate_uuid(job_id)})
                     
                     if 'Item' not in response:
                         return "<div style='border: 3px solid #666; border-radius: 8px; padding: 15px; background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); box-shadow: 0 4px 6px rgba(0,0,0,0.1);'><h3 style='margin: 0 0 15px 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 8px;'>📊 Job Progress</h3><div style='color: #ccc;'>No phase data available</div></div>"
@@ -3580,7 +3602,7 @@ def create_combined_monitor_viewer_tab():
                     dynamodb = boto3.resource('dynamodb', region_name=shared_state.aws_region)
                     table = dynamodb.Table(shared_state.ddb_table_name)
                     table.update_item(
-                        Key={'uuid': job_id},
+                        Key={'uuid': _validate_uuid(job_id)},
                         UpdateExpression='SET uuidStatus = :status',
                         ExpressionAttributeValues={':status': 'Cancelled'}
                     )
@@ -3811,6 +3833,9 @@ def create_combined_monitor_viewer_tab():
             
             # Connect favorite buttons to viewer modal
             def open_favorite_in_modal(path, name):
+                favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
+                if not os.path.realpath(path).startswith(os.path.realpath(favorites_dir) + os.sep):
+                    return (gr.update(), gr.update(), gr.update(), gr.update(), "Error: Invalid file path")
                 if name.lower().endswith('.sog'):
                     import base64
                     with open(path, 'rb') as f:

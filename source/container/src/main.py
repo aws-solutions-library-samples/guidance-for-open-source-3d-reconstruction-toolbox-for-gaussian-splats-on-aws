@@ -2411,8 +2411,13 @@ if __name__ == "__main__":
                         else: # Archive of images or archive with a video
                             # unzip archive into temp directory
                             temp_path = os.path.join(config['DATASET_PATH'], 'temp')
-                            with zipfile.ZipFile(input_file_path,"r") as zip_ref:
-                                zip_ref.extractall(temp_path)  # nosemgrep: dangerous-tarfile-extractall
+                            with zipfile.ZipFile(input_file_path, "r") as zip_ref:
+                                # Validate entries to prevent zip slip attacks
+                                for entry in zip_ref.namelist():
+                                    entry_path = os.path.realpath(os.path.join(temp_path, entry))
+                                    if not entry_path.startswith(os.path.realpath(temp_path) + os.sep):
+                                        raise ValueError(f"Zip slip detected: {entry}")
+                                zip_ref.extractall(temp_path)
                             
                             # Check for video files first (.mov, .mp4)
                             all_files = []

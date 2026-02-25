@@ -57,10 +57,26 @@ if os.path.isdir(path):
     if os.path.isdir(sparse_path):
         print("Input path exists...creating transforms.json file")
         try:
-			# Create json from colmap data
+            # Create json from colmap data
             print(f"Sparse Path: {sparse_path}")
             print(f"PLY Filename: {ply_path}")
             colmap_to_json(recon_dir=Path(sparse_path), output_dir=Path(path), ply_filename=ply_path)
+
+            # Inject mask_path into each frame if a masks directory exists
+            import json
+            masks_dir = os.path.join(path, "masks")
+            transforms_path = os.path.join(path, "transforms.json")
+            if os.path.isdir(masks_dir) and os.path.isfile(transforms_path):
+                with open(transforms_path, "r") as f:
+                    data = json.load(f)
+                for frame in data.get("frames", []):
+                    img_name = os.path.basename(frame["file_path"])
+                    mask_file = os.path.join(masks_dir, img_name + ".png")
+                    if os.path.isfile(mask_file):
+                        frame["mask_path"] = f"masks/{img_name}.png"
+                with open(transforms_path, "w") as f:
+                    json.dump(data, f, indent=4)
+                print(f"Injected mask_path into transforms.json")
         except Exception as e:
             error_str = str(e).lower()
             if "einsum" in error_str or "subscripts" in error_str or "dimensions" in error_str:

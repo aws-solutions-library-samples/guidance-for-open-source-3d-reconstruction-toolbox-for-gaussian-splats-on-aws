@@ -24,4 +24,5 @@ torch.load = patched_load
 
 # Now run the export script
 if __name__ == "__main__":
-    exec(open('/opt/ml/code/splatfacto-w/export_script.py').read())
+    import runpy
+    runpy.run_path('/opt/ml/code/splatfacto-w/export_script.py', run_name='__main__')

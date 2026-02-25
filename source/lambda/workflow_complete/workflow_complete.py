@@ -22,12 +22,25 @@
 and start the workflow """
 
 import os
+import re
 import json
 import boto3
 from datetime import datetime
 from dateutil import parser
 
 from botocore.exceptions import ClientError
+
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+
+def _validate_uuid(value: str) -> str:
+    """Validate that value is a well-formed UUID to prevent injection."""
+    if not _UUID_RE.match(str(value)):
+        raise ValueError(f"Invalid UUID format: {value!r}")
+    return str(value)
+
+def _sanitize_text(value: str) -> str:
+    """Strip newline/carriage-return characters to prevent log/message injection."""
+    return re.sub(r'[\r\n]', ' ', str(value))
 
 def send_sns_notification(training_job_name, message, is_error=False):
     """Send an SNS notification about the training job status."""
@@ -624,7 +637,7 @@ def lambda_handler(event, context):
         sns_topic_arn = os.environ['SNS_TOPIC_ARN']
 
         key = {
-            'uuid': str(event['envVars']['UUID'])
+            'uuid': _validate_uuid(event['envVars']['UUID'])
         }
 
         # Update end time stamp in DynamoDB
@@ -731,7 +744,7 @@ def lambda_handler(event, context):
             # Send success notification
             message_text = f"""✅ Splat Processing Complete
             
-File Processed Successfully: {event['envVars']['FILENAME']}
+File Processed Successfully: {_sanitize_text(event['envVars']['FILENAME'])}
 
 📂 Output Location:
 {event['envVars']['S3_OUTPUT']}/{event['envVars']['UUID']}
@@ -755,7 +768,7 @@ This is an automated message from the Splat Processing System"""
             sns_client.publish(
                 TargetArn=sns_topic_arn,
                 Message=message_text,
-                Subject=f"✅ Splat Processing Complete: {event['envVars']['UUID']}",
+                Subject=_sanitize_text(f"✅ Splat Processing Complete: {event['envVars']['UUID']}"),
             )
             
             return {
@@ -929,7 +942,7 @@ This is an automated message from the Splat Processing System"""
         # Format success message
         message_text = f"""✅ Splat Processing Complete
         
-File Processed Successfully: {event['envVars']['FILENAME']}
+File Processed Successfully: {_sanitize_text(event['envVars']['FILENAME'])}
 
 📂 Output Location:
 {event['envVars']['S3_OUTPUT']}/{event['envVars']['UUID']}
@@ -952,7 +965,7 @@ This is an automated message from the Splat Processing System"""
         response = sns_client.publish(
             TargetArn=sns_topic_arn,
             Message=message_text,
-            Subject=f"✅ Splat Processing Complete: {event['envVars']['UUID']}",
+            Subject=_sanitize_text(f"✅ Splat Processing Complete: {event['envVars']['UUID']}"),
         )
 
         return output
@@ -1028,7 +1041,7 @@ This is an automated message from the Splat Processing System"""
             
         message_text = f"""{subject_prefix}
 
-Failed to process file: {event['envVars']['FILENAME']}
+Failed to process file: {_sanitize_text(event['envVars']['FILENAME'])}
 
 ❌ Container Error Details:
 {container_logs['message'][:50000] if container_logs.get('status') == 'ERROR' else 'Job failed: AlgorithmError: , exit code: 1'}
@@ -1043,5 +1056,5 @@ This is an automated message from the Splat Processing System"""
         response = sns_client.publish(
             TargetArn=sns_topic_arn,
             Message=message_text,
-            Subject=f"{subject_prefix}: {event['envVars']['UUID']}",
+            Subject=_sanitize_text(f"{subject_prefix}: {event['envVars']['UUID']}"),
         )

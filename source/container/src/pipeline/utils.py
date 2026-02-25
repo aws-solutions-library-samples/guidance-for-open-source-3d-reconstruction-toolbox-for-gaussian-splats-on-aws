@@ -912,7 +912,7 @@ def print_container_version_info():
         print(f"  Batch Job ID: {os.environ.get('AWS_BATCH_JOB_ID')}")
         print(f"  Batch Job Queue: {os.environ.get('AWS_BATCH_JQ_NAME', 'N/A')}")
         try:
-            ulimit_result = subprocess.check_output(['ulimit', '-a'], shell=True, executable='/bin/bash').decode()
+            ulimit_result = subprocess.check_output(['/bin/bash', '-c', 'ulimit -a']).decode()
             print(f"  Resource limits:\n{ulimit_result}")
         except:
             pass
