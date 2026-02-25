@@ -51,9 +51,9 @@ This guidance will:
 5. The job trigger **AWS Lambda** function will perform input validation and set appropriate variables for the [AWS Step Function State Machine](https://aws.amazon.com/step-functions/).
 6. The workflow job record will be created in [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) job table.
 7. The job trigger **AWS Lambda** function will invoke an **AWS Step Functions State Machine** to handle the entire workflow job.
-8. An [Amazon SageMaker](https://aws.amazon.com/sagemaker/) Training Job will be submitted synchronously using the state machine built-in wait until completion mechanism. 
+8. An [Amazon SageMaker](https://aws.amazon.com/sagemaker/) Training or [AWS Batch](https://aws.amazon.com/batch/) Job will be submitted synchronously using the state machine built-in wait until completion mechanism. 
 9. The [Amazon Elastic Container Registry (ECR)](https://aws.amazon.com/ecr/) container image and S3 job bucket model artifacts will be used to spin up a new Graphics Processing Unit (GPU) container. The compute node instance type is determined by the job JSON configuration.
-10. The GPU container will run the entire pipeline as an **Amazon SageMaker** training job.
+10. The GPU container will run the entire pipeline as an **Amazon SageMaker** training or **AWS Batch** job.
 11. The job completion **AWS Lambda** function will complete the workflow job by updating the job metadata in **Amazon DynamoDB** and notifying the user via email upon completion using **Amazon SNS**.
 12. Internal workflow parameters are stored in [AWS System Manager Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html) during guidance deployment to decouple the job trigger **AWS Lambda** function and the **AWS Step Function State Machine**.
 13. [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/) is used to monitor the training logs, surfacing errors to the user.
@@ -146,22 +146,6 @@ _We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/l
 
 The following table provides a sample cost breakdown for deploying this Guidance with the default parameters in the US East (N. Virginia) Region for one month.
 
-**On-Demand Instance (SageMaker)**
-
-| AWS Service        | Dimensions                                                                       | Cost [USD]        |
-| ------------------ | -------------------------------------------------------------------------------- | ----------------- |
-| Amazon S3          | Standard feature storage (input=200MB, output=2.5GB)                             | $1.61/month       |
-| Amazon S3          | Data transfer feature                                                            | $0.90/month       |
-| Amazon DynamoDB    | Job table storage, 0.5MB per month, 1GB total, avg item size=825bytes            | $0.81/month       |
-| AWS Lambda         | 2 invocations per job, 1.25s, 7.1s = 8.5s                                        | $0.01/month       |
-| AWS Step Functions | State transitions per workflow = 5                                               | $0.01/month       |
-| Amazon SageMaker   | num_instance=1, num_hours_per_job=1, ml.g5.4xlarge, Volume_size_in_GB_per_job=15 | $273.00/month     |
-| Amazon ECR         | Data storage, 15GB                                                               | $1.47/month       |
-| Amazon SNS         | Email notifications, 1 per request                                               | $0.01/month       |
-| Parameter Store    | Store 1 param                                                                    | $0.01/month       |
-| Amazon CloudWatch  | Metrics, 1GB                                                                     | $0.50/month       |
-| **TOTAL**          | (est. 100 requests)                                                              | **$278.33/month** |
-
 **Spot Instance (Batch/ECS)**
 | AWS Service        | Dimensions                                                                       | Cost [USD]        |
 | ------------------ | -------------------------------------------------------------------------------- | ----------------- |
@@ -170,12 +154,15 @@ The following table provides a sample cost breakdown for deploying this Guidance
 | Amazon DynamoDB    | Job table storage, 0.5MB per month, 1GB total, avg item size=825bytes            | $0.81/month       |
 | AWS Lambda         | 2 invocations per job, 1.25s, 7.1s = 8.5s                                        | $0.01/month       |
 | AWS Step Functions | State transitions per workflow = 5                                               | $0.01/month       |
-| Amazon ECS/Batch   | num_instance=1, num_hours_per_job=1, ml.g5.4xlarge, Volume_size_in_GB_per_job=15 | $205.00/month     |
 | Amazon ECR         | Data storage, 15GB                                                               | $1.47/month       |
 | Amazon SNS         | Email notifications, 1 per request                                               | $0.01/month       |
 | Parameter Store    | Store 1 param                                                                    | $0.01/month       |
 | Amazon CloudWatch  | Metrics, 1GB                                                                     | $0.50/month       |
-| **TOTAL**          | (est. 100 requests)                                                              | **$210.33/month** |
+| AWS CodeBuild      | Optional, $0.005 per minute, 100min free, only need build once, takes ~60mn      | -                 |
+| Amazon ECS/Batch   | num_instance=1, num_hours_per_job=1, ml.g5.4xlarge, Volume_size_in_GB_per_job=15 | $68.00/month      |
+| **TOTAL**          | (est. 100 requests)                                                              | **$73.33/month**  |
+
+> *Note: Amazon SageMaker can be used instead of AWS Batch for on-demand processing, bypassing any wait queues for ~$142.33/month total*
 
 ## Security
 **Considerations**
@@ -188,7 +175,17 @@ At the time of publishing, the codebase was scanned using Semgrep, Bandit, Check
 | Error   | False Positive  | Semgrep      | 590 dangerous-subprocess-use-audit  | Detected subprocess function 'run' without a static string. If this data can be controlled by a malicious actor, it may be an instance of command injection | The subprocess call is already validated - it uses a list of arguments (preventing shell injection) and all parameters are validated before use, making it safe from command injection attacks. |
 | Error   | False Positive  | Semgrep      | 98 sqlalchemy-execute-raw-query     | Avoiding SQL string concatenation: untrusted input concatenated with raw SQL query can result in SQL Injection | The query is already validated with proper table name escaping, making it safe from SQL injection attacks.                                                                                                                               |
 | Error   | False Positive  | Semgrep      | 93 sqlalchemy-execute-raw-query     | Avoiding SQL string concatenation: untrusted input concatenated with raw SQL query can result in SQL Injection | The query is already validated with proper table name escaping and validation, making it safe from SQL injection attacks.                                                                                                                   |
-| Error   | False Positive  | Gitleaks     | 54 generic-api-key : fingerprint    | API Key found | This is not an API key but just a random prefix for the project components                                                                                                                                                               |
+| Error   | False Positive  | Gitleaks     | 54 generic-api-key : fingerprint    | API Key found | This is not an API key but just a random prefix for the project components |
+| Error   | False Positive  | Codeguru     | NoSQL Injection — workflow_complete.py:591,603,615 | Untrusted input used in DynamoDB operation without sanitization | The helper functions `put_ddb_item`, `get_ddb_item_value`, and `update_ddb_item_value` receive a key dict that is already validated via `_validate_uuid()` at the only call site in `lambda_handler`. Codeguru does not trace the validation through the call chain. |
+| Error   | False Positive  | Codeguru     | XSS — workflow_complete.py:768 | `client.publish` using unsanitized user input | The SNS `Subject` field is sanitized with `_sanitize_text()`. The `Message` body field is plain text delivered via email/SMS and is not rendered as HTML in a browser context. The `FILENAME` value in the message body was additionally sanitized as a precaution. |
+| Error   | False Positive  | Codeguru     | NoSQL Injection — generate_splat_gradio.py:1675,2308,3218,3604 | Untrusted input used in DynamoDB operation without sanitization | All four call sites apply `_validate_uuid(job_id)` inline as the key argument. Codeguru does not recognise the inline validation wrapper. |
+| Error   | False Positive  | Codeguru     | Untrusted data in web content — generate_splat_gradio.py:525,672,137 | Untrusted data incorporated into web page content without encoding | These return plain strings to `gr.Textbox` components. Gradio textboxes render output as escaped plain text, not as HTML, so no XSS risk exists at these output points. |
+| Error   | False Positive  | Codeguru     | NoSQL Injection — refine_splat.py:43 | Untrusted input used in DynamoDB operation without sanitization | UUID format validation via `_UUID_RE.match()` is performed at lines 36–38 immediately before the `get_item` call. Codeguru does not trace the guard through the conditional block. |
+| Error   | False Positive  | Bandit/Semgrep | B602 subprocess-shell-true — cdk.out/utils.py:915 | subprocess call with shell=True identified | The `cdk.out/` directory contains generated CDK build artifacts, not source files. The source file `source/container/src/pipeline/utils.py` was fixed (shell=True removed). The artifact copies will be regenerated with the fix on the next `cdk synth` / `cdk deploy`. |
+| Error   | False Positive  | Semgrep      | dangerous-subprocess-use-audit / dangerous-subprocess-use-tainted-env-args | subprocess 'run' without static string or with user-controlled data | These subprocess calls use a list of arguments (not a shell string), which prevents shell injection. All parameters are validated before use. This matches the existing Semgrep 590 false positive pattern already documented above. |
+| Error   | False Positive  | Codeguru     | OS command injection — generate_splat_gradio.py:115,116,117 | Untrusted input used in system commands | These lines set `os.environ` variables for AWS credentials provided by the user in the Gradio credentials tab. No subprocess or shell command is invoked with these values; they are passed to `boto3.Session()` which handles them safely. |
+| Error   | False Positive  | Codeguru     | Path traversal — generate_splat_gradio.py (multiple lines) | User-controlled input in file paths | The flagged paths in `generate_splat_gradio.py` (lines 584, 1780, 1791, 1801, 1902, 3841) construct S3 key strings or presigned URL parameters, not local filesystem paths. S3 key construction does not carry path traversal risk. |
+
 ## Deployment and User Guide
 
 For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
