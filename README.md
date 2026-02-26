@@ -165,9 +165,20 @@ The following table provides a sample cost breakdown for deploying this Guidance
 > *Note: Amazon SageMaker can be used instead of AWS Batch for on-demand processing, bypassing any wait queues for ~$142.33/month total*
 
 ## Security
+
+When you build systems on AWS infrastructure, security responsibilities are shared between you and AWS. This [shared responsibility
+model](https://aws.amazon.com/compliance/shared-responsibility-model/) reduces your operational burden because AWS operates, manages, and
+controls the components including the host operating system, the virtualization layer, and the physical security of the facilities in
+which the services operate. For more information about AWS security, visit [AWS Cloud Security](http://aws.amazon.com/security/).
+
+- All data is encrypted at rest and at transit within the AWS Cloud services in this Guidance
+- An Amazon S3 access logging bucket logs all access to the asset bucket
+- Input validation on the job configuration will flag any misconfigurations in the json file
+- Least priviledge access rights on service actions
+
 **Considerations**
 
-At the time of publishing (Mar 2026), the codebase was scanned using Semgrep, Bandit, Checkov, and Gitleaks. The following table outlines all security issues flagged as ERROR or CRITICAL with an explanation. 
+At the time of publishing (Mar 2026), the codebase was scanned using [Semgrep](https://semgrep.dev/), [Bandit](https://github.com/PyCQA/bandit), [Checkov](https://www.checkov.io/), and [Gitleaks](https://github.com/gitleaks/gitleaks) code security scanning tools. The following table outlines all security issues flagged as ERROR or CRITICAL with explanations. 
 
 | Level   | Classification  | Source       | Rule ID                             | Cause                                                                                                  | Explanation                                                                                                                                                              |
 | ------- | --------------- | ------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
