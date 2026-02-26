@@ -167,7 +167,7 @@ The following table provides a sample cost breakdown for deploying this Guidance
 ## Security
 **Considerations**
 
-At the time of publishing, the codebase was scanned using Semgrep, Bandit, Checkov, and Gitleaks. The following table outlines all security issues flagged as ERROR or CRITICAL with an explanation. 
+At the time of publishing (Mar 2026), the codebase was scanned using Semgrep, Bandit, Checkov, and Gitleaks. The following table outlines all security issues flagged as ERROR or CRITICAL with an explanation. 
 
 | Level   | Classification  | Source       | Rule ID                             | Cause                                                                                                  | Explanation                                                                                                                                                              |
 | ------- | --------------- | ------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -205,5 +205,5 @@ This library is licensed under the MIT-0 License. See the [LICENSE](./LICENSE) f
 - [Eric Cornwell](https://www.linkedin.com/in/eric-cornwell-2249543b/), Sr. Spatial Compute SA
 - [Dario Macangano](https://www.linkedin.com/in/dario-macagnano-6b7562b9/), Sr. Worldwide Visual Compute SA
 - [Stanford Lee](https://www.linkedin.com/in/stanfordlee/), Technical Account Manager (Spatial Computing TFC)
-- Daniel Zilberman, Sr. Specialist SA, Technical Guidances
+- [Daniel Zilberman](https://www.linkedin.com/in/danzilberman/), Sr. Specialist SA, Prototyping & Scaling
 
