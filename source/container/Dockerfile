@@ -375,6 +375,7 @@ RUN mkdir -p /opt/mapanything_pycolmap \
     && rm v${MAPANYTHING_VERSION}.tar.gz
 WORKDIR ${CODE_PATH}/map-anything
 RUN pip install -e .
+WORKDIR ${CODE_PATH}
 
 # Install light glue
 RUN pip install git+https://github.com/cvg/LightGlue.git hydra-core
