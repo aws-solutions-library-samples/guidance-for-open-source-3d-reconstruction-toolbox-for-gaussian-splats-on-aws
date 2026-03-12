@@ -29,7 +29,7 @@ resource "aws_sfn_state_machine" "sfn_state_machine" {
   name = "${var.project_prefix}-state-machine-${var.tf_random_suffix}"
   role_arn = aws_iam_role.step_functions_role.arn
   definition = templatefile("${path.module}/../../../../source/state-machines/ASLdefinition.json", {
-    batch_job_queue = aws_batch_job_queue.batch_job_queue.arn
+    batch_job_queue = aws_batch_job_queue.batch_job_queue["g5-4xlarge"].arn
     batch_job_definition = aws_batch_job_definition.batch_job_definition.arn
     complete_lambda_name = aws_lambda_function.lambda_workflow_complete.function_name
     job_definition_selector_function_name = aws_lambda_function.job_definition_selector.function_name

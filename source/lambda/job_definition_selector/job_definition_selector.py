@@ -14,7 +14,6 @@ def lambda_handler(event, context):
     default_large = os.environ.get('BATCH_JOB_DEFINITION_LARGE')
     default_xlarge = os.environ.get('BATCH_JOB_DEFINITION_XLARGE')
     default_queue = os.environ.get('BATCH_JOB_QUEUE')
-    g6e_queue = os.environ.get('BATCH_JOB_QUEUE_G6E', default_queue)
     
     # Instance type to job definition mapping
     instance_type_mapping = {
@@ -26,6 +25,19 @@ def lambda_handler(event, context):
         # Extra Large instances (32 vCPUs)
         'g5.8xlarge': os.environ.get('BATCH_JOB_DEFINITION_G5_8XLARGE', default_xlarge),
         'g6.8xlarge': os.environ.get('BATCH_JOB_DEFINITION_G6_8XLARGE', default_xlarge),
+
+        # Multi-GPU instances
+        'g5.12xlarge': os.environ.get('BATCH_JOB_DEFINITION_G5_12XLARGE', default_xlarge),
+    }
+
+    # Instance type to dedicated job queue mapping
+    queue_mapping = {
+        'g5.4xlarge':  os.environ.get('BATCH_JOB_QUEUE_G5_4XLARGE',  default_queue),
+        'g5.8xlarge':  os.environ.get('BATCH_JOB_QUEUE_G5_8XLARGE',  default_queue),
+        'g5.12xlarge': os.environ.get('BATCH_JOB_QUEUE_G5_12XLARGE', default_queue),
+        'g6.4xlarge':  os.environ.get('BATCH_JOB_QUEUE_G6_4XLARGE',  default_queue),
+        'g6.8xlarge':  os.environ.get('BATCH_JOB_QUEUE_G6_8XLARGE',  default_queue),
+        'g6e.4xlarge': os.environ.get('BATCH_JOB_QUEUE_G6E',         default_queue),
     }
     
     try:
@@ -59,16 +71,10 @@ def lambda_handler(event, context):
         # Return the event with the selected job definition and queue
         result = event.copy()
         result['selectedBatchJobDefinition'] = selected_job_definition
-        
-        # Use dedicated g6e queue for g6e instances, otherwise use default
-        if instance_type == 'g6e.4xlarge':
-            result['selectedBatchJobQueue'] = g6e_queue
-            print(f"Selected g6e-specific queue: {g6e_queue}")
-        else:
-            result['selectedBatchJobQueue'] = default_queue
-            print(f"Selected default queue: {default_queue}")
+        result['selectedBatchJobQueue'] = queue_mapping.get(instance_type, default_queue)
         
         print(f"Selected job definition {selected_job_definition} for instance type {instance_type}")
+        print(f"Selected queue {result['selectedBatchJobQueue']} for instance type {instance_type}")
         
         return result
         

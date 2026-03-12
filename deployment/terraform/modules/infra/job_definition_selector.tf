@@ -29,8 +29,14 @@ resource "aws_lambda_function" "job_definition_selector" {
       BATCH_JOB_DEFINITION_G6_4XLARGE = aws_batch_job_definition.batch_job_definition_g6_4xlarge.name
       BATCH_JOB_DEFINITION_G6_8XLARGE = aws_batch_job_definition.batch_job_definition_g6_8xlarge.name
       BATCH_JOB_DEFINITION_G6E_4XLARGE = aws_batch_job_definition.batch_job_definition_g6e_4xlarge.name
-      BATCH_JOB_QUEUE = aws_batch_job_queue.batch_job_queue.arn
-      BATCH_JOB_QUEUE_G6E = aws_batch_job_queue.g6e_job_queue.arn
+      BATCH_JOB_DEFINITION_G5_12XLARGE = aws_batch_job_definition.batch_job_definition_g5_12xlarge.name
+      BATCH_JOB_QUEUE              = aws_batch_job_queue.batch_job_queue["g5-4xlarge"].arn
+      BATCH_JOB_QUEUE_G5_4XLARGE   = aws_batch_job_queue.batch_job_queue["g5-4xlarge"].arn
+      BATCH_JOB_QUEUE_G5_8XLARGE   = aws_batch_job_queue.batch_job_queue["g5-8xlarge"].arn
+      BATCH_JOB_QUEUE_G5_12XLARGE  = aws_batch_job_queue.batch_job_queue["g5-12xlarge"].arn
+      BATCH_JOB_QUEUE_G6_4XLARGE   = aws_batch_job_queue.batch_job_queue["g6-4xlarge"].arn
+      BATCH_JOB_QUEUE_G6_8XLARGE   = aws_batch_job_queue.batch_job_queue["g6-8xlarge"].arn
+      BATCH_JOB_QUEUE_G6E          = aws_batch_job_queue.g6e_job_queue.arn
     }
   }
 

@@ -141,8 +141,8 @@ if __name__ == "__main__":
         IS_BATCH = 'AWS_BATCH_JOB_ID' in os.environ
         GPU_MAX_IMAGES = 500 # est at 4k
         MAP_ANYTHING_MAX_IMAGES = 100 # for memory efficient mode
-        REFINE_STEPS_SPLATFACTO = 24000
-        REFINE_STEPS_3DGRUT = 12000
+        REFINE_STEPS_SPLATFACTO = max(24000, int(config['MAX_STEPS']))
+        REFINE_STEPS_3DGRUT = max(12000, int(config['MAX_STEPS']))
         ENABLE_MULTI_GPU = "false"
         LOCAL_DEBUG = os.environ.get('LOCAL_DEBUG', config.get('LOCAL_DEBUG', 'false')).lower() == 'true'
 
@@ -301,6 +301,8 @@ if __name__ == "__main__":
     log.info(f"  Resume training: {config['RUN_RECON'] == 'false' and config['RUN_TRAIN'] == 'true'}")
     log.info(f"  Only export: {config['RUN_RECON'] == 'false' and config['RUN_TRAIN'] == 'false'}")
     os.environ['PYTORCH_CUDA_ALLOC_CONF']= 'expandable_segments:True'
+    # Set SQLite to use more EFS-friendly locking for COLMAP database
+    os.environ['SQLITE_TMPDIR'] = '/tmp'
 
     # Ensure we have an /images directory in dataset path for Colmap/Glomap
     image_path = os.path.join(config['DATASET_PATH'], "images")
@@ -1302,34 +1304,29 @@ if __name__ == "__main__":
                 elif config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
                     config['MODEL'] == "splatfacto-mcmc":
                     if config['RUN_RECON'] == "false": # Resume training
-                        # For splatfacto resume training, use dataset paths
-                        dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
+                        # For splatfacto resume training, config.yml was already updated during extraction
                         dataset_config_path = os.path.join(config['DATASET_PATH'], "config.yml")
                         
-                        if os.path.exists(dataset_models_path) and os.path.exists(dataset_config_path):
+                        if os.path.exists(dataset_config_path):
                             args.extend([
-                                "--timestamp", RESUME_TRAIN_EXPERIMENT_NAME,
-                                #"--pipeline.model.cull-alpha-thresh", "0.005", # higher res on refine/resume
-                                "--load-dir", dataset_models_path,
                                 "--load-config", dataset_config_path,
-                                "--load-scheduler", "False",
-                                "--max-num-iterations", str(REFINE_STEPS_SPLATFACTO)
                             ])
-                            log.info(f"Resume training using checkpoints at: {dataset_models_path}")
-                            log.info(f"Resume training using config at: {dataset_config_path}")
+                            log.info(f"Resume training using config: {dataset_config_path}")
                             log.info(f"Resume training with {REFINE_STEPS_SPLATFACTO} iterations")
                         else:
-                            log.error(f"Checkpoint files not found at: {dataset_models_path} (exists: {os.path.exists(dataset_models_path)})")
-                            log.error(f"Config file not found at: {dataset_config_path} (exists: {os.path.exists(dataset_config_path)})")
-                            if os.path.exists(dataset_models_path):
-                                log.error(f"Contents of checkpoint dir: {os.listdir(dataset_models_path)}")
-                            raise RuntimeError(f"Cannot resume training - checkpoint files missing")
+                            log.error(f"Config file not found at: {dataset_config_path}")
+                            raise RuntimeError(f"Cannot resume training - config file missing")
                     else:
+                        isp_mode = config.get('3D_ISP', 'none').lower()
                         args.extend([
                         "--timestamp", TRAIN_EXPERIMENT_NAME,
                         "--pipeline.model.use-scale-regularization", "True",
                         "--max-num-iterations", str(int(config['MAX_STEPS']))
                     ])
+                        if isp_mode == "bilagrid":
+                            args.extend(["--pipeline.model.use-bilateral-grid", "True"])
+                        elif isp_mode == "ppisp":
+                            args.extend(["--pipeline.model.use-ppisp", "True"])
                 elif config['MODEL'] == "splatfacto-w-light":
                     if config['RUN_RECON'] == "false": # Resume training
                         if os.path.exists(model_ckpt_path):
@@ -1394,6 +1391,7 @@ if __name__ == "__main__":
                     model = "mcmc"
                 else:
                     model = "default"
+                isp_mode = config.get('3D_ISP', 'none').lower()
                 args = [
                     model,
                     "--max_steps", str(int(config['MAX_STEPS'])),
@@ -1401,10 +1399,13 @@ if __name__ == "__main__":
                     "--data_factor", "1",
                     "--steps_scaler", str(steps_scaler),
                     "--disable_viewer",
-                    #"--packed", # currently a bug with this parameter
                     "--eval_steps", str(int(config['MAX_STEPS'])),
                     "--data-dir", config['DATASET_PATH']
                 ]
+                if isp_mode == "bilagrid":
+                    args.append("--use-fused-bilagrid")
+                elif isp_mode == "ppisp":
+                    args.append("--ppisp")
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -1471,6 +1472,9 @@ if __name__ == "__main__":
                         f"n_iterations={str(config['MAX_STEPS'])}",
                         f"scheduler.positions.max_steps={str(config['MAX_STEPS'])}",
                     ])
+                isp_mode = config.get('3D_ISP', 'none').lower()
+                if isp_mode in ("bilagrid", "ppisp"):
+                    args.append(f"model.isp.type={isp_mode}")
                 
                 # train.py is patched with DataLoader fix for Batch at build time
                 pipeline.create_component(
@@ -1954,10 +1958,8 @@ if __name__ == "__main__":
             orientation_file = os.path.join(config['DATASET_PATH'], '.video_orientation')
             is_portrait = os.path.exists(orientation_file)
             
-            if config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
-                rotation = '180,0,0' if not is_portrait else '180,0,90'
-            else:
-                rotation = '270,0,0' if not is_portrait else '270,0,90'
+            if config['MODEL'] != "3dgut" or config['MODEL'] != "3dgrt":
+                rotation = '90,0,0' if not is_portrait else '270,0,90'
             args = [
                 orig_ply_path,
                 orig_ply_path, 
@@ -2223,51 +2225,26 @@ if __name__ == "__main__":
             orientation_file = os.path.join(config['DATASET_PATH'], '.video_orientation')
             is_portrait = os.path.exists(orientation_file)
             
-            if config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
-                rotation = '0,-180,0' if not is_portrait else '0,-180,90'
-            else:
-                rotation = '90,-180,0' if not is_portrait else '90,-180,90'
-            args = [
-                spz_ply_path,
-                spz_ply_path,
-                f"--rotate={rotation}",
-                '-w'
-            ]
-            pipeline.create_component(
-                name="Spz-Ply-Rotation",
-                comp_type=ComponentType.POST_PROCESSING,
-                comp_environ=ComponentEnvironment.EXECUTABLE,
-                command="splat-transform",
-                args=args,
-                cwd=current_dir_path,
-                requires_gpu=False
-            )
+            if config['MODEL'] != "3dgut" or config['MODEL'] != "3dgrt":
+                rotation = '270,0,0' if not is_portrait else '270,0,90'
+                args = [
+                    spz_ply_path,
+                    spz_ply_path,
+                    f"--rotate={rotation}",
+                    '-w'
+                ]
+                pipeline.create_component(
+                    name="Spz-Ply-Rotation",
+                    comp_type=ComponentType.POST_PROCESSING,
+                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                    command="splat-transform",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
     except Exception as e:
         error_message = f"Issue rotating PLY: {e}"
         pipeline.report_error(785, error_message)
-
-    ##################################
-    # POST-PROCESS COMPONENT:
-    # Mirror splat for SPZ
-    ##################################
-    try:
-        if config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
-            args = [
-                "--input", spz_ply_path,
-                "--axis", "x"
-            ]
-            pipeline.create_component(
-                name="Mirror-PLY-For-SPZ",
-                comp_type=ComponentType.POST_PROCESSING,
-                comp_environ=ComponentEnvironment.PYTHON,
-                command="post_processing/mirror_splat.py",
-                args=args,
-                cwd=current_dir_path,
-                requires_gpu=False
-            )
-    except Exception as e:
-        error_message = f"Issue mirroring PLY: {e}"
-        pipeline.report_error(784, error_message)
     
     ##################################
     # POST-PROCESS COMPONENT:
@@ -2276,13 +2253,14 @@ if __name__ == "__main__":
     try:
         if config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
             args = [
-                spz_ply_path
+                spz_ply_path,
+                spz_path
             ]
             pipeline.create_component(
                 name="Ply-to-Spz",
                 comp_type=ComponentType.POST_PROCESSING,
                 comp_environ=ComponentEnvironment.EXECUTABLE,
-                command="splat_converter",
+                command="ply_to_spz",#"splat_converter",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
@@ -2396,6 +2374,8 @@ if __name__ == "__main__":
                     if config['RUN_RECON'] == "false" and config['RUN_TRAIN'] == "false":
                         continue
                     video_found = False
+                    # Check if input is a directory with files (for folder input mode)
+                    IS_FOLDER_INPUT = os.path.isdir(input_file_path) and len(os.listdir(input_file_path)) > 0
                     if (VIDEO is False and config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true') or \
                         (VIDEO is False and config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'true'):
                         continue
@@ -2408,6 +2388,17 @@ if __name__ == "__main__":
                         elif VIDEO is False and config['RUN_RECON'] == "false" and config['RUN_TRAIN'] == "true":
                             # Resume training - extract model.tar.gz
                             log.info("Detected resume training...")
+                        elif IS_FOLDER_INPUT:
+                            # Folder input - copy directly to images directory
+                            log.info(f"Detected folder input: {input_file_path}")
+                            if image_path != input_file_path:
+                                if os.path.exists(image_path):
+                                    shutil.rmtree(image_path)
+                                shutil.copytree(input_file_path, image_path)
+                                log.info(f"Copied {len(os.listdir(image_path))} files from folder to images directory")
+                            else:
+                                log.info(f"Using {len(os.listdir(image_path))} files from folder (already in place)")
+                            validate_and_resize_images(image_path, config, log, pipeline)
                         else: # Archive of images or archive with a video
                             # unzip archive into temp directory
                             temp_path = os.path.join(config['DATASET_PATH'], 'temp')
@@ -2494,6 +2485,27 @@ if __name__ == "__main__":
                             "--ImageReader.camera_model", camera_params['model'],
                             "--ImageReader.camera_params", camera_params['params_str']
                         ])
+                    elif config.get('PRESERVE_SCENE_SCALE', 'false') == 'true':
+                        # Apply focal length heuristic: f = 1.2 * max(width, height)
+                        # This preserves metric scale by anchoring intrinsics before SfM
+                        try:
+                            from PIL import Image as _PILImage
+                            img_files = [f for f in os.listdir(image_path)
+                                         if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                            if img_files:
+                                with _PILImage.open(os.path.join(image_path, img_files[0])) as _img:
+                                    _w, _h = _img.size
+                                focal = round(1.1 * max(_w, _h))
+                                cx, cy = _w // 2, _h // 2
+                                log.info(f"PRESERVE_SCENE_SCALE: using focal={focal}, cx={cx}, cy={cy} "
+                                         f"(image {_w}x{_h})")
+                                component.args.extend([
+                                    "--ImageReader.camera_model", "SIMPLE_PINHOLE",
+                                    "--ImageReader.camera_params", f"{focal},{cx},{cy}"
+                                ])
+                        except Exception as _e:
+                            log.warning(f"PRESERVE_SCENE_SCALE focal heuristic failed, "
+                                        f"falling back to COLMAP defaults: {_e}")
                     pipeline.run_component(i)
                 case "Colmap-to-Nerfstudio":
                     # Ensure we use the largest Colmap model if multiple found
@@ -2519,9 +2531,25 @@ if __name__ == "__main__":
                         log.error(f"CRITICAL: Dataset missing before training: {config['DATASET_PATH']}")
                         raise RuntimeError(f"Dataset disappeared: {config['DATASET_PATH']}")
                     log.info(f"Dataset contents before training: {os.listdir(config['DATASET_PATH'])}")
+                    # Check image count and resolution at runtime to configure color correction
+                    image_files = [f for f in os.listdir(image_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                    num_images = len(image_files)
+                    is_4k_or_higher = False
+                    if image_files:
+                        from PIL import Image
+                        sample_img = Image.open(os.path.join(image_path, image_files[0]))
+                        is_4k_or_higher = sample_img.width >= 3840 or sample_img.height >= 2160
+                    
+                    # Disable color correction metrics for large/high-res datasets
+                    disable_color_correction = num_images > GPU_MAX_IMAGES or is_4k_or_higher
+                    if disable_color_correction and config['MODEL'] in ['splatfacto', 'splatfacto-big', 'splatfacto-mcmc']:
+                        log.info(f"Disabling color corrected metrics: num_images={num_images}, is_4k={is_4k_or_higher}")
+                        # Find and replace color correction args
+                        for j, arg in enumerate(component.args):
+                            if arg == "--pipeline.model.color-corrected-metrics" and j+1 < len(component.args):
+                                component.args[j+1] = "False"
                     # Set the image cache to disk if there are a lot of images to prevent OOM
                     if config['MODEL'] != "nerfacto" and config['MODEL'] != "3dgrt" and config['MODEL'] != "3dgut" and ENABLE_MULTI_GPU == "false":
-                        num_images = len(os.listdir(image_path))
                         if num_images > GPU_MAX_IMAGES:
                             if "colmap" in component.args:
                                 index = component.args.index("colmap")
@@ -2553,6 +2581,10 @@ if __name__ == "__main__":
                         # Clean up CUDA memory before training
                         cleanup_cuda_memory()
                         pipeline.run_component(i)
+                        # Wait for subprocess to fully release GPU memory
+                        log.info("Training complete. Waiting for GPU memory release...")
+                        time.sleep(15)
+                        cleanup_cuda_memory()
                     except Exception as e:
                         error_str = str(e)
                         if "cuda" in error_str.lower() and "assert" in error_str.lower():
@@ -2606,7 +2638,7 @@ if __name__ == "__main__":
                                     component.args[j + 1] = dataset_config_path
                                     break
                     pipeline.run_component(i)
-                    # Clean up CUDA memory after training
+                    # Clean up CUDA memory after export
                     cleanup_cuda_memory()
                 case "Nerfstudio-Export-Nerfacto":
                     # NERFSTUDIO NERFACTO EXPORT CONDITIONAL COMPONENT
@@ -2632,6 +2664,7 @@ if __name__ == "__main__":
                             log.warning(f"Videos directory not found: {videos_dir}")
                     pipeline.run_component(i)
                 case "S3-Export-Archive":
+                    log.info("DEBUG: Handling S3-Export-Archive component...")
                     if LOCAL_DEBUG:
                         if config['MODEL'] == "nerfacto":
                             glb_path = os.path.join(output_path, "textured", f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.glb")
@@ -2687,6 +2720,12 @@ if __name__ == "__main__":
                         os.makedirs(os.path.dirname(local_tar_path), exist_ok=True)
                         create_tarball(config['DATASET_PATH'], local_tar_path, "dataset")
                         log.info(f"Created model.tar.gz archive for local debug: {local_tar_path}")
+                        # Copy metrics.json if it exists
+                        if os.path.exists(EVAL_METRIC_PATH):
+                            metrics_dest = os.path.join(config['S3_OUTPUT'], config['UUID'], 'eval', 'metrics.json')
+                            os.makedirs(os.path.dirname(metrics_dest), exist_ok=True)
+                            shutil.copy2(EVAL_METRIC_PATH, metrics_dest)
+                            log.info(f"Copied metrics.json to: {metrics_dest}")
                     else:
                         # Copy result over to where SM expects it
                         if not IS_BATCH:
@@ -2695,7 +2734,7 @@ if __name__ == "__main__":
                     
                     log.info(f"Successful pipeline result generation located at "
                             f"{config['S3_OUTPUT']}/{str(os.path.splitext(config['FILENAME'])[0]).lower()}.*")
-                    if IS_BATCH:
+                    if IS_BATCH and not LOCAL_DEBUG:
                         # S3 ARCHIVE UPLOAD COMPONENT
                         # Copy nerfstudio_models and config.yml to dataset directory for archive
                         if config['RUN_TRAIN'] == "true" and ENABLE_MULTI_GPU != "true":
@@ -2726,16 +2765,6 @@ if __name__ == "__main__":
                         # For Batch, create archive with dataset/train structure
                         create_tarball(dataset_source, OUTPUT_TAR_PATH, "dataset/train")
                         log.info(f"Created model.tar.gz archive from {dataset_source} with dataset/train structure")
-                        pipeline.run_component(i)
-                case "S3-Export-Sog":
-                    # Check if SOG file exists before attempting upload
-                    if os.path.exists(sog_path) and os.path.getsize(sog_path) > 0:
-                        if LOCAL_DEBUG:
-                            copy_to_local_output(sog_path, config, f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.sog", log)
-                        else:
-                            pipeline.run_component(i)
-                    else:
-                        log.info("SOG file not found or empty, skipping upload")
                 case "Nerfstudio-Metrics" | "3DGRUT-Metrics" | "GSplat-Metrics":
                     # For GSplat-Metrics, force single GPU and find checkpoint files
                     if component.name == "GSplat-Metrics":
@@ -2791,11 +2820,11 @@ if __name__ == "__main__":
                                     metrics_data = json.load(f)
                                 results = metrics_data.get('results', {})
                                 log.info(f"Evaluation Metrics - PSNR: {results.get('psnr', 'N/A'):.4f}, SSIM: {results.get('ssim', 'N/A'):.4f}, LPIPS: {results.get('lpips', 'N/A'):.4f}")
-                case "S3-Export-Video" | "S3-Export-Spz" | "S3-Export-Usdz" | "S3-Export-Thumbnail" | "S3-Export-Archive":
+                case "S3-Export-Video" | "S3-Export-Spz" | "S3-Export-Usdz" | "S3-Export-Thumbnail" | "S3-Export-Ply" | "S3-Export-Sog":
                     if LOCAL_DEBUG:
                         if component.name == "S3-Export-Video":
                             copy_to_local_output(os.path.join(output_path, "render.mp4"), config, 
-                                               "render.mp4", log)
+                                               f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.mp4", log)
                         elif component.name == "S3-Export-Spz":
                             copy_to_local_output(spz_path, config, 
                                                f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.spz", log)
@@ -2805,11 +2834,20 @@ if __name__ == "__main__":
                         elif component.name == "S3-Export-Thumbnail":
                             copy_to_local_output(os.path.join(output_path, "render_thumbnail.png"), config, 
                                                "render_thumbnail.png", log)
-                        elif component.name == "S3-Export-Archive":
-                            local_output = os.path.join(config['S3_OUTPUT'], config['UUID'], 'output')
-                            os.makedirs(local_output, exist_ok=True)
-                            shutil.copy2(OUTPUT_TAR_PATH, os.path.join(local_output, 'model.tar.gz'))
-                            log.info(f"Copied archive to local output: {local_output}")
+                        elif component.name == "S3-Export-Ply":
+                            if config['MODEL'] == "nerfacto":
+                                glb_path = os.path.join(output_path, "textured", f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.glb")
+                                copy_to_local_output(glb_path, config, f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.glb", log)
+                            else:
+                                copy_to_local_output(orig_ply_path, config, f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.ply", log)
+                        elif component.name == "S3-Export-Sog":
+                            copy_to_local_output(sog_path, config, f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.sog", log)
+                    else:
+                        pipeline.run_component(i)
+                case "S3-Export-Archive":
+                    if LOCAL_DEBUG:
+                        # Archive was already created in the first S3-Export-Archive case above
+                        log.info("Archive already handled in LOCAL_DEBUG mode")
                     else:
                         pipeline.run_component(i)
                 case _: # Default case, run Component

@@ -262,9 +262,10 @@ resource "aws_iam_role_policy" "codebuild_policy" {
 }
 
 resource "aws_codebuild_project" "docker_build" {
-  count        = var.enable_code_build_container_build == "true" ? 1 : 0
-  name         = "docker-build-${local.repo_name}"
-  service_role = aws_iam_role.codebuild_role[0].arn
+  count              = var.enable_code_build_container_build == "true" ? 1 : 0
+  name               = "docker-build-${local.repo_name}"
+  service_role       = aws_iam_role.codebuild_role[0].arn
+  build_timeout      = 180
 
   artifacts {
     type = "NO_ARTIFACTS"
@@ -338,7 +339,20 @@ resource "null_resource" "codebuild_trigger" {
   }
 
   provisioner "local-exec" {
-    command = "aws codebuild start-build --project-name ${aws_codebuild_project.docker_build[0].name} --region ${var.region}"
+    command = <<-EOT
+      BUILD_ID=$(aws codebuild start-build --project-name ${aws_codebuild_project.docker_build[0].name} --region ${var.region} --query 'build.id' --output text)
+      echo "Started CodeBuild: $BUILD_ID"
+      while true; do
+        STATUS=$(aws codebuild batch-get-builds --ids "$BUILD_ID" --region ${var.region} --query 'builds[0].buildStatus' --output text)
+        PHASE=$(aws codebuild batch-get-builds --ids "$BUILD_ID" --region ${var.region} --query 'builds[0].currentPhase' --output text)
+        echo "Status: $STATUS | Phase: $PHASE"
+        if [ "$STATUS" = "SUCCEEDED" ]; then echo "✅ Build succeeded"; break; fi
+        if [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "FAULT" ] || [ "$STATUS" = "STOPPED" ] || [ "$STATUS" = "TIMED_OUT" ]; then
+          echo "❌ Build failed: $STATUS"; exit 1
+        fi
+        sleep 30
+      done
+    EOT
   }
 
   depends_on = [

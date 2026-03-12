@@ -13,13 +13,13 @@
   "use_colmap_model": "false",
   "use_transform_json": "false",
   "training_enable": "true",
-  "max_steps": 1000,
+  "max_steps": 15000,
   "enable_spz": "true",
   "enable_sog": "true",
   "enable_usdz": "true",
-  "rotate_splat": "true",
   "crop_output_bounds": "true",
   "crop_mode": "rigid_body",
+  "clean_splat": "true",
   "spherical_enable": "false",
   "remove_bg": "false",
   "remove_objects": "false",
@@ -32,5 +32,6 @@
   "ply_coords": "rhyu",
   "spz_coords": "rhyu",
   "sog_coords": "rhyu",
-  "usdz_coords": "rhyu"
+  "usdz_coords": "rhyu",
+  "preserve_scene_scale": "false"
 }

@@ -110,7 +110,7 @@ class ContainerDeploymentCodeBuild(Construct):
                     }
                 }
             }),
-            timeout=Duration.hours(2)
+            timeout=Duration.hours(3)
         )
 
         docker_asset.grant_read(build_project)

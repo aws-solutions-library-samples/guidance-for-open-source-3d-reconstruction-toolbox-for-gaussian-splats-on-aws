@@ -55,7 +55,27 @@ output "batch_job_definition_xlarge" {
 }
 
 output "batch_job_queue" {
-  value = aws_batch_job_queue.batch_job_queue.name
+  value = aws_batch_job_queue.batch_job_queue["g5-4xlarge"].name
+}
+
+output "batch_job_queue_g5_4xlarge" {
+  value = aws_batch_job_queue.batch_job_queue["g5-4xlarge"].name
+}
+
+output "batch_job_queue_g5_8xlarge" {
+  value = aws_batch_job_queue.batch_job_queue["g5-8xlarge"].name
+}
+
+output "batch_job_queue_g5_12xlarge" {
+  value = aws_batch_job_queue.batch_job_queue["g5-12xlarge"].name
+}
+
+output "batch_job_queue_g6_4xlarge" {
+  value = aws_batch_job_queue.batch_job_queue["g6-4xlarge"].name
+}
+
+output "batch_job_queue_g6_8xlarge" {
+  value = aws_batch_job_queue.batch_job_queue["g6-8xlarge"].name
 }
 
 output "job_definition_selector_function_name" {

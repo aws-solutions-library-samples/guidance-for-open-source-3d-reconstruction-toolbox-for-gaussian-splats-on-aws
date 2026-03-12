@@ -22,6 +22,7 @@
     "MAX_NUM_IMAGES": "300",
     "MODEL": "splatfacto",
     "MAX_STEPS": "15000",
+    "3D_ISP": "none",
     "CLEAN_SPLAT": "False",
     "CROP_OUTPUT_BOUNDS": "True",
     "CROP_MODE": "rigid_body",

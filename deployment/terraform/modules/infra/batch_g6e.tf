@@ -34,10 +34,7 @@ resource "aws_batch_compute_environment" "g6e_spot_compute_env" {
   }
 
   depends_on = [
-    aws_iam_role_policy_attachment.batch_service_role_policy,
-    aws_iam_role_policy_attachment.batch_service_ecs_policy,
-    aws_iam_role_policy.batch_service_additional_ecs_policy_inline,
-    aws_iam_role_policy_attachment.spot_fleet_role_policy
+    time_sleep.iam_propagation
   ]
 }
 

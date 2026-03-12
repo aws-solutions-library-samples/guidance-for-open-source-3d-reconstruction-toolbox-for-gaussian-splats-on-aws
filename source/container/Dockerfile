@@ -44,8 +44,8 @@ ENV SPZ_VERSION="2.1.0"
 # Fixed versions
 ENV CERES_HASH="0c70ed3a1a2d6ba47c06c7e8b3b040880bc474db"
 ENV NERFSTUDIO_HASH="50e0e3c70c775e89333256213363badbf074f29d"
-ENV GSPLAT_HASH="b60e917c95afc449c5be33a634f1f457e116ff5e"
-ENV THREEDGRUT_HASH="d78f773b72851395383b43e1b5cbe355a7c68d1f"
+ENV GSPLAT_HASH="a8d88d387f6e554b18153d309f5536696882de5c"
+ENV THREEDGRUT_HASH="e78d4a7800c76d3bb9354c6a4da5457c240b17de"
 ENV BGREMOVER_HASH="d88ef74457f0c2f1e0eab5b391ce8851b95e8d65"
 ENV SAM2_HASH="2b90b9f5ceec907a1c18123530e92e794ad901a4"
 
@@ -246,8 +246,9 @@ RUN git clone https://github.com/nerfstudio-project/gsplat.git --recursive \
     && git reset --hard ${GSPLAT_HASH} \
     && sed -i '/os.environ\["MASTER_ADDR"\] = "localhost"/s/^/# /' gsplat/distributed.py \
     && sed -i '/os.environ\["MASTER_PORT"\] = str(_find_free_port())/s/^/# /' gsplat/distributed.py \
-    && pip install -e . \
-    && pip install -r examples/requirements.txt \
+    && python setup.py build_ext --inplace \
+    && python setup.py develop \
+    && pip install --no-build-isolation -r examples/requirements.txt \
     && pip install --force-reinstall imageio tqdm \
     && cd ${CODE_PATH}
 
@@ -255,7 +256,7 @@ RUN git clone https://github.com/nerfstudio-project/gsplat.git --recursive \
 # Install with dependencies to get complete environment
 RUN mkdir -p /opt/splatfacto_w_env \
     && git clone https://github.com/KevinXu02/splatfacto-w ${CODE_PATH}/splatfacto-w \
-    && pip install --target=/opt/splatfacto_w_env gsplat==1.4.0 \
+    && pip install --target=/opt/splatfacto_w_env --no-deps gsplat==1.4.0 \
     && pip install --target=/opt/splatfacto_w_env --upgrade git+https://github.com/KevinXu02/splatfacto-w
 
 # Copy and make wrapper scripts executable
@@ -338,7 +339,8 @@ RUN git clone --recursive https://github.com/nv-tlabs/3dgrut.git \
     && sed -i 's/checkpoint = torch.load(conf.resume)/checkpoint = torch.load(conf.resume, weights_only=False)/' threedgrut/trainer.py \
     && sed -i '/fused-ssim/d' requirements.txt \
     && sed -i 's/^xformers/#xformers/' requirements.txt \
-    && python -m pip install -r requirements.txt \
+    && python -m pip install --no-build-isolation -r requirements.txt \
+    && python -m pip install --no-build-isolation -e . \
     && cd ${CODE_PATH} \
     && git clone https://github.com/Anonym0u3/AttentiveEraser.git \
     && cd ${CODE_PATH}/AttentiveEraser \
@@ -401,6 +403,26 @@ RUN pip uninstall -y xformers || true && \
     python3 -c "import sys; sys.exit(0 if 'xformers' not in sys.modules else 1)" && \
     echo "xformers successfully removed"
 
+# Build the SPZ tool (New version not supported with Gradio 3D Model Viewer)
+RUN wget https://github.com/nianticlabs/spz/archive/refs/tags/v${SPZ_VERSION}.tar.gz \
+    && tar -xzf v${SPZ_VERSION}.tar.gz \
+    && mv spz-${SPZ_VERSION} spz \
+    && rm v${SPZ_VERSION}.tar.gz
+WORKDIR ${CODE_PATH}/spz
+RUN pip install scikit-build-core nanobind && pip install . \
+    && mkdir -p build \
+    && cd build \
+    && cmake .. -DCMAKE_BUILD_TYPE=Release \
+    && make ply_to_spz \
+    && ln -sf ${CODE_PATH}/spz/build/ply_to_spz /usr/local/bin/ply_to_spz
+WORKDIR ${CODE_PATH}
+
+# Install gsplat-specific pycolmap for multi-GPU (MUST BE LAST to avoid being overwritten)
+RUN mkdir -p /opt/gsplat_pycolmap \
+    && pip install --target=/opt/gsplat_pycolmap --no-deps git+https://github.com/rmbrualla/pycolmap@cc7ea4b7301720ac29287dbe450952511b32125e \
+    && rm -rf /opt/gsplat_pycolmap/numpy* \
+    && pip install --target=/opt/gsplat_pycolmap --upgrade 'numpy==1.26.4'
+
 # The main entrypoint and arguments are added into the container in the State Machine (e.g. ENTRYPOINT [ "python", "main.py" ])
 # Copy over application files
 RUN mkdir -p ${CODE_PATH}/reconstruction
@@ -420,6 +442,7 @@ COPY ./src/pipeline/reconstruction/update_camera_model.py                       
 COPY ./src/pipeline/reconstruction/run_map_anything.py                              ${CODE_PATH}/reconstruction
 COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py                            ${CODE_PATH}/training
 COPY ./src/pipeline/training/run_gsplat_trainer.sh                                  ${CODE_PATH}/training
+RUN chmod +x ${CODE_PATH}/training/run_gsplat_trainer.sh
 COPY ./src/pipeline/reconstruction/spherical/panorama_sfm.py                        ${CODE_PATH}/spherical
 COPY ./src/pipeline/pre_processing/segmentation/remove_object_using_mask.py         ${CODE_PATH}/pre_processing/segmentation
 COPY ./src/pipeline/pre_processing/segmentation/remove_background.py                ${CODE_PATH}/pre_processing/segmentation
@@ -436,7 +459,6 @@ COPY ./src/pipeline/post_processing/gsplat_pt_to_ply.py                         
 COPY ./src/pipeline/post_processing/crop_splat.py                                   ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/extract_center_cube.py                          ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/refine_center_object.py                         ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/spz                                             ${CODE_PATH}/post_processing/spz
 COPY ./src/pipeline/post_processing/coordinate_systems.py                           ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/remove_ply_comments.py                          ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/clean_point_cloud.py                            ${CODE_PATH}/post_processing
@@ -444,34 +466,6 @@ COPY ./src/pipeline/post_processing/extract_video_thumbnail.py                  
 COPY ./src/pipeline/post_processing/images_to_video.py                              ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/create_derivative_plys.py                       ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/convert_ply_to_sog.py                           ${CODE_PATH}/post_processing
-
-# Build the SPZ tool
-#RUN wget https://github.com/nianticlabs/spz/archive/refs/tags/v${SPZ_VERSION}.tar.gz \
-#    && tar -xzf v${SPZ_VERSION}.tar.gz \
-#    && mv spz-${SPZ_VERSION} spz \
-#    && rm v${SPZ_VERSION}.tar.gz
-#WORKDIR ${CODE_PATH}/spz
-#RUN pip install .
-#WORKDIR ${CODE_PATH}
-
-# Use the initial SPZ version for compatibility with the Gradio Viewer
-RUN cd ${CODE_PATH}/post_processing/spz/src \
-    && mkdir build \
-    && cd ${CODE_PATH}/post_processing/spz/src/build \
-    && cmake .. \
-    && make \
-    && make install \
-    && ln -sf ${CODE_PATH}/post_processing/spz/src/build/splat_converter /usr/local/bin/splat_converter \
-    && cd ${CODE_PATH}
-
-# Make gsplat wrapper script executable
-RUN chmod +x ${CODE_PATH}/training/run_gsplat_trainer.sh
-
-# Install gsplat-specific pycolmap for multi-GPU (MUST BE LAST to avoid being overwritten)
-RUN mkdir -p /opt/gsplat_pycolmap \
-    && pip install --target=/opt/gsplat_pycolmap --no-deps git+https://github.com/rmbrualla/pycolmap@cc7ea4b7301720ac29287dbe450952511b32125e \
-    && rm -rf /opt/gsplat_pycolmap/numpy* \
-    && pip install --target=/opt/gsplat_pycolmap --upgrade 'numpy==1.26.4'
 
 # Verify installed versions match expected versions
 RUN echo "=== VERSION VERIFICATION ===" \

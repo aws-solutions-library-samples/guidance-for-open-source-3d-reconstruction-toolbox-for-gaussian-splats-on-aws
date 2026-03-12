@@ -32,6 +32,10 @@ import gradio as gr
 import boto3.s3.transfer
 from refine_splat import refine_splat
 
+# In Gradio 6, subclassing creates a "custom component" that fails to load.
+# Use gr.Column directly as an alias instead of subclassing.
+Modal = gr.Column
+
 _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
 
 def _validate_uuid(value: str) -> str:
@@ -93,6 +97,7 @@ class SharedState:
         self.video_start_time = 0.0
         self.video_stop_time = None
         self.preserve_scene_scale = "false"
+        self.isp_3d = "none"
 
 # Create a singleton instance
 shared_state = SharedState()
@@ -354,7 +359,8 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
             "enable": training_enable == "true",
             "maxSteps": str(max_steps),
             "model": training_model,
-            "preserveSceneScale": preserve_scene_scale == "true"
+            "preserveSceneScale": preserve_scene_scale == "true",
+            "3dIsp": shared_state.isp_3d
         },
         "postProcessing": {
             "cropOutputBounds": crop_output_bounds == "true" if isinstance(crop_output_bounds, str) else crop_output_bounds,
@@ -475,7 +481,8 @@ def generate_splat(s3_bucket_name, s3_input_prefix, s3_output_prefix, file_obj,
                 "enable": training_enable == "true",
                 "maxSteps": str(max_steps),
                 "model": training_model,
-                "preserveSceneScale": shared_state.preserve_scene_scale == "true"
+                "preserveSceneScale": shared_state.preserve_scene_scale == "true",
+                "3dIsp": shared_state.isp_3d
             },
             "postProcessing": {
                 "cropOutputBounds": shared_state.crop_output_bounds == "true",
@@ -626,7 +633,8 @@ def create_upload_aws_tab():
                                 "enable": shared_state.training_enable == "true",
                                 "maxSteps": str(shared_state.max_steps),
                                 "model": shared_state.model,
-                                "preserveSceneScale": shared_state.preserve_scene_scale == "true"
+                                "preserveSceneScale": shared_state.preserve_scene_scale == "true",
+                                "3dIsp": shared_state.isp_3d
                             },
                             "postProcessing": {
                                 "cropOutputBounds": shared_state.crop_output_bounds == "true",
@@ -941,6 +949,16 @@ def create_advanced_settings_tab():
                     choices=["true", "false"],
                     value="false"
                 )
+                isp_3d = gr.Dropdown(
+                    label="3D ISP Mode",
+                    choices=[
+                        ("None", "none"),
+                        ("Bilateral Grid (bilagrid)", "bilagrid"),
+                        ("Per-Pixel ISP (ppisp)", "ppisp")
+                    ],
+                    value="none",
+                    info="Image signal processing for splatfacto, gsplat multi-GPU, and 3DGRUT. Not applicable to nerfacto."
+                )
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### Post Processing")
@@ -1027,7 +1045,7 @@ def create_advanced_settings_tab():
                      shared_state.spherical_enable,
                      shared_state.remove_bg, shared_state.remove_objects,
                      shared_state.object_removal_action, shared_state.objects_to_remove, shared_state.source_coordinate, shared_state.pose_world_to_cam,
-                     shared_state.log_verbosity, shared_state.mask_threshold, shared_state.ply_coords, shared_state.spz_coords, shared_state.sog_coords, shared_state.usdz_coords, shared_state.preserve_scene_scale) = args
+                     shared_state.log_verbosity, shared_state.mask_threshold, shared_state.ply_coords, shared_state.spz_coords, shared_state.sog_coords, shared_state.usdz_coords, shared_state.preserve_scene_scale, shared_state.isp_3d) = args
                     return "Advanced settings updated"
 
                 # Get all advanced settings components after they're defined
@@ -1039,7 +1057,7 @@ def create_advanced_settings_tab():
                     crop_output_bounds, crop_mode, clean_splat,
                     spherical_enable, remove_bg, remove_objects,
                     object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam,
-                    log_verbosity, mask_threshold, ply_coords, spz_coords, sog_coords, usdz_coords, preserve_scene_scale
+                    log_verbosity, mask_threshold, ply_coords, spz_coords, sog_coords, usdz_coords, preserve_scene_scale, isp_3d
                 ]
                 
                 def save_configuration(config_name, *settings):
@@ -1069,19 +1087,20 @@ def create_advanced_settings_tab():
                         'crop_mode': settings[19],
                         'clean_splat': settings[20],
                         'spherical_enable': settings[21],
-                        'remove_bg': settings[21],
-                        'remove_objects': settings[22],
-                        'object_removal_action': settings[23],
-                        'objects_to_remove': settings[24],
-                        'source_coordinate': settings[25],
-                        'pose_world_to_cam': settings[26],
-                        'log_verbosity': settings[27],
-                        'mask_threshold': settings[28],
-                        'ply_coords': settings[29],
-                        'spz_coords': settings[30],
-                        'sog_coords': settings[31],
-                        'usdz_coords': settings[32],
-                        'preserve_scene_scale': settings[33]
+                        'remove_bg': settings[22],
+                        'remove_objects': settings[23],
+                        'object_removal_action': settings[24],
+                        'objects_to_remove': settings[25],
+                        'source_coordinate': settings[26],
+                        'pose_world_to_cam': settings[27],
+                        'log_verbosity': settings[28],
+                        'mask_threshold': settings[29],
+                        'ply_coords': settings[30],
+                        'spz_coords': settings[31],
+                        'sog_coords': settings[32],
+                        'usdz_coords': settings[33],
+                        'preserve_scene_scale': settings[34],
+                        'isp_3d': settings[35]
                     }
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -1138,7 +1157,8 @@ def create_advanced_settings_tab():
                         shared_state.spherical_enable = config_data.get('spherical_enable', 'false')
                         shared_state.remove_bg = config_data.get('remove_bg', 'false')
                         shared_state.remove_objects = config_data.get('remove_objects', 'false')
-                        shared_state.object_removal_action = config_data.get('object_removal_action', 'erase')
+                        raw_action = config_data.get('object_removal_action', 'erase')
+                        shared_state.object_removal_action = raw_action if raw_action in ('erase', 'remove') else 'erase'
                         shared_state.objects_to_remove = config_data.get('objects_to_remove', [])
                         shared_state.source_coordinate = config_data.get('source_coordinate', 'arkit')
                         shared_state.pose_world_to_cam = config_data.get('pose_world_to_cam', 'true')
@@ -1149,6 +1169,7 @@ def create_advanced_settings_tab():
                         shared_state.sog_coords = config_data.get('sog_coords', 'rhyu')
                         shared_state.usdz_coords = config_data.get('usdz_coords', 'rhyu')
                         shared_state.preserve_scene_scale = config_data.get('preserve_scene_scale', 'false')
+                        shared_state.isp_3d = config_data.get('isp_3d', 'none')
                         
                         return [
                             f"Configuration '{config_name}' loaded successfully",
@@ -1176,7 +1197,7 @@ def create_advanced_settings_tab():
                             config_data.get('spherical_enable', 'false'),
                             config_data.get('remove_bg', 'false'),
                             config_data.get('remove_objects', 'false'),
-                            config_data.get('object_removal_action', 'erase'),
+                            config_data.get('object_removal_action', 'erase') if config_data.get('object_removal_action', 'erase') in ('erase', 'remove') else 'erase',
                             config_data.get('objects_to_remove', []),
                             config_data.get('source_coordinate', 'arkit'),
                             config_data.get('pose_world_to_cam', 'true'),
@@ -1186,10 +1207,11 @@ def create_advanced_settings_tab():
                             config_data.get('spz_coords', 'rhyu'),
                             config_data.get('sog_coords', 'rhyu'),
                             config_data.get('usdz_coords', 'rhyu'),
-                            config_data.get('preserve_scene_scale', 'false')
+                            config_data.get('preserve_scene_scale', 'false'),
+                            config_data.get('isp_3d', 'none')
                         ]
                     except Exception as e:
-                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(34)]
+                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(35)]
                 
                 # Wire up save/load buttons
                 save_config_btn.click(
@@ -1333,20 +1355,24 @@ def handle_view_with_progress(selected_row):
             print(f"Error getting file size: {str(e)}")
             return gr.update(value=None), f"Error accessing file: {str(e)}", ""
         
-        # Generate a presigned URL for the file
-        presigned_url = generate_presigned_url(bucket_name, file_key)
+        # Download file to temp directory for Gradio 6 Model3D compatibility
+        # (Model3D no longer accepts external URLs, needs local file paths)
+        import tempfile
+        temp_dir = os.path.join(tempfile.gettempdir(), "gradio_3d_cache")
+        os.makedirs(temp_dir, exist_ok=True)
+        local_path = os.path.join(temp_dir, f"{job_id}_{filename}")
         
-        if not presigned_url:
-            return gr.update(value=None), "Error generating URL", ""
+        if not os.path.exists(local_path):
+            print(f"Downloading {file_key} to {local_path}...")
+            s3_client = boto3.client('s3')
+            s3_client.download_file(bucket_name, file_key, local_path)
+            print(f"Downloaded to {local_path}")
 
         # Store current model info
-        shared_state.current_model_url = presigned_url
+        shared_state.current_model_url = local_path
         shared_state.current_model_key = file_key
         
-        # Estimate loading time based on file size
-        estimated_time = file_size_mb * 0.5 if file_size_mb else 25
-        
-        return gr.update(value=presigned_url), f"Loading {filename}...", ""
+        return gr.update(value=local_path), f"Loading {filename}...", ""
         
     except Exception as e:
         error_msg = f"Error viewing file: {str(e)}"
@@ -1485,46 +1511,55 @@ def handle_view_multi(selected_row):
         
         filename = selected_row[1]
         
-        # Check if it's a SOG file
-        if filename.lower().endswith('.sog'):
+        # Download splat files server-side to avoid browser CORS restrictions on S3 presigned URLs
+        if filename.lower().endswith(('.sog', '.ply')):
+            import requests, base64
             bucket_name = shared_state.s3_bucket
             output_prefix = shared_state.s3_output or "workflow-output"
             job_id = selected_row[0]
             file_key = f"{output_prefix}/{job_id}/{filename}"
-            
-            presigned_url = generate_presigned_url(bucket_name, file_key)
-            if presigned_url:
-                # Fetch SOG data and use the working method
-                import requests
-                import base64
+            # Skip re-download if already cached from a prior table-click
+            current_key = getattr(shared_state, 'current_model_key', None)
+            cached_data = getattr(shared_state, 'current_model_data', None)
+            if current_key == file_key and cached_data:
+                file_data = cached_data
+            else:
+                presigned_url = generate_presigned_url(bucket_name, file_key)
+                if not presigned_url:
+                    return (gr.update(value=None), "", gr.update(value=""), "Error generating URL", gr.update(value=None), "", gr.update(value=""))
                 try:
                     response = requests.get(presigned_url)
                     file_data = base64.b64encode(response.content).decode('utf-8')
-                    file_size = f"{len(response.content):,} bytes"
-                    file_info = f"Loading {filename}..."
                 except Exception as e:
-                    file_data = ""
-                    file_info = f"Error: {str(e)}"
-                
-                return (
-                    gr.update(value=None), 
-                    "",
-                    gr.update(value=file_data),
-                    gr.update(value=file_info),
-                    gr.update(value=None),
-                    file_info
-                )
+                    return (gr.update(value=None), "", gr.update(value=""), f"Error: {e}", gr.update(value=None), "", gr.update(value=""))
+                shared_state.current_model_key = file_key
+                shared_state.current_model_data = file_data
+            return (gr.update(value=None), "", gr.update(value=json.dumps({"data": file_data, "filename": filename, "ts": __import__('time').time()})), f"Loading {filename}...", gr.update(value=None), "", gr.update(value=""))
+
+        elif filename.lower().endswith('.spz'):
+            import requests, base64
+            bucket_name = shared_state.s3_bucket
+            output_prefix = shared_state.s3_output or "workflow-output"
+            job_id = selected_row[0]
+            file_key = f"{output_prefix}/{job_id}/{filename}"
+            current_key = getattr(shared_state, 'current_model_key', None)
+            cached_data = getattr(shared_state, 'current_model_data', None)
+            if current_key == file_key and cached_data:
+                file_data = cached_data
             else:
-                return (
-                    gr.update(value=None), 
-                    "",
-                    gr.update(value=""),
-                    "",
-                    gr.update(value=None),
-                    "Error generating SOG file URL"
-                )
-        
-        # Check if it's a video file
+                presigned_url = generate_presigned_url(bucket_name, file_key)
+                if not presigned_url:
+                    return (gr.update(value=None), "", gr.update(value=""), "Error generating URL", gr.update(value=None), "", gr.update(value=""))
+                try:
+                    response = requests.get(presigned_url)
+                    file_data = base64.b64encode(response.content).decode('utf-8')
+                except Exception as e:
+                    return (gr.update(value=None), "", gr.update(value=""), f"Error: {e}", gr.update(value=None), "", gr.update(value=""))
+                shared_state.current_model_key = file_key
+                shared_state.current_model_data = file_data
+            payload = json.dumps({"data": file_data, "filename": filename, "ts": __import__('time').time()})
+            return (gr.update(value=None), "", gr.update(value=""), gr.update(value=""), gr.update(value=None), "", gr.update(value=payload))
+
         elif filename.lower().endswith('.mp4'):
             bucket_name = shared_state.s3_bucket
             output_prefix = shared_state.s3_output or "workflow-output"
@@ -1533,46 +1568,35 @@ def handle_view_multi(selected_row):
             
             presigned_url = generate_presigned_url(bucket_name, file_key)
             if presigned_url:
-                #print(f"[DEBUG] Video URL generated: {presigned_url}")
-                #print(f"[DEBUG] Video filename: {filename}")
                 return (
-                    gr.update(value=None), 
-                    "Video selected - check Video Preview tab",
-                    gr.update(value=""),
-                    gr.update(value=""),
-                    gr.update(value=presigned_url),
-                    f"Loaded video: {filename}"
+                    gr.update(value=None), "Video selected - check Video Preview tab",
+                    gr.update(value=""), gr.update(value=""),
+                    gr.update(value=presigned_url), f"Loaded video: {filename}",
+                    gr.update(value="")
                 )
             else:
                 return (
-                    gr.update(value=None), 
-                    "Error loading video",
-                    gr.update(value=""),
-                    gr.update(value=""),
-                    gr.update(value=None),
-                    "Error generating video URL"
+                    gr.update(value=None), "Error loading video",
+                    gr.update(value=""), gr.update(value=""),
+                    gr.update(value=None), "Error generating video URL",
+                    gr.update(value="")
                 )
         else:
-            # Handle other 3D models (PLY, SPZ, GLB, etc.)
             result = handle_view_with_progress(selected_row)
             return (
-                result[0], 
-                result[1],
-                gr.update(value=""),
-                gr.update(value=""),
-                gr.update(value=None),
-                "3D model selected - check 3D Model Viewer tab"
+                result[0], result[1],
+                gr.update(value=""), gr.update(value=""),
+                gr.update(value=None), "3D model selected - check 3D Model Viewer tab",
+                gr.update(value="")
             )
-            
+
     except Exception as e:
         error_msg = f"Error viewing file: {str(e)}"
         return (
-            gr.update(value=None), 
-            error_msg,
-            gr.update(value=""),
-            gr.update(value=f"Error: {error_msg}"),
-            gr.update(value=None),
-            error_msg
+            gr.update(value=None), error_msg,
+            gr.update(value=""), gr.update(value=f"Error: {error_msg}"),
+            gr.update(value=None), error_msg,
+            gr.update(value="")
         )
 
 def fetch_current_pricing():
@@ -1838,33 +1862,17 @@ def create_s3_browser_tab():
         current_filename = gr.Textbox(visible=False)
         
         # Create viewer modal
-        viewer_modal_html = gr.HTML(visible=False, elem_id="viewer-modal-overlay")
-        
-        with gr.Group(visible=False, elem_id="viewer-modal-content") as viewer_modal:
+        with Modal(visible=False, elem_id="viewer-modal-content") as viewer_modal:
             with gr.Row():
                 gr.Markdown("### 3D Viewer")
                 viewer_close_btn = gr.Button("✕ Close", size="sm", elem_classes=["close-button"])
             
+            viewer = gr.Model3D(visible=False, label="3D Viewer")
+            viewer_status = gr.Textbox(value="", visible=False, label="Viewer Status")
             with gr.Tabs():
-                with gr.Tab("3D Model Viewer (Babylon.js)"):
-                    viewer = gr.Model3D(
-                        label="3D Viewer",
-                        clear_color=[0.2, 0.2, 0.2, 1.0],
-                        height=700,
-                        interactive=True
-                    )
-                    viewer_status = gr.Textbox(
-                        label="Viewer Status",
-                        interactive=False,
-                        show_label=True,
-                        value="",
-                        lines=1,
-                        max_lines=1
-                    )
-                
-                with gr.Tab("SOG Viewer (PlayCanvas)"):
+                with gr.Tab("3D Splat Viewer"):
                     sog_viewer = gr.HTML(
-                        value="<div id='sog-container' style='height: 700px; background: #1a1a1a; border: 1px solid #444; display: flex; align-items: center; justify-content: center; color: white;'>Select a .sog file to view</div><script>const observer = new MutationObserver(() => { const container = document.getElementById('sog-container'); if(container && container.offsetWidth > 0 && window.sogData && !window.sogLoaded) { globalThis.createSOGViewer(window.sogData.fileData, window.sogData.fileName, window.sogData.fileSize); window.sogLoaded = true; observer.disconnect(); } }); observer.observe(document.body, {childList: true, subtree: true, attributes: true});</script>",
+                        value="<div id='sog-container' style='height: 700px; background: #1a1a1a; border: 1px solid #444; display: flex; align-items: center; justify-content: center; color: white;'>Select a .sog or .spz file to view</div>",
                         label="SOG Viewer"
                     )
                     sog_status = gr.Textbox(
@@ -1875,7 +1883,8 @@ def create_s3_browser_tab():
                         lines=3,
                         max_lines=5
                     )
-                
+                    spz_viewer = gr.Textbox(value="", visible=False, label="SPZ Data")
+
                 with gr.Tab("Video Preview"):
                     video_viewer = gr.Video(
                         label="Trajectory Video",
@@ -1896,27 +1905,41 @@ def create_s3_browser_tab():
         def open_favorite_in_modal(path, name):
             favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
             if not os.path.realpath(path).startswith(os.path.realpath(favorites_dir) + os.sep):
-                return (gr.update(), gr.update(), gr.update(), "Error: Invalid file path")
+                return (gr.update(), gr.update(), "", "", gr.update(), gr.update(), "", "", "")
             if name.lower().endswith('.sog'):
                 import base64
                 with open(path, 'rb') as f:
                     file_data = base64.b64encode(f.read()).decode('utf-8')
+                payload = json.dumps({"data": file_data, "filename": name, "ts": __import__('time').time()})
                 return (
-                    gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999;'></div>"),
                     gr.update(visible=True),
                     gr.update(value=None),
                     "",
-                    file_data,
+                    payload,
                     gr.update(),
                     gr.update(value=None),
                     "",
-                    name
+                    name,
+                    ""
+                )
+            elif name.lower().endswith('.spz'):
+                import base64
+                with open(path, 'rb') as f:
+                    file_data = base64.b64encode(f.read()).decode('utf-8')
+                payload = json.dumps({"data": file_data, "filename": name, "ts": __import__('time').time()})
+                return (
+                    gr.update(visible=True),
+                    gr.update(value=None),
+                    "",
+                    "",
+                    gr.update(),
+                    gr.update(value=None),
+                    "",
+                    name,
+                    payload
                 )
             else:
-                # For non-SOG files, pass the local file path directly to Model3D viewer
-                # Gradio's Model3D component can handle local file paths
                 return (
-                    gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999;'></div>"),
                     gr.update(visible=True),
                     gr.update(value=path),
                     f"Loaded: {name}",
@@ -1924,7 +1947,8 @@ def create_s3_browser_tab():
                     gr.update(),
                     gr.update(value=None),
                     "",
-                    name
+                    name,
+                    ""
                 )
         
         for btn, path, name in favorite_buttons:
@@ -1932,7 +1956,6 @@ def create_s3_browser_tab():
                 fn=lambda p=path, n=name: open_favorite_in_modal(p, n),
                 inputs=[],
                 outputs=[
-                    viewer_modal_html,
                     viewer_modal,
                     viewer,
                     viewer_status,
@@ -1940,7 +1963,8 @@ def create_s3_browser_tab():
                     sog_viewer,
                     video_viewer,
                     video_status,
-                    current_filename
+                    current_filename,
+                    spz_viewer
                 ]
             )
         
@@ -1992,9 +2016,7 @@ def create_s3_browser_tab():
         download_iframe = gr.HTML(visible=True)
 
         # Create refine modal dialog with custom CSS for popup
-        refine_modal_html = gr.HTML(visible=False, elem_id="refine-modal-overlay")
-        
-        with gr.Group(visible=False, elem_id="refine-modal-content") as refine_modal:
+        with Modal(visible=False, elem_id="refine-modal-content") as refine_modal:
             gr.Markdown("### Refine Splat Settings", elem_classes="padded-markdown")
             gr.Markdown("Review and modify settings for refinement job:", elem_classes="padded-markdown")
             
@@ -2017,6 +2039,16 @@ def create_s3_browser_tab():
                 label="Crop Mode",
                 choices=["environment", "rigid_body"],
                 value=shared_state.crop_mode
+            )
+            refine_isp_3d = gr.Dropdown(
+                label="3D ISP Mode",
+                choices=[
+                    ("None", "none"),
+                    ("Bilateral Grid (bilagrid)", "bilagrid"),
+                    ("Per-Pixel ISP (ppisp)", "ppisp")
+                ],
+                value=shared_state.isp_3d,
+                info="Not applicable to nerfacto."
             )
             refine_clean_splat = gr.Radio(
                 label="Clean Splat (Remove Noise)",
@@ -2127,34 +2159,34 @@ def create_s3_browser_tab():
         # View button opens the viewer modal
         def open_viewer_modal(selected_data_val):
             if not selected_data_val:
-                return tuple([gr.update(visible=False), gr.update(visible=False)] + [gr.update() for _ in range(7)])
+                return tuple([gr.update(visible=False)] + [gr.update() for _ in range(7)])
             
             viewer_result = handle_view_multi(selected_data_val)
             filename = selected_data_val[1].replace("  └─ ", "")
             return (
-                gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999;'></div>"),
-                gr.update(visible=True),
+                                gr.update(visible=True),
                 viewer_result[0],  # viewer
                 viewer_result[1],  # viewer_status
                 viewer_result[2],  # sog_file_data
-                viewer_result[3],  # sog_status (was sog_file_info)
+                viewer_result[3],  # sog_status
                 viewer_result[4],  # video_viewer
                 viewer_result[5],  # video_status
-                filename  # current_filename for tab switching
+                viewer_result[6],  # spz_viewer
+                filename
             )
         
         view_btn.click(
             fn=open_viewer_modal,
             inputs=[selected_data],
             outputs=[
-                viewer_modal_html,
                 viewer_modal,
                 viewer,
                 viewer_status,
                 sog_file_data,
-                sog_status,  # Changed from sog_file_info to sog_status
+                sog_status,
                 video_viewer,
                 video_status,
+                spz_viewer,
                 current_filename
             ]
         )
@@ -2172,21 +2204,18 @@ def create_s3_browser_tab():
                             const tabText = tab.textContent.trim();
                             if(fname.endsWith('.mp4') && tabText.includes('Video Preview')) {
                                 tab.click();
-                            } else if(fname.endsWith('.sog') && tabText.includes('SOG Viewer')) {
-                                tab.click();
-                            } else if(!fname.endsWith('.sog') && !fname.endsWith('.mp4') && tabText.includes('3D Model Viewer')) {
+                            } else if(!fname.endsWith('.mp4') && tabText.includes('3D Splat Viewer')) {
                                 tab.click();
                             }
                         });
-                    }, 100);
+                    }, 200);
                 }
             }"""
         )
         
-        # Close viewer modal
         viewer_close_btn.click(
-            fn=lambda: (gr.update(visible=False), gr.update(visible=False)),
-            outputs=[viewer_modal_html, viewer_modal]
+            fn=lambda: gr.update(visible=False),
+            outputs=[viewer_modal]
         )
         
         # Connect download button
@@ -2195,71 +2224,20 @@ def create_s3_browser_tab():
             inputs=[selected_data],
             outputs=[download_iframe]
         )
-        
-
-        
-        # Add JavaScript-only click handler for tab switching using the filename
-        current_filename.change(
+        download_iframe.change(
             fn=None,
-            inputs=[current_filename],
-            js="""(filename) => {
-                console.log('Tab switching JS triggered with filename:', filename);
-                if(filename) {
-                    const fname = filename.toLowerCase();
-                    console.log('Processing filename:', fname);
-                    
-                    setTimeout(() => {
-                        const allTabs = document.querySelectorAll('button[role="tab"]');
-                        console.log('Found tabs:', allTabs.length);
-                        
-                        allTabs.forEach((tab, index) => {
-                            const tabText = tab.textContent.trim();
-                            console.log('Tab', index, ':', tabText);
-                            
-                            if(fname.endsWith('.mp4') && tabText.includes('Video Preview')) {
-                                console.log('Clicking Video Preview tab');
-                                tab.click();
-                            } else if(fname.endsWith('.sog') && tabText.includes('SOG Viewer')) {
-                                console.log('Clicking SOG Viewer tab');
-                                tab.click();
-                            } else if(!fname.endsWith('.sog') && !fname.endsWith('.mp4') && tabText.includes('3D Model Viewer')) {
-                                console.log('Clicking 3D Model Viewer tab');
-                                tab.click();
-                            }
-                        });
-                    }, 300);
-                }
+            inputs=[download_iframe],
+            outputs=None,
+            js="""(url) => {
+                if (url) { const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); document.body.removeChild(a); }
             }"""
         )
         
         # Favorite buttons already set filename in open_favorite_in_modal, no need for second handler
         
         # Store SOG data and trigger viewer
-        sog_file_data.change(
-            None,
-            inputs=[sog_file_data, current_filename],
-            outputs=None,
-            js="""(fileData, fileName) => { 
-                console.log('SOG data changed:', fileName, fileData ? 'data present' : 'no data');
-                if(fileData && fileName && fileName.toLowerCase().endsWith('.sog')) { 
-                    window.sogData = {fileData, fileName, fileSize: 'Local file'}; 
-                    window.sogLoaded = false;
-                    setTimeout(() => {
-                        console.log('Attempting to create SOG viewer');
-                        if (window.createSOGViewer) {
-                            console.log('Creating SOG viewer now');
-                            window.createSOGViewer(fileData, fileName, 'Local file');
-                            window.sogLoaded = true;
-                        } else {
-                            console.log('createSOGViewer not available yet');
-                        }
-                    }, 500);
-                } 
-            }"""
-        )
-        
         # Connect add to favorites button
-        add_favorite_btn.click(
+        add_to_favorites_btn.click(
             fn=add_to_favorites,
             inputs=[selected_data],
             outputs=[action_status]
@@ -2268,30 +2246,30 @@ def create_s3_browser_tab():
         # Show modal when refine button is clicked
         def show_refine_modal(selected_data):
             if not selected_data:
-                return gr.update(visible=False), gr.update(visible=False), "No file selected"
-            return gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999; pointer-events: none;'></div>"), gr.update(visible=True), ""
+                return gr.update(visible=False), "No file selected"
+            return gr.update(visible=True), ""
         
         refine_btn.click(
             fn=show_refine_modal,
             inputs=[selected_data],
-            outputs=[refine_modal_html, refine_modal, action_status]
+            outputs=[refine_modal, action_status]
         )
         
         # Hide modal on cancel
         refine_cancel_btn.click(
-            fn=lambda: (gr.update(visible=False), gr.update(visible=False)),
-            outputs=[refine_modal_html, refine_modal]
+            fn=lambda: gr.update(visible=False),
+            outputs=[refine_modal]
         )
         
         # Submit refinement job with user selections
-        def submit_refine_job(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords):
-            result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords)
-            return gr.update(visible=False), gr.update(visible=False), result
+        def submit_refine_job(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords, isp_3d):
+            result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords, isp_3d)
+            return gr.update(visible=False), result
         
         refine_submit_btn.click(
             fn=submit_refine_job,
-            inputs=[selected_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords],
-            outputs=[refine_modal_html, refine_modal, action_status]
+            inputs=[selected_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords, refine_isp_3d],
+            outputs=[refine_modal, action_status]
         )
         
         # Add SuperSplat link at the bottom of the viewer tab
@@ -2746,12 +2724,11 @@ def add_to_favorites_and_reload(selected_data):
 def handle_download(selected_data):
     try:
         if not selected_data:
-            return "No file selected"
+            return ""
             
-        job_id = selected_data[0]  # First column is job ID
-        filename = selected_data[1]  # Second column is filename
+        job_id = selected_data[0]
+        filename = selected_data[1]
         
-        # Generate the presigned URL
         bucket_name = shared_state.s3_bucket
         output_prefix = shared_state.s3_output or "workflow-output"
         file_key = f"{output_prefix}/{job_id}/{filename}"
@@ -2766,18 +2743,11 @@ def handle_download(selected_data):
             },
             ExpiresIn=3600
         )
-        
-        # Return an iframe that will trigger the download
-        return gr.HTML(f"""
-            <iframe 
-                src="{url}" 
-                style="display: none;"
-                onload="this.parentElement.removeChild(this)"
-            ></iframe>
-        """)
+        return url
         
     except Exception as e:
-        return f"Error downloading file: {str(e)}"
+        print(f"Error generating download URL: {str(e)}")
+        return ""
 
 def generate_presigned_url(bucket_name, key, expiration=3600):
     """Generate a presigned URL for downloading an S3 object"""
@@ -3041,22 +3011,15 @@ def create_combined_monitor_viewer_tab():
             selected_file_data = gr.State(None)
             
             # Cancel job modal
-            cancel_modal_html = gr.HTML(visible=False, elem_id="cancel-modal-overlay")
-            
-            with gr.Group(visible=False, elem_id="cancel-modal-content") as cancel_modal:
+            with Modal(visible=False, elem_id="cancel-modal-content") as cancel_modal:
                 gr.Markdown("### ⚠️ Cancel Job", elem_classes="padded-markdown")
                 cancel_job_info = gr.Markdown("Are you sure you want to cancel this job?")
-                
                 with gr.Row():
                     cancel_no_btn = gr.Button("No, Keep Running", variant="secondary")
                     cancel_yes_btn = gr.Button("Yes, Cancel Job", variant="stop")
             
-
-            
-            # Files modal
-            files_modal_html = gr.HTML(visible=False, elem_id="files-modal-overlay")
-            
-            with gr.Group(visible=False, elem_id="files-modal-content") as files_modal:
+            # Files modal - always in DOM, shown/hidden via JS (must be visible=True so children can be updated)
+            with Modal(visible=True, elem_id="files-modal-content") as files_modal:
                 with gr.Row():
                     gr.Markdown("### 📁 Job Output Files")
                     files_close_btn = gr.Button("✕ Close", size="sm", elem_classes=["close-button"])
@@ -3101,12 +3064,10 @@ def create_combined_monitor_viewer_tab():
                 )
             
             # Refine modal and status
-            refine_modal_html = gr.HTML(visible=False, elem_id="refine-modal-overlay-monitor")
-            
-            with gr.Group(visible=False, elem_id="refine-modal-content") as refine_modal:
+            with Modal(visible=False, elem_id="refine-modal-content") as refine_modal:
                 gr.Markdown("### Refine Splat Settings", elem_classes="padded-markdown")
                 gr.Markdown("Review and modify settings for refinement job:", elem_classes="padded-markdown")
-                
+
                 refine_instance = gr.Dropdown(
                     label="Instance Type",
                     choices=["ml.g5.4xlarge", "ml.g5.8xlarge", "ml.g5.12xlarge", "ml.g6.4xlarge", "ml.g6.8xlarge", "ml.g6e.4xlarge"],
@@ -3126,6 +3087,16 @@ def create_combined_monitor_viewer_tab():
                     label="Crop Mode",
                     choices=["environment", "rigid_body"],
                     value=shared_state.crop_mode
+                )
+                refine_isp_3d = gr.Dropdown(
+                    label="3D ISP Mode",
+                    choices=[
+                        ("None", "none"),
+                        ("Bilateral Grid (bilagrid)", "bilagrid"),
+                        ("Per-Pixel ISP (ppisp)", "ppisp")
+                    ],
+                    value=shared_state.isp_3d,
+                    info="Not applicable to nerfacto."
                 )
                 refine_clean_splat = gr.Radio(
                     label="Clean Splat (Remove Noise)",
@@ -3372,11 +3343,12 @@ def create_combined_monitor_viewer_tab():
             sog_file_data = gr.Textbox(visible=False)
             current_filename = gr.Textbox(visible=False)
             download_iframe = gr.HTML(visible=True)
+            show_files_signal = gr.Textbox(value="", visible=False, elem_id="show-files-signal")
+            # Dummy output to replace files_modal in outputs (since hoisted modals can't be updated by Gradio)
+            files_modal_dummy = gr.Textbox(visible=False)
             
-            # Viewer modal
-            viewer_modal_html = gr.HTML(visible=False, elem_id="viewer-modal-overlay")
-            
-            with gr.Group(visible=False, elem_id="viewer-modal-content") as viewer_modal:
+            # Viewer modal (visible=True so children can be updated; CSS hides it initially)
+            with Modal(visible=True, elem_id="viewer-modal-content") as viewer_modal:
                 with gr.Row():
                     gr.Markdown("### 3D Viewer")
                     viewer_close_btn = gr.Button("✕ Close", size="sm", elem_classes=["close-button"])
@@ -3391,29 +3363,18 @@ def create_combined_monitor_viewer_tab():
                             interactive=True
                         )
                         with gr.Column():
-                            view_file_btn = gr.Button("👁️ View", size="sm", variant="primary")
                             download_file_btn = gr.Button("⬇️ Download", size="sm")
                             add_favorite_file_btn = gr.Button("⭐ Add to Favorites", size="sm")
                     
                     # Right panel: Viewer
                     with gr.Column(scale=3):
+                        # Hidden dummy components for viewer/viewer_status (needed for output compatibility)
+                        viewer_status = gr.Textbox(visible=False)
+                        
                         with gr.Tabs():
-                            with gr.Tab("3D Model Viewer (Babylon.js)"):
-                                viewer = gr.Model3D(
-                                    label="3D Viewer",
-                                    clear_color=[0.2, 0.2, 0.2, 1.0],
-                                    height=700,
-                                    interactive=True
-                                )
-                                viewer_status = gr.Textbox(
-                                    label="Viewer Status",
-                                    interactive=False,
-                                    value=""
-                                )
-                            
-                            with gr.Tab("SOG Viewer (PlayCanvas)"):
+                            with gr.Tab("3D Splat Viewer"):
                                 sog_viewer = gr.HTML(
-                                    value="<div id='sog-container' style='height: 700px; background: #1a1a1a; border: 1px solid #444; display: flex; align-items: center; justify-content: center; color: white;'>Select a .sog file to view</div>",
+                                    value="<div id='sog-container-monitor' style='height: 700px; background: #1a1a1a; border: 1px solid #444; display: flex; align-items: center; justify-content: center; color: white;'>Select a file to view</div>",
                                     label="SOG Viewer"
                                 )
                                 sog_status = gr.Textbox(
@@ -3423,7 +3384,9 @@ def create_combined_monitor_viewer_tab():
                                     lines=1,
                                     max_lines=1
                                 )
-                            
+                                viewer = gr.Model3D(visible=False, label="3D Viewer")
+                                spz_viewer = gr.Textbox(value="", visible=False, label="SPZ Data")
+
                             with gr.Tab("Video Preview"):
                                 video_viewer = gr.Video(
                                     label="Trajectory Video",
@@ -3456,19 +3419,20 @@ def create_combined_monitor_viewer_tab():
             
             def on_job_select_combined(evt: gr.SelectData, data):
                 """Handle job selection - open files modal"""
+                import time as _time
                 try:
                     if hasattr(data, 'empty'):
                         if data.empty:
-                            return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None
+                            return None, gr.update(), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None, f"hide:{_time.time()}"
                         data_list = data.values.tolist()
                     else:
                         if not data or len(data) == 0:
-                            return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None
+                            return None, gr.update(), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None, f"hide:{_time.time()}"
                         data_list = data
                     
                     row_idx = evt.index[0]
                     if row_idx >= len(data_list):
-                        return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None
+                        return None, gr.update(), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None, f"hide:{_time.time()}"
                     
                     selected_row = data_list[row_idx]
                     job_id = selected_row[0]
@@ -3516,49 +3480,57 @@ def create_combined_monitor_viewer_tab():
                     print(f"Phase HTML length: {len(phase_html)}, Metadata HTML length: {len(metadata_html)}")
                     
                     # Open files modal if there are files
+                    # Append timestamp so signal always changes, ensuring .then() fires every click
+                    import time as _time
+                    ts = _time.time()
                     if len(files_data) > 0:
                         return (
                             job_data,
-                            gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999;'></div>"),
-                            gr.update(visible=True),
+                            gr.update(),
                             files_data,
                             gr.update(interactive=enable_refine),
                             gr.update(interactive=enable_cancel),
                             phase_html,
                             metadata_html,
-                            thumbnail_url
+                            thumbnail_url,
+                            f"show:{ts}"
                         )
                     else:
                         return (
                             job_data,
-                            gr.update(visible=False),
-                            gr.update(visible=False),
+                            gr.update(),
                             [],
                             gr.update(interactive=enable_refine),
                             gr.update(interactive=enable_cancel),
                             phase_html,
                             metadata_html,
-                            None
+                            None,
+                            f"hide:{ts}"
                         )
                 except Exception as e:
                     print(f"Error in job selection: {e}")
                     import traceback
                     traceback.print_exc()
-                    return None, gr.update(visible=False), gr.update(visible=False), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None
+                    return None, gr.update(), [], gr.update(interactive=False), gr.update(interactive=False), "", "", None, f"hide:{_time.time()}"
             
+            # Debug: add JS to verify select fires, then call Python handler
             jobs_table.select(
                 fn=on_job_select_combined,
                 inputs=[jobs_table],
-                outputs=[selected_job_data, files_modal_html, files_modal, files_table, refine_job_btn, cancel_job_btn, phase_progress_display, job_config_display, job_thumbnail]
+                outputs=[selected_job_data, files_modal_dummy, files_table, refine_job_btn, cancel_job_btn, phase_progress_display, job_config_display, job_thumbnail, show_files_signal],
+                js="""(...args) => { console.log('GRADIO6 DEBUG: jobs_table.select fired!', args); return args; }"""
+            ).then(
+                fn=None,
+                inputs=[show_files_signal],
+                js="""(sig) => { const el = document.getElementById('files-modal-content'); if(el) { if(sig && sig.startsWith('show')) { el.style.display = 'flex'; } else { el.style.display = 'none'; } } }"""
             )
             
             # Cancel job handlers
             def show_cancel_modal(selected_data):
                 if not selected_data:
-                    return gr.update(visible=False), gr.update(visible=False), ""
+                    return gr.update(visible=False), ""
                 job_id = selected_data[0][:8] if selected_data[0] else "Unknown"
                 return (
-                    gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999;'></div>"),
                     gr.update(visible=True),
                     f"Are you sure you want to cancel job **{job_id}...**?"
                 )
@@ -3567,7 +3539,7 @@ def create_combined_monitor_viewer_tab():
                 """Cancel a running job by stopping the state machine execution"""
                 try:
                     if not selected_data:
-                        return gr.update(visible=False), gr.update(visible=False), "No job selected"
+                        return gr.update(elem_classes=["hide"]), "No job selected"
                     
                     job_id = selected_data[0]
                     
@@ -3576,7 +3548,7 @@ def create_combined_monitor_viewer_tab():
                     # Look up the state machine ARN from SSM (same way Lambda does)
                     ssm_client = boto3.client('ssm', region_name=shared_state.aws_region)
                     ssm_param_name = f"3dgs-sfn-arn-{shared_state.stack_unique_id}"
-                    state_machine_arn = ssm_client.get_parameter(Name=ssm_param_name)['Parameter']['Value']
+                    state_machine_arn = ssm_client.get_parameter(Name=ssm_param_name, WithDecryption=True)['Parameter']['Value']
                     
                     # Find the running execution that contains this job UUID
                     execution_arn = None
@@ -3608,36 +3580,36 @@ def create_combined_monitor_viewer_tab():
                     )
                     
                     gr.Info(f"✅ Job {job_id[:8]}... cancelled successfully")
-                    return gr.update(visible=False), gr.update(visible=False)
+                    return gr.update(visible=False)
                     
                 except Exception as e:
                     print(f"Error cancelling job: {e}")
                     import traceback
                     traceback.print_exc()
                     gr.Warning(f"❌ Error cancelling job: {str(e)}")
-                    return gr.update(visible=False), gr.update(visible=False)
+                    return gr.update(visible=False)
             
             cancel_job_btn.click(
                 fn=show_cancel_modal,
                 inputs=[selected_job_data],
-                outputs=[cancel_modal_html, cancel_modal, cancel_job_info]
+                outputs=[cancel_modal, cancel_job_info]
             )
             
             cancel_no_btn.click(
-                fn=lambda: (gr.update(visible=False), gr.update(visible=False)),
-                outputs=[cancel_modal_html, cancel_modal]
+                fn=lambda: gr.update(visible=False),
+                outputs=[cancel_modal]
             )
             
             cancel_yes_btn.click(
                 fn=cancel_job_execution,
                 inputs=[selected_job_data],
-                outputs=[cancel_modal_html, cancel_modal]
+                outputs=[cancel_modal]
             )
             
-            # Close files modal
+            # Close files modal - use JS only since element is hoisted to document.body
             files_close_btn.click(
-                fn=lambda: (gr.update(visible=False), gr.update(visible=False)),
-                outputs=[files_modal_html, files_modal]
+                fn=None,
+                js="""() => { const el = document.getElementById('files-modal-content'); if(el) el.style.display = 'none'; }"""
             )
             
             # Handle file selection from files table - automatically open viewer
@@ -3645,22 +3617,22 @@ def create_combined_monitor_viewer_tab():
                 """Handle file selection - automatically open viewer with file"""
                 try:
                     if job_data is None:
-                        return tuple([None] + [gr.update(visible=False)] * 2 + [gr.update()] * 8)
+                        return tuple([None] + [gr.update()] * 2 + [gr.update()] * 8)
                     
                     if hasattr(data, 'empty'):
                         if data.empty:
-                            return tuple([None] + [gr.update(visible=False)] * 2 + [gr.update()] * 8)
+                            return tuple([None] + [gr.update()] * 2 + [gr.update()] * 8)
                         data_list = data.values.tolist()
                     elif isinstance(data, list):
                         if len(data) == 0:
-                            return tuple([None] + [gr.update(visible=False)] * 2 + [gr.update()] * 8)
+                            return tuple([None] + [gr.update()] * 10)
                         data_list = data
                     else:
-                        return tuple([None] + [gr.update(visible=False)] * 2 + [gr.update()] * 8)
+                        return tuple([None] + [gr.update()] * 10)
                     
                     row_idx = evt.index[0]
                     if row_idx >= len(data_list):
-                        return tuple([None] + [gr.update(visible=False)] * 2 + [gr.update()] * 8)
+                        return tuple([None] + [gr.update()] * 10)
                     
                     selected_file = data_list[row_idx]
                     filename = selected_file[0]
@@ -3675,13 +3647,13 @@ def create_combined_monitor_viewer_tab():
                     selected_row = [job_id, filename]
                     result = handle_view_multi(selected_row)
                     
-                    # Close files modal and open viewer modal with file list
+                    # JS handles modal show/hide - just return data updates
+                    # Set both choices and value so the dropdown reflects the selected file.
+                    # load_selected_file guards against re-downloading when data is already cached.
                     return (
                         file_data,
-                        gr.update(visible=False),  # Close files modal overlay
-                        gr.update(visible=False),  # Close files modal
-                        gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999;'></div>"),
-                        gr.update(visible=True),
+                        gr.update(),  # files_modal - JS handles hide
+                        gr.update(),  # viewer_modal - JS handles show
                         gr.update(choices=file_choices, value=filename),
                         result[0],
                         result[1],
@@ -3689,42 +3661,53 @@ def create_combined_monitor_viewer_tab():
                         result[3],
                         result[4],
                         result[5],
+                        result[6],
                         filename
                     )
                 except Exception as e:
                     print(f"Error in file selection: {e}")
                     import traceback
                     traceback.print_exc()
-                    return tuple([None] + [gr.update(visible=False)] * 2 + [gr.update()] * 8)
+                    return tuple([None] + [gr.update()] * 11)
+            
+            # Two dummy textboxes to replace files_modal and viewer_modal in outputs
+            files_modal_dummy2 = gr.Textbox(visible=False)
+            viewer_modal_dummy = gr.Textbox(visible=False)
             
             files_table.select(
                 fn=on_file_select_and_view,
                 inputs=[files_table, selected_job_data],
-                outputs=[selected_file_data, files_modal_html, files_modal, viewer_modal_html, viewer_modal, file_selector, viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, current_filename]
+                outputs=[selected_file_data, files_modal_dummy2, viewer_modal_dummy, file_selector, viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, spz_viewer, current_filename],
+                js="""(...args) => {
+                    // Hide files modal and show viewer modal via style.display
+                    const filesEl = document.getElementById('files-modal-content');
+                    const viewerEl = document.getElementById('viewer-modal-content');
+                    if(filesEl) filesEl.style.display = 'none';
+                    if(viewerEl) {
+                        viewerEl.style.display = 'flex';
+                        setTimeout(() => window.dispatchEvent(new Event('resize')), 100);
+                    }
+                    return args;
+                }"""
             )
             
             # View button opens viewer modal from files modal with all job files
             def open_viewer_from_files_modal(file_data, job_data):
                 if not file_data or not job_data:
-                    return tuple([gr.update(visible=False), gr.update(visible=False)] + [gr.update() for _ in range(8)])
+                    return tuple([gr.update(elem_classes=["hide"])] * 2 + [gr.update(elem_classes=["hide"])] * 2 + [gr.update() for _ in range(8)])
                 
                 job_id = job_data[0]
                 filename = file_data[1]
                 
-                # Get all files for this job
                 job_files = get_job_output_files(job_id)
                 file_choices = [f.get('filename', '') for f in job_files]
                 
-                # Load the selected file
                 selected_row = [job_id, filename]
                 result = handle_view_multi(selected_row)
                 
-                # Close files modal and open viewer modal with file list
                 return (
-                    gr.update(visible=False),  # Close files modal overlay
-                    gr.update(visible=False),  # Close files modal
-                    gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999;'></div>"),
-                    gr.update(visible=True),
+                    gr.update(elem_classes=["hide"]),  # Close files modal
+                    gr.update(elem_classes=[]),   # Open viewer modal
                     gr.update(choices=file_choices, value=filename),
                     result[0],
                     result[1],
@@ -3732,42 +3715,71 @@ def create_combined_monitor_viewer_tab():
                     result[3],
                     result[4],
                     result[5],
+                    result[6],
                     filename
                 )
-            
-            view_file_btn.click(
-                fn=open_viewer_from_files_modal,
-                inputs=[selected_file_data, selected_job_data],
-                outputs=[files_modal_html, files_modal, viewer_modal_html, viewer_modal, file_selector, viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, current_filename]
-            )
             
             # File selector change loads the selected file AND updates selected_file_data
             def load_selected_file(filename, job_data):
                 if not filename or not job_data:
-                    return gr.update(), "", "", "", gr.update(), "", "", None
-                
-                selected_row = [job_data[0], filename]
+                    return gr.update(), "", "", "", gr.update(), "", gr.update(), "", None
+                job_id = job_data[0]
+                output_prefix = shared_state.s3_output or "workflow-output"
+                file_key = f"{output_prefix}/{job_id}/{filename}"
+                current_key = getattr(shared_state, 'current_model_key', None)
+                if current_key == file_key:
+                    # Re-use cached data to re-trigger the viewer
+                    cached_data = getattr(shared_state, 'current_model_data', None)
+                    if cached_data:
+                        payload = json.dumps({"data": cached_data, "filename": filename, "ts": __import__('time').time()})
+                        return gr.update(), gr.update(), gr.update(value=payload), gr.update(), gr.update(), gr.update(), gr.update(), filename, [job_id, filename]
+                    return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), filename, [job_id, filename]
+                # Clear cache so handle_view_multi re-downloads for the new file
+                shared_state.current_model_key = None
+                shared_state.current_model_data = None
+                selected_row = [job_id, filename]
                 result = handle_view_multi(selected_row)
-                return result[0], result[1], result[2], result[3], result[4], result[5], filename, selected_row
+                return result[0], result[1], result[2], result[3], result[4], result[5], result[6], filename, selected_row
             
             file_selector.change(
                 fn=load_selected_file,
                 inputs=[file_selector, selected_job_data],
-                outputs=[viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, current_filename, selected_file_data]
+                outputs=[viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, spz_viewer, current_filename, selected_file_data]
             )
-            
-            # View button in left panel - also updates selected_file_data
-            view_file_btn.click(
-                fn=load_selected_file,
-                inputs=[file_selector, selected_job_data],
-                outputs=[viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, current_filename, selected_file_data]
+
+            spz_viewer.change(
+                fn=None,
+                inputs=[spz_viewer],
+                outputs=None,
+                js="""async (payload) => {
+                    if(!payload) return;
+                    let parsed; try { parsed = JSON.parse(payload); } catch(e) { return; }
+                    const {data: fileData, filename: fileName} = parsed;
+                    if(!fileData || !fileName) return;
+                    window.spzData = {fileData, fileName};
+                    let attempts = 0;
+                    const tryLoad = () => {
+                        if(window.createSPZViewer) {
+                            window.createSPZViewer(fileData, fileName, 'S3 file');
+                        } else if(attempts < 20) { attempts++; setTimeout(tryLoad, 250); }
+                    };
+                    setTimeout(tryLoad, 300);
+                }"""
             )
-            
+
             # Download button in left panel
             download_file_btn.click(
                 fn=lambda filename, job_data: handle_download([job_data[0], filename]) if filename and job_data else "",
                 inputs=[file_selector, selected_job_data],
                 outputs=[download_iframe]
+            )
+            download_iframe.change(
+                fn=None,
+                inputs=[download_iframe],
+                outputs=None,
+                js="""(url) => {
+                    if (url) { const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); document.body.removeChild(a); }
+                }"""
             )
             
             # Add to favorites button in left panel
@@ -3780,84 +3792,82 @@ def create_combined_monitor_viewer_tab():
                 inputs=[file_selector, selected_job_data]
             )
             
-            # Close viewer modal
+            # Close viewer modal via JS
             viewer_close_btn.click(
-                fn=lambda: (gr.update(visible=False), gr.update(visible=False)),
-                outputs=[viewer_modal_html, viewer_modal]
-            )
-            
-            # Download button
-            download_file_btn.click(
-                fn=lambda file_data: handle_download(file_data) if file_data else "",
-                inputs=[selected_file_data],
-                outputs=[download_iframe]
-            )
-            
-            # Add to favorites (from selected_file_data)
-            def add_favorite_from_file_data(file_data):
-                result = add_to_favorites(file_data) if file_data else "No file selected"
-                gr.Info(result)
-            
-            add_favorite_file_btn.click(
-                fn=add_favorite_from_file_data,
-                inputs=[selected_file_data]
+                fn=None,
+                js="""() => { const el = document.getElementById('viewer-modal-content'); if(el) el.style.display = 'none'; }"""
             )
             
             # Refine modal handlers
             def show_refine_modal_monitor(selected_data):
                 if not selected_data:
-                    return gr.update(visible=False), gr.update(visible=False)
-                return gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999; pointer-events: none;'></div>"), gr.update(visible=True)
+                    return gr.update(visible=False)
+                return gr.update(visible=True)
             
             refine_job_btn.click(
                 fn=show_refine_modal_monitor,
                 inputs=[selected_job_data],
-                outputs=[refine_modal_html, refine_modal]
+                outputs=[refine_modal]
             )
             
             refine_cancel_btn.click(
-                fn=lambda: (gr.update(visible=False), gr.update(visible=False)),
-                outputs=[refine_modal_html, refine_modal]
+                fn=lambda: gr.update(visible=False),
+                outputs=[refine_modal]
             )
             
-            def submit_refine_job_monitor(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords):
-                result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords)
+            def submit_refine_job_monitor(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords, isp_3d):
+                result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords, isp_3d)
                 gr.Info(result)
-                return gr.update(visible=False), gr.update(visible=False)
+                return gr.update(visible=False)
             
             refine_submit_btn.click(
                 fn=submit_refine_job_monitor,
-                inputs=[selected_job_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords],
-                outputs=[refine_modal_html, refine_modal]
+                inputs=[selected_job_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords, refine_isp_3d],
+                outputs=[refine_modal]
             )
             
             # Connect favorite buttons to viewer modal
             def open_favorite_in_modal(path, name):
                 favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
                 if not os.path.realpath(path).startswith(os.path.realpath(favorites_dir) + os.sep):
-                    return (gr.update(), gr.update(), gr.update(), gr.update(), "Error: Invalid file path")
+                    return (gr.update(), gr.update(), gr.update(), gr.update(), "", gr.update(), gr.update(), "", "", "")
                 if name.lower().endswith('.sog'):
                     import base64
                     with open(path, 'rb') as f:
                         file_data = base64.b64encode(f.read()).decode('utf-8')
+                    payload = json.dumps({"data": file_data, "filename": name, "ts": __import__('time').time()})
                     return (
-                        gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999;'></div>"),
-                        gr.update(visible=True),
+                        gr.update(elem_classes=[]),
                         gr.update(choices=[name], value=name),
                         gr.update(value=None),
                         "",
-                        file_data,
+                        payload,
                         gr.update(),
                         gr.update(value=None),
                         "",
-                        name
+                        name,
+                        ""
+                    )
+                elif name.lower().endswith('.spz'):
+                    import base64
+                    with open(path, 'rb') as f:
+                        file_data = base64.b64encode(f.read()).decode('utf-8')
+                    payload = json.dumps({"data": file_data, "filename": name, "ts": __import__('time').time()})
+                    return (
+                        gr.update(elem_classes=[]),
+                        gr.update(choices=[name], value=name),
+                        gr.update(value=None),
+                        "",
+                        "",
+                        gr.update(),
+                        gr.update(value=None),
+                        "",
+                        name,
+                        payload
                     )
                 else:
-                    # For non-SOG files, pass the local file path directly to Model3D viewer
-                    # Gradio's Model3D component can handle local file paths
                     return (
-                        gr.update(visible=True, value="<div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999;'></div>"),
-                        gr.update(visible=True),
+                        gr.update(elem_classes=[]),
                         gr.update(choices=[name], value=name),
                         gr.update(value=path),
                         f"Loaded: {name}",
@@ -3865,17 +3875,22 @@ def create_combined_monitor_viewer_tab():
                         gr.update(),
                         gr.update(value=None),
                         "",
-                        name
+                        name,
+                        ""
                     )
+            
+            # Dummy for favorites output (can't output to gr.Column modals in Gradio 6)
+            viewer_modal_dummy2 = gr.Textbox(visible=False)
             
             for btn, path, name in favorite_buttons:
                 btn.click(
                     fn=lambda p=path, n=name: open_favorite_in_modal(p, n),
                     inputs=[],
-                    outputs=[viewer_modal_html, viewer_modal, file_selector, viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, current_filename]
+                    outputs=[viewer_modal_dummy2, file_selector, viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, current_filename, spz_viewer],
+                    js="""() => { const el = document.getElementById('viewer-modal-content'); if(el) el.style.display = 'flex'; }"""
                 )
             
-            # Add tab switching when current_filename changes
+            # Add tab switching when current_filename changes - route all splat files to PlayCanvas
             current_filename.change(
                 fn=None,
                 inputs=[current_filename],
@@ -3890,9 +3905,7 @@ def create_combined_monitor_viewer_tab():
                                     const tabText = tab.textContent.trim();
                                     if(fname.endsWith('.mp4') && tabText.includes('Video Preview')) {
                                         tab.click();
-                                    } else if(fname.endsWith('.sog') && tabText.includes('SOG Viewer')) {
-                                        tab.click();
-                                    } else if(!fname.endsWith('.sog') && !fname.endsWith('.mp4') && tabText.includes('3D Model Viewer')) {
+                                    } else if(!fname.endsWith('.mp4') && (tabText.includes('3D Splat Viewer') || tabText.includes('SOG Viewer'))) {
                                         tab.click();
                                     }
                                 });
@@ -3902,22 +3915,30 @@ def create_combined_monitor_viewer_tab():
                 }"""
             )
             
-            # Trigger SOG viewer when data changes
+            # Trigger PlayCanvas GSplat viewer when data changes (supports .sog, .spz, .ply)
+            # Uses retry logic to wait for createSOGViewer to be defined after page load
             sog_file_data.change(
                 None,
-                inputs=[sog_file_data, current_filename],
+                inputs=[sog_file_data],
                 outputs=None,
-                js="""(fileData, fileName) => { 
-                    if(fileData && fileName && fileName.toLowerCase().endsWith('.sog')) { 
-                        window.sogData = {fileData, fileName, fileSize: 'Local file'}; 
-                        window.sogLoaded = false;
-                        setTimeout(() => {
-                            if (window.createSOGViewer) {
-                                window.createSOGViewer(fileData, fileName, 'Local file');
-                                window.sogLoaded = true;
-                            }
-                        }, 500);
-                    } 
+                js="""async (payload) => {
+                    if(!payload) return;
+                    let parsed; try { parsed = JSON.parse(payload); } catch(e) { return; }
+                    const {data: fileData, filename: fileName} = parsed;
+                    if(!fileData || !fileName) return;
+                    const fname = fileName.toLowerCase();
+                    if(!fname.endsWith('.sog') && !fname.endsWith('.ply')) return;
+                    window.sogData = {fileData, fileName, fileSize: 'S3 file'};
+                    window.sogLoaded = false;
+                    let attempts = 0;
+                    const tryLoad = () => {
+                        console.log('[SPZ/SOG] tryLoad attempt', attempts, 'fname:', fname, 'createSPZViewer:', !!window.createSPZViewer, 'createSOGViewer:', !!window.createSOGViewer);
+                        if(window.createSOGViewer) {
+                            window.createSOGViewer(fileData, fileName, 'S3 file');
+                            window.sogLoaded = true;
+                        } else if(attempts < 20) { attempts++; setTimeout(tryLoad, 250); }
+                    };
+                    setTimeout(tryLoad, 800);
                 }"""
             )
             
@@ -3928,19 +3949,117 @@ def create_combined_monitor_viewer_tab():
 # Add the PlayCanvas JavaScript code globally
 playcanvas_js = """
 async () => {
+    // Ensure modal ancestors don't create stacking contexts that break position:fixed
+    const fixModalAncestors = () => {
+        ['cancel-modal-content','files-modal-content','refine-modal-content','viewer-modal-content'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                let parent = el.parentElement;
+                while (parent && parent !== document.body) {
+                    const style = window.getComputedStyle(parent);
+                    if (style.transform !== 'none' || style.willChange === 'transform' || style.contain === 'paint') {
+                        parent.style.transform = 'none';
+                        parent.style.willChange = 'auto';
+                        parent.style.contain = 'none';
+                    }
+                    parent = parent.parentElement;
+                }
+            }
+        });
+    };
+    // Initially hide modals that start visible=True (so Gradio can update their children)
+    const hideModalsOnLoad = () => {
+        ['files-modal-content', 'viewer-modal-content'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.style.display = 'none';
+        });
+    };
+    // Run immediately and after delays to catch late-rendering
+    hideModalsOnLoad();
+    setTimeout(hideModalsOnLoad, 50);
+    setTimeout(hideModalsOnLoad, 200);
+    setTimeout(hideModalsOnLoad, 500);
+    setTimeout(hideModalsOnLoad, 1000);
+    
+    setTimeout(fixModalAncestors, 500);
+    setTimeout(fixModalAncestors, 2000);
+
+    // Load PlayCanvas SDK - try multiple methods for Gradio 6 compatibility
     if (!window.pc) {
-        const script = document.createElement('script');
-        script.src = 'https://code.playcanvas.com/playcanvas-2.12.1.min.js';
-        document.head.appendChild(script);
-        await new Promise(resolve => script.onload = resolve);
+        console.log('PlayCanvas not found on window.pc, attempting to load...');
+        
+        // Method 1: Dynamic script tag (works in most cases)
+        try {
+            const script = document.createElement('script');
+            script.src = 'https://code.playcanvas.com/playcanvas-2.17.0.min.js';
+            script.crossOrigin = 'anonymous';
+            document.head.appendChild(script);
+            await new Promise((resolve, reject) => {
+                script.onload = () => { console.log('PlayCanvas loaded via dynamic script tag'); resolve(); };
+                script.onerror = (e) => { console.error('PlayCanvas dynamic script failed:', e); reject(e); };
+                setTimeout(() => reject(new Error('PlayCanvas load timeout')), 10000);
+            });
+        } catch (e) {
+            console.warn('Dynamic script load failed, trying fetch+blob fallback:', e);
+            // Method 2: Fetch + Blob URL (bypasses some CSP restrictions)
+            try {
+                const resp = await fetch('https://code.playcanvas.com/playcanvas-2.17.0.min.js');
+                const text = await resp.text();
+                const blob = new Blob([text], { type: 'application/javascript' });
+                const blobUrl = URL.createObjectURL(blob);
+                const script2 = document.createElement('script');
+                script2.src = blobUrl;
+                document.head.appendChild(script2);
+                await new Promise((resolve) => { script2.onload = resolve; setTimeout(resolve, 2000); });
+                URL.revokeObjectURL(blobUrl);
+                console.log('PlayCanvas loaded via fetch+blob fallback');
+            } catch (e2) {
+                console.error('All PlayCanvas loading methods failed:', e2);
+            }
+        }
+        
+        // Final wait for window.pc to be defined
+        let pcWaitAttempts = 0;
+        while (!window.pc && pcWaitAttempts < 30) {
+            await new Promise(resolve => setTimeout(resolve, 200));
+            pcWaitAttempts++;
+        }
     }
     
+    if (!window.pc) {
+        console.error('PlayCanvas SDK is not available after all loading attempts');
+        return;
+    }
+    console.log('PlayCanvas SDK ready, version:', window.pc.version || 'unknown');
+    
     globalThis.createSOGViewer = (fileData, fileName, fileSize) => {
-        const container = document.getElementById('sog-container');
+        // Try monitor tab container first, then fall back to library tab container
+        const container = document.getElementById('sog-container-monitor') || document.getElementById('sog-container');
         if (!container) return;
         
-        container.innerHTML = '<canvas id="pc-canvas" style="width: 100%; height: 900px; margin: 0px; background: #1a1a1a;"></canvas>';
+        // Force container AND its parent tab panel to be visible
+        container.style.width = container.offsetWidth > 0 ? container.offsetWidth + 'px' : '800px';
+        container.style.height = '700px';
+        container.style.display = 'block';
+        // Walk up the DOM and force any hidden tab panels to display
+        let el = container.parentElement;
+        while (el && el.id !== 'viewer-modal-content') {
+            if (el.style.display === 'none' || window.getComputedStyle(el).display === 'none') {
+                el.style.display = 'block';
+            }
+            el = el.parentElement;
+        }
+        
+        container.innerHTML = '<canvas id="pc-canvas" style="width: 100%; height: 700px; margin: 0px; background: #1a1a1a;"></canvas>';
         const canvas = document.getElementById('pc-canvas');
+        
+        // Force canvas dimensions
+        const containerWidth = container.offsetWidth || 800;
+        const containerHeight = 700;
+        canvas.width = containerWidth * (window.devicePixelRatio || 1);
+        canvas.height = containerHeight * (window.devicePixelRatio || 1);
+        canvas.style.width = containerWidth + 'px';
+        canvas.style.height = containerHeight + 'px';
         
         const app = new pc.Application(canvas, {
             mouse: new pc.Mouse(canvas),
@@ -3964,19 +4083,23 @@ async () => {
         app.setCanvasFillMode(pc.FILLMODE_NONE);
         app.setCanvasResolution(pc.RESOLUTION_FIXED);
         
-        // Handle resize for high DPI
+        // Handle resize for high DPI - only resize if container has real dimensions
         const handleResize = () => {
             const rect = container.getBoundingClientRect();
-            const pixelRatio = window.devicePixelRatio || 1;
-            canvas.width = rect.width * pixelRatio;
-            canvas.height = rect.height * pixelRatio;
-            canvas.style.width = rect.width + 'px';
-            canvas.style.height = rect.height + 'px';
-            app.graphicsDevice.setResolution(canvas.width, canvas.height);
+            if (rect.width > 0 && rect.height > 0) {
+                const pixelRatio = window.devicePixelRatio || 1;
+                canvas.width = rect.width * pixelRatio;
+                canvas.height = rect.height * pixelRatio;
+                canvas.style.width = rect.width + 'px';
+                canvas.style.height = rect.height + 'px';
+                app.graphicsDevice.setResolution(canvas.width, canvas.height);
+            }
         };
         
         window.addEventListener('resize', handleResize);
-        handleResize();
+        // Don't call handleResize() immediately - use the forced dimensions we already set above
+        // The resize handler will recalculate when the tab becomes visible
+        app.graphicsDevice.setResolution(canvas.width, canvas.height);
         
         app.start();
         
@@ -4070,13 +4193,18 @@ async () => {
         
         // Try to load actual SOG file
         try {
-            const binaryString = atob(fileData);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
+            let url;
+            if (fileData.startsWith('blob:') || fileData.startsWith('http')) {
+                url = fileData;
+            } else {
+                const binaryString = atob(fileData);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                const blob = new Blob([bytes], { type: 'application/octet-stream' });
+                url = URL.createObjectURL(blob);
             }
-            const blob = new Blob([bytes], { type: 'application/octet-stream' });
-            const url = URL.createObjectURL(blob);
             
             const asset = new pc.Asset(fileName, 'gsplat', {
                 url: url,
@@ -4123,21 +4251,8 @@ async () => {
 
     };
     
-    // Check for pending SOG data when tab becomes visible
-    const checkSOGData = () => {
-        if (window.sogData && !window.sogLoaded) {
-            const container = document.getElementById('sog-container');
-            if (container && container.offsetWidth > 0) {
-                globalThis.createSOGViewer(window.sogData.fileData, window.sogData.fileName, window.sogData.fileSize);
-                window.sogLoaded = true;
-            }
-        }
-    };
-    
-    // Check periodically for SOG data
-    setInterval(checkSOGData, 500);
-}
-"""
+
+}"""
 
 def create_interface():
     # Create the main Gradio interface
@@ -4156,19 +4271,27 @@ def create_interface():
             top: 50% !important;
             left: 50% !important;
             transform: translate(-50%, -50%) !important;
-            z-index: 1000 !important;
-            background: white !important;
-            padding: 0px !important;
-            border-radius: 2px !important;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.3) !important;
+            z-index: 20000 !important;
+            background: #1e1e1e !important;
+            color: #e0e0e0 !important;
+            padding: 20px !important;
+            border-radius: 8px !important;
+            box-shadow: 0 0 0 9999px rgba(0,0,0,0.5), 0 4px 20px rgba(0,0,0,0.5) !important;
+            border: 1px solid #444 !important;
             width: 600px !important;
             max-height: 80vh !important;
-            overflow: visible !important;
-            overflow-y: visible !important;
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
             pointer-events: auto !important;
             white-space: normal !important;
             word-wrap: break-word !important;
-
+        }
+        #refine-modal-content .wrap,
+        #refine-modal-content .options,
+        #refine-modal-content ul[role="listbox"] {
+            overflow: visible !important;
+            z-index: 30000 !important;
+            position: relative !important;
         }
         
         /* Cancel modal styles */
@@ -4211,21 +4334,24 @@ def create_interface():
             max-width: 100% !important; /* Ensure the title uses all available space in its container */
         }
 
-        /* Viewer modal styles */
-        #files-modal-overlay {
-            pointer-events: none !important;
+        /* Hide class for modal toggling via JS */
+        .hide {
+            display: none !important;
         }
+        
+        /* Files modal styles - initially hidden via CSS, shown via JS style.display='flex' which overrides this */
         #files-modal-content {
+            display: none;
             position: fixed !important;
             top: 50% !important;
             left: 50% !important;
             transform: translate(-50%, -50%) !important;
-            z-index: 1000 !important;
+            z-index: 10000 !important;
             background: #1e1e1e !important;
             color: #e0e0e0 !important;
             padding: 20px !important;
             border-radius: 8px !important;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.5) !important;
+            box-shadow: 0 0 0 9999px rgba(0,0,0,0.5), 0 4px 20px rgba(0,0,0,0.5) !important;
             border: 1px solid #444 !important;
             width: 700px !important;
             max-height: 80vh !important;
@@ -4233,17 +4359,20 @@ def create_interface():
             pointer-events: auto !important;
         }
         
-        /* Viewer modal styles */
+        /* Viewer modal styles - initially hidden via CSS, shown via JS style.display='flex' which overrides this */
         #viewer-modal-content {
+            display: none;
             position: fixed !important;
             top: 50% !important;
             left: 50% !important;
             transform: translate(-50%, -50%) !important;
             z-index: 1000 !important;
-            background: white !important;
+            background: #1e1e1e !important;
+            color: #e0e0e0 !important;
             padding: 0px !important;
             border-radius: 8px !important;
-            box-shadow: 0 0 0 5px #000, 0 4px 20px rgba(0,0,0,0.3) !important;
+            box-shadow: 0 0 0 9999px rgba(0,0,0,0.5), 0 4px 20px rgba(0,0,0,0.5) !important;
+            border: 1px solid #444 !important;
             width: 90vw !important;
             max-width: 1200px !important;
             max-height: 90vh !important;
@@ -4253,15 +4382,29 @@ def create_interface():
         #viewer-modal-content > * {
             padding: 20px !important;
         }
+        #viewer-modal-content .tabs,
+        #viewer-modal-content .tabitem,
+        #viewer-modal-content [role="tabpanel"],
+        #viewer-modal-content .tab-content,
+        #viewer-modal-content > div,
+        #viewer-modal-content .block,
+        #viewer-modal-content .gap {
+            background: #1e1e1e !important;
+            color: #e0e0e0 !important;
+        }
+        #viewer-modal-content::-webkit-scrollbar {
+            width: 8px;
+        }
+        #viewer-modal-content::-webkit-scrollbar-track {
+            background: #1e1e1e !important;
+        }
+        #viewer-modal-content::-webkit-scrollbar-thumb {
+            background: #444 !important;
+            border-radius: 4px;
+        }
         .close-button {
             margin-left: auto !important;
         }
-        
-        /* Add global tracking script */
-        <script>
-        // Global variable to track loaded models
-        window.loadedModels = {};
-        </script>
         
         /* Page title styling with reddish-purple background */
         .gradio-container h1:first-of-type,
@@ -4359,23 +4502,25 @@ def create_interface():
                         # Load logos directly from Gradio components and apply theme-based visibility
                         light_logo = gr.Image(
                             "../../assets/images/PoweredByAWS_horiz_RGB_1c_Gray850.png",
-                            show_download_button=False,
                             show_label=False,
                             container=False,
                             height=40,
                             width=None,
-                            show_fullscreen_button=False,
-                            elem_classes=["theme-image-light"]
+                            elem_classes=["theme-image-light"],
+                            interactive=False,
+                            sources=None,
+                            buttons=None
                         )
                         dark_logo = gr.Image(
                             "../../assets/images/PoweredByAWS_horiz_RGB_1c_White.png",
-                            show_download_button=False,
                             show_label=False,
                             container=False,
                             height=40,
                             width=None,
-                            show_fullscreen_button=False,
-                            elem_classes=["theme-image-dark"]
+                            elem_classes=["theme-image-dark"],
+                            interactive=False,
+                            sources=None,
+                            buttons=[]
                         )
                         
                         # JavaScript to handle theme detection and switching
@@ -4428,6 +4573,166 @@ if __name__ == "__main__":
     
     iface = create_interface()
 
-    # Add favorites directory to allowed_paths
+    # Add favorites directory and temp 3D cache to allowed_paths
+    import tempfile
     favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
-    iface.launch(server_name="0.0.0.0", server_port=7861, share=False, allowed_paths=[favorites_dir])
+    temp_3d_cache = os.path.join(tempfile.gettempdir(), "gradio_3d_cache")
+    os.makedirs(temp_3d_cache, exist_ok=True)
+    iface.launch(server_name="0.0.0.0", server_port=7861, share=False, allowed_paths=[favorites_dir, temp_3d_cache],
+                 head="""<script src="https://code.playcanvas.com/playcanvas-2.17.0.min.js"></script>
+<script>
+// createSOGViewer defined in <head> so it's in the true global scope.
+// In Gradio 6, the js= param on gr.Blocks runs in a sandboxed AsyncFunction scope
+// where window/globalThis assignments don't persist to .change()/.then() JS callbacks.
+// But <head> scripts run in the real global scope, so this function IS accessible everywhere.
+window.createSOGViewer = function(fileData, fileName, fileSize) {
+    if (!window.pc) { console.error('PlayCanvas not loaded'); return; }
+    var container = document.getElementById('sog-container-monitor') || document.getElementById('sog-container');
+    if (!container) { console.error('No sog-container found'); return; }
+
+    // Force container visible
+    container.style.display = 'block';
+    var el = container.parentElement;
+    while (el && el.id !== 'viewer-modal-content') {
+        if (el.style.display === 'none' || window.getComputedStyle(el).display === 'none') el.style.display = 'block';
+        el = el.parentElement;
+    }
+
+    var W = container.offsetWidth || 800;
+    var H = 700;
+    // Set explicit width/height attributes on canvas BEFORE creating pc.Application
+    container.innerHTML = '<canvas id="pc-canvas" width="' + W + '" height="' + H + '" style="width:' + W + 'px;height:' + H + 'px;display:block;background:#1a1a1a;"></canvas>';
+    var canvas = document.getElementById('pc-canvas');
+
+    var app = new pc.Application(canvas, {
+        mouse: new pc.Mouse(canvas),
+        touch: new pc.TouchDevice(canvas),
+        keyboard: new pc.Keyboard(window),
+        graphicsDeviceOptions: { antialias: true, alpha: false, preferWebGl2: true, powerPreference: 'high-performance' }
+    });
+    app.setCanvasFillMode(pc.FILLMODE_NONE);
+    app.setCanvasResolution(pc.RESOLUTION_AUTO);
+    app.start();
+    app.resizeCanvas(W, H);
+
+    // Camera
+    var camera = new pc.Entity('Camera');
+    camera.addComponent('camera', { clearColor: new pc.Color(0.1,0.1,0.1,1), fov: 75, nearClip: 0.1, farClip: 1000 });
+    camera.setPosition(0, 2, 5);
+    app.root.addChild(camera);
+
+    // Light
+    var light = new pc.Entity('Light');
+    light.addComponent('light', { type: 'directional', intensity: 1 });
+    light.setEulerAngles(45, 30, 0);
+    app.root.addChild(light);
+
+    // Orbit controls
+    var yaw = 0, pitch = 0.3, dist = 10;
+    var target = new pc.Vec3(0,0,0);
+    var updateCam = function() {
+        camera.setPosition(
+            target.x + dist * Math.sin(yaw) * Math.cos(pitch),
+            target.y + dist * Math.sin(pitch),
+            target.z + dist * Math.cos(yaw) * Math.cos(pitch)
+        );
+        camera.lookAt(target);
+    };
+    var dragging = false, panning = false, lx = 0, ly = 0;
+    canvas.addEventListener('mousedown', function(e) { dragging = true; panning = e.button === 2; lx = e.clientX; ly = e.clientY; e.preventDefault(); });
+    canvas.addEventListener('mouseup', function() { dragging = false; panning = false; });
+    canvas.addEventListener('mousemove', function(e) {
+        if (!dragging) return;
+        var dx = e.clientX - lx, dy = e.clientY - ly;
+        if (panning) {
+            var ps = dist * 0.001;
+            var r = new pc.Vec3(), u = new pc.Vec3();
+            var ct = camera.getWorldTransform(); ct.getX(r); ct.getY(u);
+            r.mulScalar(-dx * ps); u.mulScalar(dy * ps);
+            target.add(r).add(u);
+        } else {
+            yaw -= dx * 0.005;
+            pitch = Math.max(-1.5, Math.min(1.5, pitch + dy * 0.005));
+        }
+        updateCam(); lx = e.clientX; ly = e.clientY; e.preventDefault();
+    });
+    canvas.addEventListener('wheel', function(e) { dist = Math.max(0.01, Math.min(100, dist + e.deltaY * 0.001 * dist)); updateCam(); e.preventDefault(); });
+    canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+    updateCam();
+
+    // Resize handler
+    window.addEventListener('resize', function() {
+        var rect = container.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) app.resizeCanvas(rect.width, H);
+    });
+
+    // Load GSplat
+    try {
+        var url;
+        if (fileData.startsWith('blob:') || fileData.startsWith('http')) {
+            url = fileData;
+        } else {
+            var bin = atob(fileData);
+            var bytes = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            var blob = new Blob([bytes], { type: 'application/octet-stream' });
+            url = URL.createObjectURL(blob);
+        }
+        var asset = new pc.Asset(fileName, 'gsplat', { url: url, filename: fileName });
+        asset.ready(function() {
+            var entity = new pc.Entity('GaussianSplat');
+            entity.addComponent('gsplat', { asset: asset });
+            app.root.addChild(entity);
+            console.log('GSplat loaded successfully');
+        });
+        asset.on('error', function(err) { console.error('GSplat error:', err); });
+        app.assets.add(asset);
+        app.assets.load(asset);
+    } catch (error) { console.error('Error loading GSplat:', error); }
+};
+window.createSPZViewer = async function(fileData, fileName) {
+    var container = document.getElementById('spz-container-monitor') || document.getElementById('sog-container-monitor') || document.getElementById('spz-container') || document.getElementById('sog-container');
+    if (!container) return;
+    container.innerHTML = '<canvas id="spz-canvas" style="width:100%;height:700px;"></canvas>';
+    var canvas = document.getElementById('spz-canvas');
+    canvas.width = (container.offsetWidth || 800) * (window.devicePixelRatio || 1);
+    canvas.height = 700 * (window.devicePixelRatio || 1);
+    canvas.style.width = (container.offsetWidth || 800) + 'px';
+    canvas.style.height = '700px';
+    function loadAndRender() {
+        var engine = new BABYLON.Engine(canvas, true);
+        var scene = new BABYLON.Scene(engine);
+        scene.clearColor = new BABYLON.Color4(0.1, 0.1, 0.1, 1);
+        var camera = new BABYLON.ArcRotateCamera('cam', -Math.PI/2, Math.PI/3, 5, BABYLON.Vector3.Zero(), scene);
+        camera.attachControl(canvas, true);
+        camera.wheelPrecision = 50;          // lower = faster zoom (default ~3), higher = slower
+        camera.panningSensibility = 100;     // lower = faster pan (default ~1000), higher = slower
+        camera.panningInertia = 0.9;
+        camera.lowerRadiusLimit = 0.01;      // allow zooming very close (default ~0.1)
+        new BABYLON.HemisphericLight('light', new BABYLON.Vector3(0,1,0), scene);
+        var blobUrl;
+        if (fileData.startsWith('blob:') || fileData.startsWith('http')) {
+            blobUrl = fileData;
+        } else {
+            var bytes = new Uint8Array(atob(fileData).split('').map(function(c){return c.charCodeAt(0);}));
+            var blob = new Blob([bytes], {type: 'application/octet-stream'});
+            blobUrl = URL.createObjectURL(blob);
+        }
+        BABYLON.SceneLoader.Append('', blobUrl, scene, function() {
+            scene.createDefaultCameraOrLight(true, true, true);
+            if (!fileData.startsWith('blob:') && !fileData.startsWith('http')) URL.revokeObjectURL(blobUrl);
+        }, null, null, '.spz');
+        engine.runRenderLoop(function() { scene.render(); });
+        window.addEventListener('resize', function() { engine.resize(); });
+    }
+    if (!window.BABYLON) {
+        var s1 = document.createElement('script'); s1.src = 'https://cdn.babylonjs.com/babylon.js';
+        document.head.appendChild(s1);
+        s1.onload = function() {
+            var s2 = document.createElement('script'); s2.src = 'https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js';
+            document.head.appendChild(s2);
+            s2.onload = loadAndRender;
+        };
+    } else { loadAndRender(); }
+};
+</script>""")

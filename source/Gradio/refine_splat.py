@@ -7,7 +7,7 @@ from decimal import Decimal
 
 _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
 
-def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=None, crop_mode=None, clean_splat=None, enable_spz=None, enable_sog=None, enable_usdz=None, ply_coords=None, spz_coords=None, sog_coords=None, usdz_coords=None):
+def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=None, crop_mode=None, clean_splat=None, enable_spz=None, enable_sog=None, enable_usdz=None, ply_coords=None, spz_coords=None, sog_coords=None, usdz_coords=None, isp_3d=None):
     """Resume training for a selected splat by creating a new job with RUN_SFM=false"""
     try:
         # Import shared_state for other configuration values
@@ -25,6 +25,7 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
         spz_coords = spz_coords if spz_coords is not None else shared_state.spz_coords
         sog_coords = sog_coords if sog_coords is not None else shared_state.sog_coords
         usdz_coords = usdz_coords if usdz_coords is not None else shared_state.usdz_coords
+        isp_3d = isp_3d if isp_3d is not None else shared_state.isp_3d
         
         if not selected_data:
             return "No file selected"
@@ -137,7 +138,8 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
                 "enable": True,
                 "maxSteps": "20000",
                 "model": str(original_model or shared_state.model),
-                "preserveSceneScale": str(selected_job.get('preserveSceneScale', shared_state.preserve_scene_scale)) == "True"
+                "preserveSceneScale": str(selected_job.get('preserveSceneScale', shared_state.preserve_scene_scale)) == "True",
+                "3dIsp": isp_3d
             },
             "postProcessing": {
                 "cropOutputBounds": crop_bounds == "true" if isinstance(crop_bounds, str) else crop_bounds,

@@ -70,7 +70,8 @@ def validate_config(config: dict):
         "training": {
             "enable": None,
             "maxSteps": None,
-            "model": None
+            "model": None,
+            "3dIsp": None
         },
         "postProcessing": {
             "cropOutputBounds": None,
@@ -213,6 +214,7 @@ def lambda_handler(event, context):
                     "runTrain": str(json_content["training"]["enable"]),
                     "model": str(json_content["training"]["model"]),
                     "maxSteps": str(json_content["training"]["maxSteps"]),
+                    "3dIsp": str(json_content["training"].get("3dIsp", "none")),
                     "cropOutputBounds": str(json_content["postProcessing"]["cropOutputBounds"]),
                     "cropMode": str(json_content["postProcessing"]["cropMode"]),
                     "cleanSplat": str(json_content["postProcessing"].get("cleanSplat", "false")),
@@ -231,7 +233,7 @@ def lambda_handler(event, context):
                     "removeObject": str(json_content["segmentation"]["objectRemoval"]["enable"]),
                     "objectRemovalAction": str(json_content["segmentation"]["objectRemoval"]["action"]),
                     "objectRemovalObjects": str(json_content["segmentation"]["objectRemoval"]["objects"]),
-                    "preserveSceneScale": str(json_content.get("preserveSceneScale", "false"))
+                    "preserveSceneScale": str(json_content["training"].get("preserveSceneScale", "false"))
                 }
 
                 try:
@@ -290,6 +292,7 @@ def lambda_handler(event, context):
                     "RUN_TRAIN": str(json_content["training"]["enable"]),
                     "MODEL": str(json_content["training"]["model"]),
                     "MAX_STEPS": str(json_content["training"]["maxSteps"]),
+                    "3D_ISP": str(json_content["training"].get("3dIsp", "none")),
                     "CROP_OUTPUT_BOUNDS": str(json_content["postProcessing"]["cropOutputBounds"]).lower(),
                     "CROP_MODE": str(json_content["postProcessing"]["cropMode"]),
                     "CLEAN_SPLAT": str(json_content["postProcessing"].get("cleanSplat", "false")).lower(),
@@ -308,7 +311,7 @@ def lambda_handler(event, context):
                     "REMOVE_OBJECT": str(json_content["segmentation"]["objectRemoval"]["enable"]),
                     "OBJECT_REMOVAL_ACTION": str(json_content["segmentation"]["objectRemoval"]["action"]),
                     "OBJECT_REMOVAL_OBJECTS": str(json_content["segmentation"]["objectRemoval"]["objects"]),
-                    "PRESERVE_SCENE_SCALE": str(json_content.get("preserveSceneScale", "false"))
+                    "PRESERVE_SCENE_SCALE": str(json_content["training"].get("preserveSceneScale", "false"))
                 },
                 "sns": {
                     "topicArn": os.environ["SNS_TOPIC_ARN"],

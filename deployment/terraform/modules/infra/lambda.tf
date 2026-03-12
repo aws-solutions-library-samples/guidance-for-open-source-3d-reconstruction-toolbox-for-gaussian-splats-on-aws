@@ -61,7 +61,7 @@ resource "aws_lambda_function" "lambda_workflow_trigger" {
     DDB_TABLE_NAME = aws_dynamodb_table.ddb_table.name,
     ECR_IMAGE_URI = aws_ecr_repository.ecr_repo.repository_url,
     CONTAINER_ROLE_NAME = aws_iam_role.container_role.name,
-    BATCH_JOB_QUEUE = aws_batch_job_queue.batch_job_queue.arn,
+    BATCH_JOB_QUEUE = aws_batch_job_queue.batch_job_queue["g5-4xlarge"].arn,
     BATCH_JOB_DEFINITION = aws_batch_job_definition.batch_job_definition.arn,
     JOB_DEFINITION_SELECTOR_LAMBDA_NAME = aws_lambda_function.job_definition_selector.function_name
 

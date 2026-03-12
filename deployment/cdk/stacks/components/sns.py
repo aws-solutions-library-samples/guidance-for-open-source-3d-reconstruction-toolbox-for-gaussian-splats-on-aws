@@ -23,7 +23,8 @@
 from constructs import Construct
 from aws_cdk import (
     aws_sns as sns,
-    aws_sns_subscriptions as subscriptions
+    aws_sns_subscriptions as subscriptions,
+    aws_kms as kms
 )
 
 class Sns(Construct):
@@ -36,11 +37,13 @@ class Sns(Construct):
             **kwargs) -> None:
         super().__init__(scope, id, **kwargs)
 
-        # Create the SNS topic with default encryption
-        self.sns_topic = sns.Topic(  # Changed from self.topic to self.sns_topic
+        # Create the SNS topic with KMS encryption using the AWS-managed SNS key
+        sns_key = kms.Alias.from_alias_name(self, "SnsKey", "alias/aws/sns")
+        self.sns_topic = sns.Topic(
             self,
             "NotificationTopic",
-            display_name="3DGS Workflow Notifications"
+            display_name="3DGS Workflow Notifications",
+            master_key=sns_key
         )
 
         # Add email subscription

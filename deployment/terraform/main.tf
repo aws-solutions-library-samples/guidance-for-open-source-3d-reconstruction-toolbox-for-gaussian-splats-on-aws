@@ -35,7 +35,11 @@ terraform {
     docker = {
       source  = "kreuzwerker/docker"
       version = "~> 3.6.2"
-    } 
+    }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.9"
+    }
   }
 }
 
