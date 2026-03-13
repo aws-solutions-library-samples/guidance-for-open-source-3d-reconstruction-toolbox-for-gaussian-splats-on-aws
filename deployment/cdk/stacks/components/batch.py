@@ -358,7 +358,7 @@ chmod 775 /mnt/workspace
         )
         return g6e_spot_env
 
-    def _create_g6e_spot_compute_environment(self):
+    def _create_security_group(self):
         """Create security group for Batch instances"""
         return ec2.SecurityGroup(
             self, "BatchSecurityGroup",
@@ -367,7 +367,7 @@ chmod 775 /mnt/workspace
             allow_all_outbound=True
         )
 
-    def _create_security_group(self):
+    def _create_g6e_job_queue(self):
         """Create dedicated g6e job queue"""
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
