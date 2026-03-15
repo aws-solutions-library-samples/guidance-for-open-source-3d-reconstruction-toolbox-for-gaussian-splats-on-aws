@@ -954,7 +954,7 @@ def create_advanced_settings_tab():
                     choices=[
                         ("None", "none"),
                         ("Bilateral Grid (bilagrid)", "bilagrid"),
-                        ("Per-Pixel ISP (ppisp)", "ppisp")
+                        ("Physically Plausible ISP (ppisp)", "ppisp")
                     ],
                     value="none",
                     info="Image signal processing for splatfacto, gsplat multi-GPU, and 3DGRUT. Not applicable to nerfacto."
@@ -2040,16 +2040,6 @@ def create_s3_browser_tab():
                 choices=["environment", "rigid_body"],
                 value=shared_state.crop_mode
             )
-            refine_isp_3d = gr.Dropdown(
-                label="3D ISP Mode",
-                choices=[
-                    ("None", "none"),
-                    ("Bilateral Grid (bilagrid)", "bilagrid"),
-                    ("Per-Pixel ISP (ppisp)", "ppisp")
-                ],
-                value=shared_state.isp_3d,
-                info="Not applicable to nerfacto."
-            )
             refine_clean_splat = gr.Radio(
                 label="Clean Splat (Remove Noise)",
                 choices=["true", "false"],
@@ -2262,13 +2252,13 @@ def create_s3_browser_tab():
         )
         
         # Submit refinement job with user selections
-        def submit_refine_job(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords, isp_3d):
-            result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords, isp_3d)
+        def submit_refine_job(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords):
+            result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords, shared_state.isp_3d)
             return gr.update(visible=False), result
         
         refine_submit_btn.click(
             fn=submit_refine_job,
-            inputs=[selected_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords, refine_isp_3d],
+            inputs=[selected_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords],
             outputs=[refine_modal, action_status]
         )
         
@@ -2532,12 +2522,12 @@ def get_job_progress_data():
                 metrics = item['evaluationMetrics']
                 if isinstance(metrics, dict):
                     parts = []
+                    if 'psnr' in metrics:
+                        parts.append(f"PSNR: {float(metrics['psnr']):.2f}")
                     if 'ssim' in metrics:
                         parts.append(f"SSIM: {float(metrics['ssim']):.3f}")
                     if 'lpips' in metrics:
                         parts.append(f"LPIPS: {float(metrics['lpips']):.3f}")
-                    if 'psnr' in metrics:
-                        parts.append(f"PSNR: {float(metrics['psnr']):.2f}")
                     metrics_str = " | ".join(parts) if parts else "N/A"
             
             jobs_data.append([
@@ -3087,16 +3077,6 @@ def create_combined_monitor_viewer_tab():
                     label="Crop Mode",
                     choices=["environment", "rigid_body"],
                     value=shared_state.crop_mode
-                )
-                refine_isp_3d = gr.Dropdown(
-                    label="3D ISP Mode",
-                    choices=[
-                        ("None", "none"),
-                        ("Bilateral Grid (bilagrid)", "bilagrid"),
-                        ("Per-Pixel ISP (ppisp)", "ppisp")
-                    ],
-                    value=shared_state.isp_3d,
-                    info="Not applicable to nerfacto."
                 )
                 refine_clean_splat = gr.Radio(
                     label="Clean Splat (Remove Noise)",
@@ -3727,14 +3707,12 @@ def create_combined_monitor_viewer_tab():
                 output_prefix = shared_state.s3_output or "workflow-output"
                 file_key = f"{output_prefix}/{job_id}/{filename}"
                 current_key = getattr(shared_state, 'current_model_key', None)
+                # If this file was just loaded (by files_table click or a prior selector change),
+                # return no-ops so the viewer is not triggered a second time.
                 if current_key == file_key:
-                    # Re-use cached data to re-trigger the viewer
-                    cached_data = getattr(shared_state, 'current_model_data', None)
-                    if cached_data:
-                        payload = json.dumps({"data": cached_data, "filename": filename, "ts": __import__('time').time()})
-                        return gr.update(), gr.update(), gr.update(value=payload), gr.update(), gr.update(), gr.update(), gr.update(), filename, [job_id, filename]
-                    return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), filename, [job_id, filename]
-                # Clear cache so handle_view_multi re-downloads for the new file
+                    return (gr.update(), gr.update(), gr.update(), gr.update(),
+                            gr.update(), gr.update(), gr.update(), filename, [job_id, filename])
+                # New file — clear cache and load
                 shared_state.current_model_key = None
                 shared_state.current_model_data = None
                 selected_row = [job_id, filename]
@@ -3815,14 +3793,14 @@ def create_combined_monitor_viewer_tab():
                 outputs=[refine_modal]
             )
             
-            def submit_refine_job_monitor(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords, isp_3d):
-                result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords, isp_3d)
+            def submit_refine_job_monitor(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords):
+                result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords, shared_state.isp_3d)
                 gr.Info(result)
                 return gr.update(visible=False)
             
             refine_submit_btn.click(
                 fn=submit_refine_job_monitor,
-                inputs=[selected_job_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords, refine_isp_3d],
+                inputs=[selected_job_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords],
                 outputs=[refine_modal]
             )
             
@@ -3983,6 +3961,8 @@ async () => {
     
     setTimeout(fixModalAncestors, 500);
     setTimeout(fixModalAncestors, 2000);
+
+    // Fix refine modal dropdowns: moved to head= script which runs in true global scope
 
     // Load PlayCanvas SDK - try multiple methods for Gradio 6 compatibility
     if (!window.pc) {
@@ -4261,7 +4241,7 @@ def create_interface():
             overflow-y: auto !important;
             overflow-x: auto !important;
     '''
-    with gr.Blocks(js=playcanvas_js, title="Open Source 3D Reconstruction Toolbox for Gaussian Splats on AWS", theme=gr.themes.Ocean(), css="""
+_css = """
         /* Modal popup styles */
         #refine-modal-overlay {
             pointer-events: none !important;
@@ -4280,18 +4260,76 @@ def create_interface():
             border: 1px solid #444 !important;
             width: 600px !important;
             max-height: 80vh !important;
-            overflow-x: hidden !important;
+            overflow-x: visible !important;
             overflow-y: auto !important;
             pointer-events: auto !important;
             white-space: normal !important;
             word-wrap: break-word !important;
         }
-        #refine-modal-content .wrap,
-        #refine-modal-content .options,
+        /* Hide the empty flashing Gradio wrapper box that appears at the top of the modal */
+        #refine-modal-content > .gap:empty,
+        #refine-modal-content > div:empty {
+            display: none !important;
+        }
+        /* Override Ocean theme CSS variables inside the modal to kill the green accent border */
+        #refine-modal-content {
+            --border-color-accent: #444 !important;
+            --border-color-accent-subdued: #444 !important;
+            --color-accent: #6c8ebf !important;
+            --primary-300: #444 !important;
+            --primary-400: #555 !important;
+        }
+        /* Belt-and-suspenders: also target every element directly */
+        #refine-modal-content,
+        #refine-modal-content *,
+        #refine-modal-content .block,
+        #refine-modal-content .gap,
+        #refine-modal-content .form,
+        #refine-modal-content .wrap {
+            border-color: #444 !important;
+            outline: none !important;
+        }
+        /* Ensure radio/slider inputs match the dark theme */
+        #refine-modal-content input[type="range"] {
+            accent-color: #6c8ebf !important;
+        }
+        /* Dropdown listbox: escape the modal overflow and align to trigger */
         #refine-modal-content ul[role="listbox"] {
-            overflow: visible !important;
-            z-index: 30000 !important;
-            position: relative !important;
+            position: fixed !important;
+            z-index: 99999 !important;
+            background: #2a2a2a !important;
+            border: 1px solid #555 !important;
+            color: #e0e0e0 !important;
+            max-height: 200px !important;
+            overflow-y: auto !important;
+        }
+        #refine-modal-content ul[role="listbox"] li {
+            color: #e0e0e0 !important;
+            background: #2a2a2a !important;
+        }
+        #refine-modal-content ul[role="listbox"] li:hover,
+        #refine-modal-content ul[role="listbox"] li[aria-selected="true"] {
+            background: #3a3a5a !important;
+        }
+        /* Dark scrollbars on the modal itself and all children (Firefox + Chrome) */
+        #refine-modal-content,
+        #refine-modal-content * {
+            scrollbar-color: #555 #1e1e1e;
+            scrollbar-width: thin;
+        }
+        #refine-modal-content::-webkit-scrollbar,
+        #refine-modal-content *::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        #refine-modal-content::-webkit-scrollbar-track,
+        #refine-modal-content *::-webkit-scrollbar-track {
+            background: #1e1e1e !important;
+        }
+        #refine-modal-content::-webkit-scrollbar-thumb,
+        #refine-modal-content *::-webkit-scrollbar-thumb {
+            background: #555 !important;
+            border-radius: 4px;
         }
         
         /* Cancel modal styles */
@@ -4488,7 +4526,10 @@ def create_interface():
                 display: block;
             }
         }
-    """) as interface:
+"""
+
+def create_interface():
+    with gr.Blocks(title="Open Source 3D Reconstruction Toolbox for Gaussian Splats on AWS") as interface:
         # PlayCanvas will be loaded by individual viewers when needed
         
         with gr.Row():
@@ -4579,6 +4620,7 @@ if __name__ == "__main__":
     temp_3d_cache = os.path.join(tempfile.gettempdir(), "gradio_3d_cache")
     os.makedirs(temp_3d_cache, exist_ok=True)
     iface.launch(server_name="0.0.0.0", server_port=7861, share=False, allowed_paths=[favorites_dir, temp_3d_cache],
+                 js=playcanvas_js, theme=gr.themes.Ocean(), css=_css,
                  head="""<script src="https://code.playcanvas.com/playcanvas-2.17.0.min.js"></script>
 <script>
 // createSOGViewer defined in <head> so it's in the true global scope.
@@ -4735,4 +4777,44 @@ window.createSPZViewer = async function(fileData, fileName) {
         };
     } else { loadAndRender(); }
 };
+
+// Fix refine modal dropdowns: modal has transform which makes position:fixed children
+// relative to the modal, not the viewport. We watch document.body for the modal to
+// appear, then watch the modal for ul.options (the Gradio dropdown listbox) and
+// teleport it to document.body with correct viewport-relative coordinates.
+(function() {
+    let lastTrigger = null;
+    function attachToModal(modal) {
+        modal.addEventListener('mousedown', function(e) {
+            var t = e.target.closest('.wrap');
+            if (t) lastTrigger = t;
+        }, true);
+        var obs = new MutationObserver(function(mutations) {
+            mutations.forEach(function(mutation) {
+                mutation.addedNodes.forEach(function(node) {
+                    if (node.nodeType !== 1) return;
+                    var lb = node.matches('ul.options') ? node : node.querySelector('ul.options');
+                    if (!lb || !lastTrigger) return;
+                    var r = lastTrigger.getBoundingClientRect();
+                    var vw = window.innerWidth;
+                    var w = Math.min(r.width, vw - 16);
+                    var left = Math.max(8, Math.min(r.left, vw - w - 8));
+                    document.body.appendChild(lb);
+                    lb.style.cssText = 'position:fixed !important;left:' + left + 'px !important;top:' + (r.bottom + 2) + 'px !important;width:' + w + 'px !important;z-index:99999 !important;background:#2a2a2a !important;border:1px solid #555 !important;color:#e0e0e0 !important;max-height:200px !important;overflow-y:auto !important;';
+                });
+            });
+        });
+        obs.observe(modal, {childList: true, subtree: true});
+        console.log('[refine-dropdown] observer attached');
+    }
+    // Watch document.body for the modal to be added
+    var bodyObs = new MutationObserver(function() {
+        var modal = document.getElementById('refine-modal-content');
+        if (modal && !modal._dropdownFixed) {
+            modal._dropdownFixed = true;
+            attachToModal(modal);
+        }
+    });
+    bodyObs.observe(document.documentElement, {childList: true, subtree: true});
+})();
 </script>""")

@@ -170,29 +170,45 @@ if __name__ == "__main__":
                 s3_client = None
             
             # Parse S3 paths from environment variables
-            if s3_client:
-                s3_input = os.environ.get('S3_INPUT', '')
-                s3_model = os.environ.get('MODEL_INPUT', '')
-                
-            if s3_input.startswith('s3://'):
+            s3_input = os.environ.get('S3_INPUT', '')
+            s3_model = os.environ.get('MODEL_INPUT', '')
+
+            if s3_client and s3_input.startswith('s3://'):
                 bucket, key = s3_input[5:].split('/', 1)
                 filename = os.path.basename(key)
                 # Download to both locations for compatibility
                 local_path_train = os.path.join('/tmp/input/train', filename)
                 local_path_data = os.path.join('/opt/ml/input/data/train', filename)
                 os.makedirs('/opt/ml/input/data/train', exist_ok=True)
+                print(f"Downloading s3://{bucket}/{key} to {local_path_train}")
                 s3_client.download_file(bucket, key, local_path_train)
+                print(f"Downloading s3://{bucket}/{key} to {local_path_data}")
                 s3_client.download_file(bucket, key, local_path_data)
+                print(f"Downloaded input file: {filename}")
             
-            if s3_model.startswith('s3://'):
+            if s3_client and s3_model.startswith('s3://'):
                 bucket, key = s3_model[5:].split('/', 1)
                 local_path = '/tmp/input/model/models.tar.gz'
-                s3_client.download_file(bucket, key, local_path)
+                try:
+                    s3_client.download_file(bucket, key, local_path)
+                    print(f"Downloaded models.tar.gz from s3://{bucket}/{key}")
+                except Exception as _e:
+                    print(f"Could not download models.tar.gz from s3://{bucket}/{key}: {_e}. Skipping.")
+            elif s3_client and not s3_model and s3_input.endswith('model.tar.gz'):
+                # MODEL_INPUT not provided but S3_INPUT is a model.tar.gz (resume job) —
+                # derive the models.tar.gz path from the same S3 prefix as S3_INPUT
+                input_bucket, input_key = s3_input[5:].split('/', 1)
+                models_key = '/'.join(input_key.split('/')[:-2]) + '/models.tar.gz'
+                local_path = '/tmp/input/model/models.tar.gz'
+                try:
+                    s3_client.download_file(input_bucket, models_key, local_path)
+                    print(f"Downloaded models.tar.gz from s3://{input_bucket}/{models_key}")
+                except Exception as _e:
+                    print(f"Could not download models.tar.gz from s3://{input_bucket}/{models_key}: {_e}. Skipping.")
 
         # Unpack the sam2 models
         models_start = time_module.time()
         print(f"Starting model extraction at: {time_module.strftime('%Y-%m-%d %H:%M:%S')}")
-        untar_gz(os.path.join(os.environ["MODEL_PATH"], "models.tar.gz"), os.environ["MODEL_PATH"])
 
         # Unpack all models from S3 - OPTIMIZED: Extract only needed files
         models_archive = os.path.join(os.environ["MODEL_PATH"], "models.tar.gz")
@@ -200,7 +216,10 @@ if __name__ == "__main__":
         # Check if models already extracted (for warm containers)
         u2net_dst = os.path.expanduser("~/.u2net")
         if not os.path.exists(u2net_dst):
-            untar_gz(models_archive, os.environ["MODEL_PATH"])
+            if os.path.exists(models_archive):
+                untar_gz(models_archive, os.environ["MODEL_PATH"])
+            else:
+                print(f"models.tar.gz not found at {models_archive}, skipping extraction")
         else:
             print(f"Models already extracted, skipping extraction")
         
@@ -1317,7 +1336,7 @@ if __name__ == "__main__":
                             log.error(f"Config file not found at: {dataset_config_path}")
                             raise RuntimeError(f"Cannot resume training - config file missing")
                     else:
-                        isp_mode = config.get('3D_ISP', 'none').lower()
+                        isp_mode = config.get('THREED_ISP', 'none').lower()
                         args.extend([
                         "--timestamp", TRAIN_EXPERIMENT_NAME,
                         "--pipeline.model.use-scale-regularization", "True",
@@ -1326,7 +1345,9 @@ if __name__ == "__main__":
                         if isp_mode == "bilagrid":
                             args.extend(["--pipeline.model.use-bilateral-grid", "True"])
                         elif isp_mode == "ppisp":
-                            args.extend(["--pipeline.model.use-ppisp", "True"])
+                            log.info("PPISP not currently supported with Splatfacto, using Bilateral-Grid instead")
+                            args.extend(["--pipeline.model.use-bilateral-grid", "True"])
+                            #args.extend(["--pipeline.model.use-ppisp", "True"])
                 elif config['MODEL'] == "splatfacto-w-light":
                     if config['RUN_RECON'] == "false": # Resume training
                         if os.path.exists(model_ckpt_path):
@@ -1391,7 +1412,7 @@ if __name__ == "__main__":
                     model = "mcmc"
                 else:
                     model = "default"
-                isp_mode = config.get('3D_ISP', 'none').lower()
+                isp_mode = config.get('THREED_ISP', 'none').lower()
                 args = [
                     model,
                     "--max_steps", str(int(config['MAX_STEPS'])),
@@ -1402,10 +1423,8 @@ if __name__ == "__main__":
                     "--eval_steps", str(int(config['MAX_STEPS'])),
                     "--data-dir", config['DATASET_PATH']
                 ]
-                if isp_mode == "bilagrid":
-                    args.append("--use-fused-bilagrid")
-                elif isp_mode == "ppisp":
-                    args.append("--ppisp")
+                if isp_mode == "bilagrid" or isp_mode == "ppisp":
+                    log.info(f"ISP mode '{isp_mode}' not supported with multi-GPU gsplat, skipping")
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -1472,9 +1491,9 @@ if __name__ == "__main__":
                         f"n_iterations={str(config['MAX_STEPS'])}",
                         f"scheduler.positions.max_steps={str(config['MAX_STEPS'])}",
                     ])
-                isp_mode = config.get('3D_ISP', 'none').lower()
+                isp_mode = config.get('THREED_ISP', 'none').lower()
                 if isp_mode in ("bilagrid", "ppisp"):
-                    args.append(f"model.isp.type={isp_mode}")
+                    args.append(f"+model.isp.type={isp_mode}")
                 
                 # train.py is patched with DataLoader fix for Batch at build time
                 pipeline.create_component(
@@ -1958,8 +1977,8 @@ if __name__ == "__main__":
             orientation_file = os.path.join(config['DATASET_PATH'], '.video_orientation')
             is_portrait = os.path.exists(orientation_file)
             
-            if config['MODEL'] != "3dgut" or config['MODEL'] != "3dgrt":
-                rotation = '90,0,0' if not is_portrait else '270,0,90'
+            #if config['MODEL'] != "3dgut" or config['MODEL'] != "3dgrt":
+            rotation = '90,0,0' if not is_portrait else '270,0,90'
             args = [
                 orig_ply_path,
                 orig_ply_path, 
@@ -2225,23 +2244,23 @@ if __name__ == "__main__":
             orientation_file = os.path.join(config['DATASET_PATH'], '.video_orientation')
             is_portrait = os.path.exists(orientation_file)
             
-            if config['MODEL'] != "3dgut" or config['MODEL'] != "3dgrt":
-                rotation = '270,0,0' if not is_portrait else '270,0,90'
-                args = [
-                    spz_ply_path,
-                    spz_ply_path,
-                    f"--rotate={rotation}",
-                    '-w'
-                ]
-                pipeline.create_component(
-                    name="Spz-Ply-Rotation",
-                    comp_type=ComponentType.POST_PROCESSING,
-                    comp_environ=ComponentEnvironment.EXECUTABLE,
-                    command="splat-transform",
-                    args=args,
-                    cwd=current_dir_path,
-                    requires_gpu=False
-                )
+            #if config['MODEL'] != "3dgut" or config['MODEL'] != "3dgrt":
+            rotation = '270,0,0' if not is_portrait else '270,0,90'
+            args = [
+                spz_ply_path,
+                spz_ply_path,
+                f"--rotate={rotation}",
+                '-w'
+            ]
+            pipeline.create_component(
+                name="Spz-Ply-Rotation",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.EXECUTABLE,
+                command="splat-transform",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
     except Exception as e:
         error_message = f"Issue rotating PLY: {e}"
         pipeline.report_error(785, error_message)
@@ -2486,7 +2505,7 @@ if __name__ == "__main__":
                             "--ImageReader.camera_params", camera_params['params_str']
                         ])
                     elif config.get('PRESERVE_SCENE_SCALE', 'false') == 'true':
-                        # Apply focal length heuristic: f = 1.2 * max(width, height)
+                        # Apply focal length heuristic: f = 1.1 * max(width, height)
                         # This preserves metric scale by anchoring intrinsics before SfM
                         try:
                             from PIL import Image as _PILImage
@@ -2495,10 +2514,18 @@ if __name__ == "__main__":
                             if img_files:
                                 with _PILImage.open(os.path.join(image_path, img_files[0])) as _img:
                                     _w, _h = _img.size
-                                focal = round(1.1 * max(_w, _h))
+                                focal = round(1.3 * max(_w, _h))
                                 cx, cy = _w // 2, _h // 2
                                 log.info(f"PRESERVE_SCENE_SCALE: using focal={focal}, cx={cx}, cy={cy} "
                                          f"(image {_w}x{_h})")
+                                # Remove any --ImageReader.camera_model already added (e.g. PINHOLE for multi-GPU/3DGRUT)
+                                # to avoid colmap rejecting duplicate flags
+                                try:
+                                    idx = component.args.index("--ImageReader.camera_model")
+                                    component.args.pop(idx)  # remove flag
+                                    component.args.pop(idx)  # remove its value
+                                except ValueError:
+                                    pass
                                 component.args.extend([
                                     "--ImageReader.camera_model", "SIMPLE_PINHOLE",
                                     "--ImageReader.camera_params", f"{focal},{cx},{cy}"
@@ -2765,6 +2792,14 @@ if __name__ == "__main__":
                         # For Batch, create archive with dataset/train structure
                         create_tarball(dataset_source, OUTPUT_TAR_PATH, "dataset/train")
                         log.info(f"Created model.tar.gz archive from {dataset_source} with dataset/train structure")
+                        if not LOCAL_DEBUG:
+                            os.makedirs(os.path.dirname(OUTPUT_TAR_PATH), exist_ok=True)
+                            pipeline.run_component(i)
+                            log.info(f"Uploaded model.tar.gz to {config['S3_OUTPUT']}/{config['UUID']}/output/model.tar.gz")
+                        # Upload archive to S3
+                        os.makedirs(os.path.dirname(OUTPUT_TAR_PATH), exist_ok=True)
+                        pipeline.run_component(i)
+                        log.info(f"Uploaded model.tar.gz to {config['S3_OUTPUT']}/{config['UUID']}/output/model.tar.gz")
                 case "Nerfstudio-Metrics" | "3DGRUT-Metrics" | "GSplat-Metrics":
                     # For GSplat-Metrics, force single GPU and find checkpoint files
                     if component.name == "GSplat-Metrics":

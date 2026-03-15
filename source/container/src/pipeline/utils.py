@@ -1055,14 +1055,14 @@ def parse_3dgrut_metrics_from_log(log_output, output_json_path):
     
     metrics = {'psnr': 0.0, 'ssim': 0.0, 'lpips': 0.0}
     
-    # Parse from table format: │ 31.632    │ 0.963     │ 0.053      │
-    # Look for the data row after the header row with mean_psnr, mean_ssim, mean_lpips
+    # Parse from table format: │ 0.053     │ 0.963     │ 31.632     │
+    # 3DGRUT render.py outputs columns in order: mean_lpips | mean_ssim | mean_psnr
     table_match = re.search(r'│\s*([0-9.]+)\s*│\s*([0-9.]+)\s*│\s*([0-9.]+)\s*│', log_output)
     
     if table_match:
-        metrics['psnr'] = float(table_match.group(1))
+        metrics['lpips'] = float(table_match.group(1))
         metrics['ssim'] = float(table_match.group(2))
-        metrics['lpips'] = float(table_match.group(3))
+        metrics['psnr'] = float(table_match.group(3))
     
     # Only save if at least one metric was found
     if any(v > 0 for v in metrics.values()):
