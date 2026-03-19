@@ -882,34 +882,14 @@ if __name__ == "__main__":
                 method = "vocabtree"
             else:
                 method = config['MATCHING_METHOD']
+            faces_to_remove = config['SPHERICAL_CUBE_FACES_TO_REMOVE'].strip()
+            pano_render_type = "non-overlapping" if faces_to_remove and faces_to_remove != '[]' else "overlapping"
             args = [
                 "--input_image_path", image_path,
                 "--output_path", config['DATASET_PATH'],
-                "--matcher", method
+                "--matcher", method,
+                "--pano_render_type", pano_render_type
             ]
-            
-            # Add cube face removal parameter
-            faces_to_remove = config['SPHERICAL_CUBE_FACES_TO_REMOVE'].strip()
-            if faces_to_remove and faces_to_remove != '[]':
-                args.append("--remove_faces")
-            
-            if config['REMOVE_OBJECT'] == "true":
-                # Determine model for human detection
-                model = "u2net_human_seg"
-                try:
-                    objects_list = ast.literal_eval(config['OBJECT_REMOVAL_OBJECTS'])
-                    if "human" in [obj.lower() for obj in objects_list]:
-                        model = "u2net_human_seg"
-                except (ValueError, SyntaxError):
-                    if "human" in config['OBJECT_REMOVAL_OBJECTS'].lower():
-                        model = "u2net_human_seg"
-                args.extend(["--remove_object",
-                             "--object_action", config['OBJECT_REMOVAL_ACTION'],
-                             "-m", model,
-                             "-nt", str(pipeline.config.num_threads),
-                             "-ng", str(pipeline.config.num_gpus),
-                             "-gpu", str(USE_GPU)
-                             ])
             
             pipeline.create_component(
                 name="PanoramaSfM",
@@ -929,7 +909,7 @@ if __name__ == "__main__":
     # Remove Objects
     ##################################
     try:
-        # Skip object removal if using spherical camera (handled in panorama_sfm.py)
+        # Skip object removal if using spherical camera without object removal enabled
         if config['REMOVE_OBJECT'] == "true" and config['RUN_RECON'] == "true" and config['SPHERICAL_CAMERA'] != "true":
             model = None
             # OBJECT REMOVAL COMPONENT FOR HUMAN
@@ -1004,7 +984,8 @@ if __name__ == "__main__":
         if config['RUN_RECON'] == "true":
             if config['SPHERICAL_CAMERA'] == "true":
                 log.info("Using spherical camera processing with panorama_sfm.py")
-            elif config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap":
+            elif config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
+                config['RECON_SOFTWARE_NAME'] == "hloc":
                 # FEATURE EXTRACTOR COMPONENT
                 args = [
                     "feature_extractor",
@@ -1163,6 +1144,12 @@ if __name__ == "__main__":
                             "--output_path", sparse_path,
                             "--Mapper.multiple_models", "0"
                         ]
+                        if config.get('PRESERVE_SCENE_SCALE', 'false') == 'true':
+                            args.extend([
+                                "--Mapper.ba_refine_focal_length", "0",
+                                "--Mapper.ba_refine_principal_point", "0",
+                                "--Mapper.ba_refine_extra_params", "0"
+                            ])
                         if config['LOG_VERBOSITY'] == "error":
                             args.extend([
                                 "--log_level", "1"
@@ -1178,23 +1165,80 @@ if __name__ == "__main__":
                             args=args,
                             requires_gpu=False
                         )
-                    else: # Glomap
+                    elif config['RECON_SOFTWARE_NAME'] == "glomap":
                         args = [
-                            "mapper",
+                            "view_graph_calibrator",
+                            "--database_path", colmap_db_path
+                        ]
+                        pipeline.create_component(
+                            name="GlomapSfM-ViewGraph",
+                            comp_type=ComponentType.RECONSTRUCTION,
+                            comp_environ=ComponentEnvironment.EXECUTABLE,
+                            command="colmap",
+                            cwd=current_dir_path,
+                            args=args,
+                            requires_gpu=False
+                        )
+                        args = [
+                            "global_mapper",
                             "--database_path", colmap_db_path,
                             "--image_path", image_path,
                             "--output_path", sparse_path
                         ]
-                        if int(pipeline.config.num_gpus) > 0:
-                            args.extend([
-                                "--GlobalPositioning.use_gpu", "1",
-                                "--BundleAdjustment.use_gpu", "1"
-                            ])
                         pipeline.create_component(
                             name="GlomapSfM-Mapper",
                             comp_type=ComponentType.RECONSTRUCTION,
                             comp_environ=ComponentEnvironment.EXECUTABLE,
-                            command="glomap",
+                            command="colmap",
+                            cwd=current_dir_path,
+                            args=args,
+                            requires_gpu=False
+                        )
+                    else: #hloc
+                        args = [
+                            "hierarchical_mapper",
+                            "--database_path", colmap_db_path,
+                            "--image_path", image_path,
+                            "--output_path", sparse_path
+                        ]
+                        pipeline.create_component(
+                            name="HlocSfM-Mapper",
+                            comp_type=ComponentType.RECONSTRUCTION,
+                            comp_environ=ComponentEnvironment.EXECUTABLE,
+                            command="colmap",
+                            cwd=current_dir_path,
+                            args=args,
+                            requires_gpu=False
+                        )
+                        args = [
+                            'point_triangulator',
+                            '--database_path', colmap_db_path,
+                            '--image_path', image_path,
+                            '--input_path', sparse_model_path,
+                            '--output_path', sparse_model_path,
+                            '--refine_intrinsics', "1",
+                            '--Mapper.multiple_models', "0"
+                        ]
+                        pipeline.create_component(
+                            name="HlocSfM-Tri",
+                            comp_type=ComponentType.RECONSTRUCTION,
+                            comp_environ=ComponentEnvironment.EXECUTABLE,
+                            command="colmap",
+                            cwd=current_dir_path,
+                            args=args,
+                            requires_gpu=False
+                        )
+                        args = [
+                            'bundle_adjuster',
+                            '--input_path', sparse_model_path,
+                            '--output_path', sparse_model_path,
+                            '--BundleAdjustment.refine_principal_point', '0'
+                        ]
+                        pipeline.create_component(
+                            name="HlocSfM-Ba",
+                            comp_type=ComponentType.RECONSTRUCTION,
+                            comp_environ=ComponentEnvironment.EXECUTABLE,
+                            command="colmap",
                             cwd=current_dir_path,
                             args=args,
                             requires_gpu=False
@@ -1271,7 +1315,7 @@ if __name__ == "__main__":
     try:
         if config['RUN_TRAIN'] == "true" and config['RUN_RECON'] == "true":
             if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
-                config['RECON_SOFTWARE_NAME'] == "map_anything":
+                config['RECON_SOFTWARE_NAME'] == "map_anything" or config['RECON_SOFTWARE_NAME'] == "hloc":
                 args = ["--data_dir", config['DATASET_PATH']]
                 pipeline.create_component(
                     name="Colmap-to-Nerfstudio",
@@ -1300,7 +1344,7 @@ if __name__ == "__main__":
     try:
         if config['RUN_TRAIN'] == "true" or (config['RUN_RECON'] == "false" and config['RUN_TRAIN'] == "false"):
             if config['RECON_SOFTWARE_NAME'] == "glomap" or config['RECON_SOFTWARE_NAME'] == "colmap" or \
-                config['RECON_SOFTWARE_NAME'] == "map_anything":
+                config['RECON_SOFTWARE_NAME'] == "map_anything" or config['RECON_SOFTWARE_NAME'] == "hloc":
                 data_model = "colmap"
             # Single GPU gsplat
             if ENABLE_MULTI_GPU == "false" and \
@@ -1407,7 +1451,9 @@ if __name__ == "__main__":
                 config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
                 #multi-gpu, use gsplat training strategy
                 num_gpus = int(pipeline.config.num_gpus)
-                steps_scaler = 1.0 / num_gpus  # Scale by number of GPUs only
+                batch_size = 1
+                #steps_scaler = 1.0 / num_gpus  # Scale by number of GPUs only
+                steps_scaler = 0.9576*(num_gpus*batch_size)**(-1.689)
                 if config['MODEL'] == "splatfacto-mcmc":
                     model = "mcmc"
                 else:
@@ -2504,8 +2550,8 @@ if __name__ == "__main__":
                             "--ImageReader.camera_model", camera_params['model'],
                             "--ImageReader.camera_params", camera_params['params_str']
                         ])
-                    elif config.get('PRESERVE_SCENE_SCALE', 'false') == 'true':
-                        # Apply focal length heuristic: f = 1.1 * max(width, height)
+                    elif config.get('ENABLE_FL_HEURISTIC', 'false') == 'true':
+                        # Apply focal length heuristic: f = 1.2 * max(width, height)
                         # This preserves metric scale by anchoring intrinsics before SfM
                         try:
                             from PIL import Image as _PILImage
@@ -2514,9 +2560,9 @@ if __name__ == "__main__":
                             if img_files:
                                 with _PILImage.open(os.path.join(image_path, img_files[0])) as _img:
                                     _w, _h = _img.size
-                                focal = round(1.3 * max(_w, _h))
+                                focal = round(float(config.get('FL_HEURISTIC_VALUE', '1.2'))* max(_w, _h))
                                 cx, cy = _w // 2, _h // 2
-                                log.info(f"PRESERVE_SCENE_SCALE: using focal={focal}, cx={cx}, cy={cy} "
+                                log.info(f"ENABLE_FL_HEURISTIC: using focal={focal}, cx={cx}, cy={cy} "
                                          f"(image {_w}x{_h})")
                                 # Remove any --ImageReader.camera_model already added (e.g. PINHOLE for multi-GPU/3DGRUT)
                                 # to avoid colmap rejecting duplicate flags
@@ -2536,7 +2582,8 @@ if __name__ == "__main__":
                     pipeline.run_component(i)
                 case "Colmap-to-Nerfstudio":
                     # Ensure we use the largest Colmap model if multiple found
-                    if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap":
+                    if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" \
+                        or config['RECON_SOFTWARE_NAME'] == "hloc":
                         select_largest_colmap_model(sparse_path)
                     # Move existing transforms.json to transforms-in.json when using pose priors
                     # This ensures colmap-to-nerfstudio creates fresh transforms.json from updated COLMAP data
@@ -2588,7 +2635,7 @@ if __name__ == "__main__":
                     if ENABLE_MULTI_GPU == "false":
                         if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
                             if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
-                                config['RECON_SOFTWARE_NAME'] == "map_anything":
+                                config['RECON_SOFTWARE_NAME'] == "map_anything" or config['RECON_SOFTWARE_NAME'] == "hloc":
                                 # Move the sparse point cloud from sparse/0/* to colmap/sparse/*
                                 log.info('Running Training...')
                                 if config['RUN_RECON'] == "true":

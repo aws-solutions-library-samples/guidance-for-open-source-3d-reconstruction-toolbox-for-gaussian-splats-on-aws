@@ -33,7 +33,8 @@ def run_map_anything(scene_dir: str, skip_point2d: bool = False, voxel_size: str
     cmd = [
         "python", "map-anything/scripts/demo_colmap.py",
         f"--images_dir={images_dir}",
-        f"--output_dir={output_dir}"
+        f"--output_dir={output_dir}",
+        "--apache"
     ]
     
     if skip_point2d:

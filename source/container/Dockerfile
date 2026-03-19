@@ -24,7 +24,7 @@
 # nosemgrep: dockerfile-source-not-pinned
 FROM pytorch/pytorch:2.9.1-cuda13.0-cudnn9-devel
 
-# Fixed versions
+# Pinned versions
 ENV PYTHON_VERSION="3.12.0"
 ENV PYTHON_VERSION_="3.12"
 ENV CUDA_VERSION="13.0"
@@ -35,13 +35,14 @@ ENV TORCH_VISION_VERSION="0.24.1"
 ENV CMAKE_VERSION="3.30.3"
 ENV NODE_VERSION="22"
 ENV EIGEN_VERSION="3.4"
-ENV COLMAP_VERSION="3.13.0"
-ENV GLOMAP_VERSION="1.2.0"
+ENV COLMAP_VERSION="4.0.2"
 ENV SPLAT_TRANSFORM_VERSION="0.17.1"
 ENV MAPANYTHING_VERSION="1.1"
 ENV SPZ_VERSION="2.1.0"
+ENV OPENEXR_VERSION="3.1.5"
+ENV OPENIMAGEIO_VERSION="2.5.13.0"
 
-# Fixed versions
+# Pinned versions
 ENV CERES_HASH="0c70ed3a1a2d6ba47c06c7e8b3b040880bc474db"
 ENV NERFSTUDIO_HASH="50e0e3c70c775e89333256213363badbf074f29d"
 ENV GSPLAT_HASH="a8d88d387f6e554b18153d309f5536696882de5c"
@@ -137,6 +138,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     qtbase5-dev \
     libqt5opengl5-dev \
     libcgal-dev \
+    libopenimageio-dev \
 # Building from source for specific version    libceres-dev \
     libffi-dev \
     libgflags-dev \
@@ -157,6 +159,12 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     libvulkan1 \
     libvulkan-dev \
     mesa-vulkan-drivers \
+    libboost-thread-dev \
+    libboost-regex-dev \
+    libtiff-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libraw-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python version and make it the default
@@ -179,9 +187,6 @@ RUN ln -sf /usr/local/bin/python${PYTHON_VERSION_} /usr/local/bin/python3 \
 ENV PATH=/usr/local/bin:${PATH}
 ENV PYTHONPATH=/usr/local/lib/python${PYTHON_VERSION_}/site-packages:/usr/local/lib/python${PYTHON_VERSION_}/dist-packages:${CODE_PATH}
 WORKDIR ${CODE_PATH}
-
-# Install typing-extensions first to avoid naming conflict
-#RUN pip install typing-extensions>=4.10.0
 
 # Install PyTorch for CUDA 13.0 (required after custom Python install)
 RUN pip install torch==${TORCH_VERSION}+cu${CUDA_VERSION_} torchvision==${TORCH_VISION_VERSION}+cu${CUDA_VERSION_} torchaudio==${TORCH_VERSION}+cu${CUDA_VERSION_} --index-url https://download.pytorch.org/whl/cu${CUDA_VERSION_}
@@ -275,12 +280,30 @@ RUN chmod +x /opt/ml/code/training/run_splatfacto_w_wrapper.sh \
 RUN mkdir -p /opt/gsplat_pycolmap \
     && pip install --target=/opt/gsplat_pycolmap git+https://github.com/rmbrualla/pycolmap@cc7ea4b7301720ac29287dbe450952511b32125e
 
-# Copy and apply patch for splatfacto-w gradient bug (must be done before COLMAP install)
+# Build OpenEXR + OpenImageIO from source (system libopenimageio-dev is built against old OpenEXR
+# and its cmake config pins an incompatible version requirement for COLMAP 4.x)
+RUN wget https://github.com/AcademySoftwareFoundation/openexr/archive/refs/tags/v3.1.5.tar.gz \
+    && tar -xzf v3.1.5.tar.gz && rm v3.1.5.tar.gz \
+    && cmake -S ${CODE_PATH}/openexr-3.1.5 -B ${CODE_PATH}/openexr-3.1.5/build -GNinja \
+       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+       -DBUILD_TESTING=OFF -DOPENEXR_BUILD_TOOLS=OFF \
+    && ninja -C ${CODE_PATH}/openexr-3.1.5/build -j${NINJA_JOBS} install \
+    && rm -rf ${CODE_PATH}/openexr-3.1.5 && ldconfig
+RUN wget https://github.com/AcademySoftwareFoundation/OpenImageIO/archive/refs/tags/v2.5.13.0.tar.gz \
+    && tar -xzf v2.5.13.0.tar.gz && rm v2.5.13.0.tar.gz \
+    && cmake -S ${CODE_PATH}/OpenImageIO-2.5.13.0 -B ${CODE_PATH}/OpenImageIO-2.5.13.0/build -GNinja \
+       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+       -DCMAKE_PREFIX_PATH=/usr/local \
+       -DOIIO_BUILD_TESTS=OFF -DOIIO_BUILD_TOOLS=OFF -DUSE_PYTHON=OFF -DINSTALL_DOCS=OFF \
+    && ninja -C ${CODE_PATH}/OpenImageIO-2.5.13.0/build -j${NINJA_JOBS} install \
+    && rm -rf ${CODE_PATH}/OpenImageIO-2.5.13.0 && ldconfig \
+    && find /usr/local/lib/cmake -name 'OpenImageIOConfig.cmake'
+
 # Install COLMAP from source
 RUN wget https://github.com/colmap/colmap/archive/refs/tags/${COLMAP_VERSION}.zip \
     && unzip ${COLMAP_VERSION}.zip && rm ${COLMAP_VERSION}.zip \
     && cd colmap-${COLMAP_VERSION}/ && mkdir build && cd build \
-    && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DMARCH_NATIVE=OFF && ninja -j${NINJA_JOBS} install \
+    && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DMARCH_NATIVE=OFF -DCMAKE_PREFIX_PATH=/usr/local && ninja -j${NINJA_JOBS} install \
     && cd ${CODE_PATH}/colmap-${COLMAP_VERSION} \
     && python -m pip install . \
     && cd ${CODE_PATH}
@@ -290,14 +313,8 @@ RUN git clone https://github.com/ZachMckennedyFWig/ColmapFaissVocabTrees.git \
     && mv ${CODE_PATH}/ColmapFaissVocabTrees/vocab_tree_flickr100K_words32K.bin ${CODE_PATH} \
     && rm -rf ${CODE_PATH}/ColmapFaissVocabTrees
 
-# Install Glomap and AWS CLI in single layer
-RUN wget https://github.com/colmap/glomap/archive/refs/tags/${GLOMAP_VERSION}.tar.gz && \
-    tar -xvzf ${GLOMAP_VERSION}.tar.gz && cd glomap-${GLOMAP_VERSION} \
-    && mkdir build && cd build \
-    && cmake .. -GNinja -DCUDA_ENABLED=ON -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DMARCH_NATIVE=OFF -DCeres_DIR=${CODE_PATH}/ceres-bin \
-    && ninja -j${NINJA_JOBS} && ninja -j${NINJA_JOBS} install \
-    && cd ${CODE_PATH} \
-    && wget "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -O "awscliv2.zip" \
+# Install AWS CLI
+RUN wget "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -O "awscliv2.zip" \
     && unzip awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip
 
 # Install utilities and ensure numpy==1.26.4 for compatibility
@@ -443,7 +460,11 @@ COPY ./src/pipeline/reconstruction/run_map_anything.py                          
 COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py                            ${CODE_PATH}/training
 COPY ./src/pipeline/training/run_gsplat_trainer.sh                                  ${CODE_PATH}/training
 RUN chmod +x ${CODE_PATH}/training/run_gsplat_trainer.sh
-COPY ./src/pipeline/reconstruction/spherical/panorama_sfm.py                        ${CODE_PATH}/spherical
+# Use upstream COLMAP panorama_sfm.py directly from the repo
+RUN wget -O ${CODE_PATH}/spherical/panorama_sfm.py \
+    https://raw.githubusercontent.com/colmap/colmap/main/python/examples/panorama_sfm.py \
+    && sed -i 's/loop_detection=True/loop_detection=True, vocab_tree_path="\/opt\/ml\/code\/vocab_tree_flickr100K_words32K.bin"/' \
+       ${CODE_PATH}/spherical/panorama_sfm.py
 COPY ./src/pipeline/pre_processing/segmentation/remove_object_using_mask.py         ${CODE_PATH}/pre_processing/segmentation
 COPY ./src/pipeline/pre_processing/segmentation/remove_background.py                ${CODE_PATH}/pre_processing/segmentation
 COPY ./src/pipeline/pre_processing/segmentation/erase_object_using_mask.py          ${CODE_PATH}/pre_processing/segmentation
