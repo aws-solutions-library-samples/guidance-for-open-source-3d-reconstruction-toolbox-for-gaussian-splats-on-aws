@@ -202,11 +202,9 @@ WORKDIR ${CODE_PATH}
 RUN git clone https://github.com/ZachMckennedyFWig/ColmapFaissVocabTrees.git
 RUN mv ${CODE_PATH}/ColmapFaissVocabTrees/vocab_tree_flickr100K_words32K.bin ${CODE_PATH}
 
-# Install Glomap v1.0.0 (see https://github.com/colmap/glomap/issues/55#issuecomment-2437082982)
+# Install Glomap v1.0.0
 RUN wget https://github.com/colmap/glomap/archive/refs/tags/1.0.0.tar.gz && \
     tar -xvzf 1.0.0.tar.gz && cd glomap-1.0.0 && \
-    sed -i 's/GIT_TAG           b3691b791bcedccd5451621b2275a1df0d9dcdeb/GIT_TAG           master/' cmake/FindDependencies.cmake && \
-    grep "GIT_TAG" cmake/FindDependencies.cmake && \
     mkdir build && cd build && \
     cmake .. -GNinja -DCUDA_ENABLED=ON -DCMAKE_CUDA_ARCHITECTURES=${TCNN_CUDA_ARCHITECTURES} -DCeres_DIR=${CODE_PATH}/ceres-bin && ninja && ninja install
 WORKDIR ${CODE_PATH}
@@ -217,13 +215,15 @@ WORKDIR ${CODE_PATH}/nerfstudio
 RUN pip install -e .
 WORKDIR ${CODE_PATH}
 
-# Install latest gsplat from source and copy repo for multi-gpu features
-RUN git clone https://github.com/nerfstudio-project/gsplat.git --recursive
+# Install gsplat v1.4.0 from source (required by nerfstudio 1.1.5, compatible with CUDA 11.8)
+RUN git clone --branch v1.4.0 --depth 1 https://github.com/nerfstudio-project/gsplat.git --recursive
 WORKDIR ${CODE_PATH}/gsplat
 #RUN pip install -e .
 RUN pip install -r examples/requirements.txt
+# Pin versions required by nerfview 0.0.2 (overrides unpinned viser from examples/requirements.txt)
+RUN pip install nerfview==0.0.2 viser==0.2.1 jaxtyping==0.2.29
 WORKDIR ${CODE_PATH}
-RUN pip install git+https://github.com/nerfstudio-project/gsplat.git
+RUN pip install git+https://github.com/nerfstudio-project/gsplat.git@v1.4.0
 
 # Install latest Splatfacto-w (in the wild) model and download repo to expose splat export script
 # Warning: This will down-grade gsplat to the version it supports. Future work will isolate dep versions
@@ -289,7 +289,8 @@ WORKDIR ${CODE_PATH}
 # Build NVIDIA 3DGRUT
 RUN git clone --recursive https://github.com/nv-tlabs/3dgrut.git
 WORKDIR ${CODE_PATH}/3dgrut
-RUN python -m pip install -r requirements.txt
+# Use --no-build-isolation because ppisp's setup.py imports torch at build time
+RUN pip install wheel && python -m pip install --no-build-isolation -r requirements.txt
 WORKDIR ${CODE_PATH}
 
 # The main entrypoint and arguments are added into the container in the State Machine (e.g. ENTRYPOINT [ "python", "main.py" ])
