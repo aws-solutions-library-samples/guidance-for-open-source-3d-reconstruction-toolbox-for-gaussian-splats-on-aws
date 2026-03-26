@@ -88,6 +88,7 @@ import torch
 import shutil
 import zipfile
 import multiprocessing
+from pathlib import Path
 from pipeline import Pipeline, Status, ComponentEnvironment, ComponentType
 from utils import (
     read_camera_params_from_file, validate_input_media,
@@ -510,32 +511,75 @@ if __name__ == "__main__":
                     try:
                         with open(config_yml_src, 'r') as f:
                             config_content = f.read()
-                        
+
                         # Update max_num_iterations using text replacement
                         config_content = re.sub(r'max_num_iterations: \d+', f'max_num_iterations: {REFINE_STEPS_SPLATFACTO}', config_content)
-                        
+
+                        # Save only at the final step to avoid the PyTorch optimizer
+                        # KeyError bug that fires when save_checkpoint coincides with
+                        # a densification step (refine_every=100 by default).
+                        config_content = re.sub(r'steps_per_save: \d+', f'steps_per_save: {REFINE_STEPS_SPLATFACTO}', config_content)
+
+                        # Stop densification before the end so the optimizer
+                        # param_mappings are stable when _after_train calls save_checkpoint.
+                        # Use max_num_iterations as stop_split_at to guarantee densification
+                        # is fully stopped before the final save.
+                        stop_split_at = REFINE_STEPS_SPLATFACTO
+                        if 'stop_split_at:' in config_content:
+                            config_content = re.sub(r'stop_split_at: \d+', f'stop_split_at: {stop_split_at}', config_content)
+                        else:
+                            config_content = re.sub(
+                                r'(max_num_iterations: \d+)',
+                                f'\\1\n    stop_split_at: {stop_split_at}',
+                                config_content
+                            )
+
                         # Update timestamp using text replacement
                         config_content = re.sub(r'timestamp: [^\n]+', f'timestamp: {RESUME_TRAIN_EXPERIMENT_NAME}', config_content)
-                        
+
                         # Update dataset path using text replacement
-                        config_content = re.sub(r'data: !!python/object/apply:pathlib\.PosixPath\s*\n\s*-[^\n]*(?:\n\s*-[^\n]*)*', 
-                                              f'data: !!python/object/apply:pathlib.PosixPath\n      - {config["DATASET_PATH"]}', 
+                        config_content = re.sub(r'data: !!python/object/apply:pathlib\.PosixPath\s*\n\s*-[^\n]*(?:\n\s*-[^\n]*)*',
+                                              f'data: !!python/object/apply:pathlib.PosixPath\n      - {config["DATASET_PATH"]}',
                                               config_content, flags=re.MULTILINE)
-                        
-                        # Update checkpoint path to point to dataset directory
+
+                        # Set load_dir to the nerfstudio_models directory so the trainer
+                        # loads the checkpoint. load_dir is the field nerfstudio actually
+                        # reads; relative_model_dir only controls where new checkpoints save.
                         checkpoint_path = os.path.join(config['DATASET_PATH'], 'nerfstudio_models')
-                        config_content = re.sub(r'outputs/unnamed/splatfacto/[^/]+/nerfstudio_models', 
-                                              checkpoint_path.replace('\\', '/'),
+                        checkpoint_path_fwd = checkpoint_path.replace('\\', '/')
+                        if 'load_dir:' in config_content:
+                            config_content = re.sub(
+                                r'load_dir: .*',
+                                f'load_dir: !!python/object/apply:pathlib.PosixPath\n  - {checkpoint_path_fwd}',
+                                config_content
+                            )
+                        else:
+                            # Insert load_dir after load_config line (or before load_step)
+                            config_content = re.sub(
+                                r'(load_config: .*\n)',
+                                f'\\1load_dir: !!python/object/apply:pathlib.PosixPath\n  - {checkpoint_path_fwd}\n',
+                                config_content
+                            )
+
+                        # Also update relative_model_dir so new checkpoints save alongside old ones
+                        config_content = re.sub(r'outputs/unnamed/splatfacto/[^/]+/nerfstudio_models',
+                                              checkpoint_path_fwd,
                                               config_content)
-                        
+
                         with open(config_yml_src, 'w') as f:
                             f.write(config_content)
-                        
+
+                        log.info(f"Config stop_split_at present: {'stop_split_at' in config_content}")
+                        log.info(f"Config max_num_iterations present: {'max_num_iterations' in config_content}")
+                        log.info(f"Config snippet around max_num_iterations: {config_content[max(0,config_content.find('max_num_iterations')-20):config_content.find('max_num_iterations')+80] if 'max_num_iterations' in config_content else 'NOT FOUND'}")
+
                         log.info(f"""
                                 Updated config.yml in dataset directory:
                                 max_num_iterations={REFINE_STEPS_SPLATFACTO},
+                                stop_split_at={stop_split_at} (=max_num_iterations, densification fully disabled for resume),
                                 timestamp={RESUME_TRAIN_EXPERIMENT_NAME},
-                                data_path={config['DATASET_PATH']}
+                                data_path={config['DATASET_PATH']},
+                                load_dir={checkpoint_path_fwd}
                                 """)
                     except Exception as e:
                         log.warning(f"Failed to update config.yml: {e}")
@@ -544,17 +588,6 @@ if __name__ == "__main__":
                     os.makedirs(os.path.dirname(model_config_path), exist_ok=True)
                     shutil.move(config_yml_src, model_config_path)
                     log.info(f"Moved config.yml from {config_yml_src} to {model_config_path}")
-            
-            log.info("Dataset path after moving: ")
-            if os.path.exists(config['DATASET_PATH']):
-                log.info(", ".join(os.listdir(config['DATASET_PATH'])))
-                # Check for nested directories that might contain the model files
-                for item in os.listdir(config['DATASET_PATH']):
-                    item_path = os.path.join(config['DATASET_PATH'], item)
-                    if os.path.isdir(item_path):
-                        log.info(f"Contents of {item}/: {os.listdir(item_path)}")
-            else:
-                log.error(f"DATASET_PATH does not exist: {config['DATASET_PATH']}")
             
             # Log checkpoint and config locations for debugging
             dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
@@ -883,13 +916,30 @@ if __name__ == "__main__":
             else:
                 method = config['MATCHING_METHOD']
             faces_to_remove = config['SPHERICAL_CUBE_FACES_TO_REMOVE'].strip()
-            pano_render_type = "non-overlapping" if faces_to_remove and faces_to_remove != '[]' else "overlapping"
             args = [
                 "--input_image_path", image_path,
                 "--output_path", config['DATASET_PATH'],
-                "--matcher", method,
-                "--pano_render_type", pano_render_type
+                "--matcher", method
             ]
+            if faces_to_remove and faces_to_remove != '[]':
+                args.append("--remove_faces")
+
+            if config['REMOVE_OBJECT'] == "true":
+                model = "u2net_human_seg"
+                try:
+                    objects_list = ast.literal_eval(config['OBJECT_REMOVAL_OBJECTS'])
+                    if "human" in [obj.lower() for obj in objects_list]:
+                        model = "u2net_human_seg"
+                except (ValueError, SyntaxError):
+                    if "human" in config['OBJECT_REMOVAL_OBJECTS'].lower():
+                        model = "u2net_human_seg"
+                args.extend(["--remove_object",
+                             "--object_action", config['OBJECT_REMOVAL_ACTION'],
+                             "-m", model,
+                             "-nt", str(pipeline.config.num_threads),
+                             "-ng", str(pipeline.config.num_gpus),
+                             "-gpu", str(USE_GPU)
+                             ])
             
             pipeline.create_component(
                 name="PanoramaSfM",
@@ -909,7 +959,7 @@ if __name__ == "__main__":
     # Remove Objects
     ##################################
     try:
-        # Skip object removal if using spherical camera without object removal enabled
+        # Skip object removal if using spherical camera (handled in panorama_sfm.py)
         if config['REMOVE_OBJECT'] == "true" and config['RUN_RECON'] == "true" and config['SPHERICAL_CAMERA'] != "true":
             model = None
             # OBJECT REMOVAL COMPONENT FOR HUMAN
@@ -1332,7 +1382,7 @@ if __name__ == "__main__":
                     f"Reconstruction software name given not implemented:{config['RECON_SOFTWARE_NAME']}"
                 )
         else:
-            log.info("Not configured to output a Gaussian Splat...skipping dataset conversion.")
+            log.info("Not configured to perform SfM reconstruction...skipping dataset conversion.")
     except Exception as e:
         error_message = f"Issue creating the Colmap to Nerfstudio component: {e}"
         pipeline.report_error(755, error_message)
@@ -1367,18 +1417,70 @@ if __name__ == "__main__":
                 elif config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
                     config['MODEL'] == "splatfacto-mcmc":
                     if config['RUN_RECON'] == "false": # Resume training
-                        # For splatfacto resume training, config.yml was already updated during extraction
                         dataset_config_path = os.path.join(config['DATASET_PATH'], "config.yml")
-                        
-                        if os.path.exists(dataset_config_path):
-                            args.extend([
-                                "--load-config", dataset_config_path,
-                            ])
-                            log.info(f"Resume training using config: {dataset_config_path}")
-                            log.info(f"Resume training with {REFINE_STEPS_SPLATFACTO} iterations")
-                        else:
+
+                        if not os.path.exists(dataset_config_path):
                             log.error(f"Config file not found at: {dataset_config_path}")
                             raise RuntimeError(f"Cannot resume training - config file missing")
+
+                        checkpoint_dir = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
+                        if not os.path.exists(checkpoint_dir):
+                            log.error(f"Checkpoint directory not found at: {checkpoint_dir}")
+                            raise RuntimeError(f"Cannot resume training - checkpoint directory missing")
+
+                        # Read the checkpoint step. nerfstudio sets _start_step = ckpt_step + 1
+                        # and loops range(_start_step, max_num_iterations). stop_split_at is an
+                        # absolute step number, so setting it to ckpt_step guarantees densification
+                        # never fires during the resume run (all steps > ckpt_step).
+                        _ckpt_step = 0
+                        try:
+                            _ckpt_files = sorted(
+                                f for f in os.listdir(checkpoint_dir) if f.endswith('.ckpt')
+                            )
+                            if _ckpt_files:
+                                _latest = os.path.join(checkpoint_dir, _ckpt_files[-1])
+                                _ckpt_data = torch.load(_latest, weights_only=False, map_location="cpu")
+                                _ckpt_step = int(_ckpt_data.get("step", 0))
+                                del _ckpt_data
+                                log.info(f"Checkpoint step: {_ckpt_step}")
+                        except Exception as _e:
+                            log.warning(f"Could not read checkpoint step: {_e}. Defaulting to 0.")
+
+                        _stop_split_at = _ckpt_step          # == _start_step - 1
+                        _total_steps = _ckpt_step + 1 + REFINE_STEPS_SPLATFACTO
+
+                        try:
+                            with open(dataset_config_path, 'r') as _f:
+                                _cfg = _f.read()
+                            _cfg = re.sub(r'max_num_iterations: \d+', f'max_num_iterations: {_total_steps}', _cfg)
+                            _cfg = re.sub(r'steps_per_save: \d+', f'steps_per_save: {_total_steps}', _cfg)
+                            if 'stop_split_at:' in _cfg:
+                                _cfg = re.sub(r'stop_split_at: \d+', f'stop_split_at: {_stop_split_at}', _cfg)
+                            else:
+                                _cfg = re.sub(
+                                    r'(  max_num_iterations: \d+)',
+                                    f'\\1\n    stop_split_at: {_stop_split_at}',
+                                    _cfg
+                                )
+                            _cfg = re.sub(r'timestamp: [^\n]+', f'timestamp: {RESUME_TRAIN_EXPERIMENT_NAME}', _cfg)
+                            with open(dataset_config_path, 'w') as _f:
+                                _f.write(_cfg)
+                            log.info(f"Resume: ckpt_step={_ckpt_step}, max_num_iterations={_total_steps}, "
+                                     f"stop_split_at={_stop_split_at}")
+                        except Exception as _e:
+                            log.warning(f"Failed to patch config.yml for resume: {_e}")
+
+                        args = [
+                            config['MODEL'],
+                            "--load-config", dataset_config_path,
+                            "--viewer.quit-on-train-completion=True",
+                        ]
+                        if config['LOG_VERBOSITY'] != "debug":
+                            args.extend([
+                                "--logging.local-writer.enable", "False",
+                                "--logging.profiler", "none"
+                            ])
+                        log.info(f"Resume training using --load-config: {dataset_config_path}")
                     else:
                         isp_mode = config.get('THREED_ISP', 'none').lower()
                         args.extend([
@@ -1431,12 +1533,19 @@ if __name__ == "__main__":
                     command = "ns-train"
 
                 auto_scale_value = "True" if config.get('PRESERVE_SCENE_SCALE', 'false') == 'false' else "False"
-                args.extend([
-                    data_model,
-                    "--data", config['DATASET_PATH'],
-                    "--downscale-factor", "1",
-                    "--auto-scale-poses", auto_scale_value
-                ])
+                # When resuming via --load-config the dataparser subcommand is already
+                # encoded in config.yml; re-specifying it causes ns-train to ignore the checkpoint.
+                is_splatfacto_resume = (
+                    config['RUN_RECON'] == "false" and
+                    config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc")
+                )
+                if not is_splatfacto_resume:
+                    args.extend([
+                        data_model,
+                        "--data", config['DATASET_PATH'],
+                        "--downscale-factor", "1",
+                        "--auto-scale-poses", auto_scale_value
+                    ])
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -1466,6 +1575,9 @@ if __name__ == "__main__":
                     "--data_factor", "1",
                     "--steps_scaler", str(steps_scaler),
                     "--disable_viewer",
+                    # "--packed",  # TODO: upstream gsplat bug - --packed causes cudaErrorIllegalAddress
+                    #              # with NCCL all_reduce in multi-GPU distributed training.
+                    #              # Re-enable once fixed: https://github.com/nerfstudio-project/gsplat/issues/910
                     "--eval_steps", str(int(config['MAX_STEPS'])),
                     "--data-dir", config['DATASET_PATH']
                 ]
@@ -1522,11 +1634,25 @@ if __name__ == "__main__":
                         threedgrut_ckpt_file = os.path.join(model_ckpt_path, "ckpt_last.pt")
                     
                     if os.path.exists(threedgrut_ckpt_file):
+                        # Read global_step from checkpoint so n_iterations = existing + new steps.
+                        # The trainer loops for n_epochs = ceil(n_iterations / dataset_size) and
+                        # skips steps where global_step >= n_iterations, so passing only
+                        # REFINE_STEPS_3DGRUT would make it stop immediately after loading.
+                        try:
+                            _ckpt = torch.load(threedgrut_ckpt_file, weights_only=False, map_location="cpu")
+                            _ckpt_global_step = int(_ckpt.get("global_step", 0))
+                            del _ckpt
+                        except Exception as _e:
+                            log.warning(f"Could not read global_step from checkpoint: {_e}. Defaulting to 0.")
+                            _ckpt_global_step = 0
+                        _total_iterations = _ckpt_global_step + REFINE_STEPS_3DGRUT
+                        log.info(f"3DGRUT resume: checkpoint global_step={_ckpt_global_step}, "
+                                 f"adding {REFINE_STEPS_3DGRUT} steps -> n_iterations={_total_iterations}")
                         args.extend([
                             f"experiment_name={RESUME_TRAIN_EXPERIMENT_NAME}",
                             f"resume={threedgrut_ckpt_file}",
-                            f"n_iterations={REFINE_STEPS_3DGRUT}",
-                            f"scheduler.positions.max_steps={REFINE_STEPS_3DGRUT}",
+                            f"n_iterations={_total_iterations}",
+                            f"scheduler.positions.max_steps={_total_iterations}",
                         ])
                     else:
                         log.error(f"3DGRUT checkpoint not found: {threedgrut_ckpt_file}")
@@ -1630,32 +1756,15 @@ if __name__ == "__main__":
                 else:
                     # Use correct output path for resume training
                     if config['RUN_RECON'] == "false":
-                        # Resume training - use config from dataset directory
-                        config_path = os.path.join(config['DATASET_PATH'], "config.yml")
-                        checkpoint_dir = os.path.join(config['DATASET_PATH'], 'nerfstudio_models')
-                        
-                        # Update config.yml to use absolute path only in LOCAL_DEBUG mode
-                        if LOCAL_DEBUG:
-                            try:
-                                with open(config_path, 'r') as f:
-                                    config_content = f.read()
-                                config_content = re.sub(
-                                    r'relative_model_dir: !!python/object/apply:pathlib\.PosixPath\s*\n\s*- nerfstudio_models',
-                                    f'relative_model_dir: !!python/object/apply:pathlib.PosixPath\n- {checkpoint_dir}',
-                                    config_content
-                                )
-                                with open(config_path, 'w') as f:
-                                    f.write(config_content)
-                                log.info(f"Updated config.yml to use absolute checkpoint path: {checkpoint_dir}")
-                            except Exception as e:
-                                log.warning(f"Failed to update config.yml: {e}")
+                        # Use the nerfstudio-generated config from outputs/ — it has the
+                        # correct load_dir pointing to train-stage-2/nerfstudio_models.
+                        config_path = f"outputs/unnamed/splatfacto/{RESUME_TRAIN_EXPERIMENT_NAME}/config.yml"
                         args = [
                             "gaussian-splat",
                             "--load-config", config_path,
                             "--output-dir", output_path
                         ]
                         log.info(f"Resume training export using config: {config_path}")
-                        log.info(f"Resume training export using checkpoint dir: {checkpoint_dir}")
                     else:
                         # Initial training - use config from outputs directory
                         config_path = f"outputs/unnamed/splatfacto/{TRAIN_EXPERIMENT_NAME}/config.yml"
@@ -1689,11 +1798,10 @@ if __name__ == "__main__":
             if config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
                 config['MODEL'] == "splatfacto-mcmc" or config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto-w-light":
                 if config['RUN_RECON'] == "false":
-                    # Resume training - use config from dataset directory for splatfacto models
+                    # Use the nerfstudio-generated config from outputs/ for all resume cases.
                     if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
-                        config_path = os.path.join(config['DATASET_PATH'], "config.yml")
+                        config_path = f"outputs/unnamed/splatfacto/{RESUME_TRAIN_EXPERIMENT_NAME}/config.yml"
                     else:
-                        # For splatfacto-w-light, use the train-stage-2 config from outputs
                         config_path = f"outputs/unnamed/splatfacto-w-light/{RESUME_TRAIN_EXPERIMENT_NAME}/config.yml"
                 else:
                     if config['MODEL'] == "splatfacto-w-light":
@@ -1756,10 +1864,7 @@ if __name__ == "__main__":
                 # Use correct output path for resume training
                 if config['RUN_RECON'] == "false":
                     train_stage = RESUME_TRAIN_EXPERIMENT_NAME
-                    if LOCAL_DEBUG:
-                        config_path = os.path.join(config['DATASET_PATH'], "config.yml")
-                    else:
-                        config_path = f"outputs/unnamed/{model}/{train_stage}/config.yml"
+                    config_path = f"outputs/unnamed/{model}/{train_stage}/config.yml"
                 else:
                     train_stage = TRAIN_EXPERIMENT_NAME
                     config_path = f"outputs/unnamed/{model}/{train_stage}/config.yml"
@@ -1767,7 +1872,7 @@ if __name__ == "__main__":
                     "interpolate",
                     "--load-config", config_path,
                     "--output-path", os.path.join(output_path, "render.mp4"),
-                    "--frame-rate", "10"
+                    "--frame-rate", "5" #10
                 ]
                 # Use wrapper for splatfacto-w-light
                 if config['MODEL'] == "splatfacto-w-light":
@@ -2019,27 +2124,23 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['MODEL'] != "nerfacto":
-            # Check if video was portrait
-            orientation_file = os.path.join(config['DATASET_PATH'], '.video_orientation')
-            is_portrait = os.path.exists(orientation_file)
-            
-            #if config['MODEL'] != "3dgut" or config['MODEL'] != "3dgrt":
-            rotation = '90,0,0' if not is_portrait else '270,0,90'
-            args = [
-                orig_ply_path,
-                orig_ply_path, 
-                f"--rotate={rotation}",
-                '-w'
-            ]
-            pipeline.create_component(
-                name="Ply-Rotation",
-                comp_type=ComponentType.POST_PROCESSING,
-                comp_environ=ComponentEnvironment.EXECUTABLE,
-                command="splat-transform",
-                args=args,
-                cwd=current_dir_path,
-                requires_gpu=False
-            )
+            if config['MODEL'] not in ("3dgut", "3dgrt"):
+                rotation = '90,0,0'
+                args = [
+                    orig_ply_path,
+                    orig_ply_path, 
+                    f"--rotate={rotation}",
+                    '-w'
+                ]
+                pipeline.create_component(
+                    name="Ply-Rotation",
+                    comp_type=ComponentType.POST_PROCESSING,
+                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                    command="splat-transform",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
     except Exception as e:
         error_message = f"Issue rotating PLY: {e}"
         pipeline.report_error(785, error_message)
@@ -2103,13 +2204,9 @@ if __name__ == "__main__":
     # Rotate PLY for SOG
     ##################################
     try:
-        if config['ENABLE_SOG'] == "true" and config['MODEL'] != "nerfacto" and \
-            config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
-                # Check if video was portrait
-                orientation_file = os.path.join(config['DATASET_PATH'], '.video_orientation')
-                is_portrait = os.path.exists(orientation_file)
-                
-                rotation = '90,0,0' if not is_portrait else '90,0,90'
+        if config['ENABLE_SOG'] == "true" and config['MODEL'] != "nerfacto":
+            if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
+                rotation = '90,0,0'
                 args = [
                     sog_ply_path,
                     sog_ply_path,
@@ -2286,12 +2383,10 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
-            # Check if video was portrait
-            orientation_file = os.path.join(config['DATASET_PATH'], '.video_orientation')
-            is_portrait = os.path.exists(orientation_file)
-            
-            #if config['MODEL'] != "3dgut" or config['MODEL'] != "3dgrt":
-            rotation = '270,0,0' if not is_portrait else '270,0,90'
+            if config['MODEL'] not in ("3dgut", "3dgrt"):
+                rotation = '270,0,0'
+            else:
+                rotation = '180,0,0'
             args = [
                 spz_ply_path,
                 spz_ply_path,
@@ -2325,7 +2420,7 @@ if __name__ == "__main__":
                 name="Ply-to-Spz",
                 comp_type=ComponentType.POST_PROCESSING,
                 comp_environ=ComponentEnvironment.EXECUTABLE,
-                command="ply_to_spz",#"splat_converter",
+                command="ply_to_spz",
                 args=args,
                 cwd=current_dir_path,
                 requires_gpu=False
@@ -2429,6 +2524,17 @@ if __name__ == "__main__":
                     )
                 elif last_phase is not None and not ddb_table_name:
                     log.debug(f"Skipping DynamoDB update for {last_phase} - no table name configured")
+
+                # Clear GPU cache when transitioning into TRAINING to free memory
+                # held by reconstruction (COLMAP/Glomap/MapAnything) or pre-processing
+                if component.comp_type == ComponentType.TRAINING and last_phase is not None:
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            log.info("Cleared GPU cache before training")
+                    except Exception:
+                        pass
                 
                 pipeline.session.comp_start_names.append(component.name)
                 phase_start_times[component.comp_type.name] = int(time.time())
@@ -2704,13 +2810,6 @@ if __name__ == "__main__":
                             os.makedirs(dest_dir, exist_ok=True)
                             shutil.copytree(src_dir, dest_dir, dirs_exist_ok=True)
                 case "Nerfstudio-Export":
-                    if config['RUN_RECON'] == "false" or config['RUN_TRAIN'] == "false":
-                        dataset_config_path = os.path.join(config['DATASET_PATH'], "config.yml")
-                        if os.path.exists(dataset_config_path):
-                            for j, arg in enumerate(component.args):
-                                if arg == "--load-config" or arg == "--load_config":
-                                    component.args[j + 1] = dataset_config_path
-                                    break
                     pipeline.run_component(i)
                     # Clean up CUDA memory after export
                     cleanup_cuda_memory()
@@ -2887,7 +2986,30 @@ if __name__ == "__main__":
                         except Exception as e:
                             log.warning(f"Could not read evaluation metrics: {e}")
                     elif component.name == "3DGRUT-Metrics":
-                        if hasattr(component, 'output') and component.output:
+                        # 3DGRUT render.py writes its own metrics.json under EVAL_METRIC_FOLDER
+                        # Find the most recently written metrics.json in any subdirectory
+                        threedgrut_metrics = None
+                        for metrics_file in sorted(Path(EVAL_METRIC_FOLDER).rglob("metrics.json")):
+                            try:
+                                with open(metrics_file, 'r') as f:
+                                    raw = json.load(f)
+                                # 3DGRUT format: {"mean_psnr": x, "mean_ssim": x, "mean_lpips": x, ...}
+                                if "mean_psnr" in raw:
+                                    threedgrut_metrics = {
+                                        "psnr": float(raw["mean_psnr"]),
+                                        "ssim": float(raw["mean_ssim"]),
+                                        "lpips": float(raw["mean_lpips"])
+                                    }
+                                    break
+                            except Exception as _e:
+                                log.warning(f"Could not read 3DGRUT metrics from {metrics_file}: {_e}")
+                        if threedgrut_metrics:
+                            os.makedirs(os.path.dirname(EVAL_METRIC_PATH), exist_ok=True)
+                            with open(EVAL_METRIC_PATH, 'w') as f:
+                                json.dump({"results": threedgrut_metrics}, f, indent=2)
+                            log.info(f"Evaluation Metrics - PSNR: {threedgrut_metrics['psnr']:.4f}, SSIM: {threedgrut_metrics['ssim']:.4f}, LPIPS: {threedgrut_metrics['lpips']:.4f}")
+                        elif hasattr(component, 'output') and component.output:
+                            # Fallback: parse from log output
                             parse_3dgrut_metrics_from_log(component.output, EVAL_METRIC_PATH)
                             if os.path.exists(EVAL_METRIC_PATH):
                                 with open(EVAL_METRIC_PATH, 'r') as f:

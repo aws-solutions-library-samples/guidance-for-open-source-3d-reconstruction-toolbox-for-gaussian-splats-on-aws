@@ -12,9 +12,17 @@ python -c "import numpy; print('Numpy version:', numpy.__version__); print('Nump
 python -c "import pycolmap; print('PyColmap location:', pycolmap.__file__)"
 echo "=== END DEBUG ==="
 
-# Enable CUDA debugging for better error messages
-export CUDA_LAUNCH_BLOCKING=1
-export TORCH_USE_CUDA_DSA=1
+# Derive GPU count from CUDA_VISIBLE_DEVICES if set, otherwise default to 1
+if [ -n "$CUDA_VISIBLE_DEVICES" ]; then
+    NUM_GPUS=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | wc -l)
+else
+    NUM_GPUS=1
+fi
 
-# Run gsplat trainer with gsplat's pycolmap in PYTHONPATH
+# gsplat's cli() reads WORLD_SIZE from env to determine how many workers to spawn via mp.spawn.
+# Unset RANK/LOCAL_RANK so spawned workers initialize their own rank assignments correctly.
+export WORLD_SIZE="$NUM_GPUS"
+unset RANK LOCAL_RANK
+
+# Run gsplat trainer directly with python - cli() in distributed.py handles mp.spawn internally.
 exec python /opt/ml/code/gsplat/examples/simple_trainer.py "$@"

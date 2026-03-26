@@ -75,14 +75,14 @@ from torchvision.transforms.functional import to_tensor, gaussian_blur, to_pil_i
 
 def preprocess_image(image_path, width, height, device):
     image = to_tensor((load_image(image_path)))
-    image = image.unsqueeze_(0).float() * 2 - 1 # [0,1] --> [-1,1]
+    image = image.unsqueeze_(0).float() * 2 - 1  # [0,1] --> [-1,1]
     if image.shape[1] != 3:
         image = image.expand(-1, 3, -1, -1)
     image = Functional.interpolate(image, (1024, 1024))
-    image = image.to(dtype).to(device)
+    image = image.to(device)
     return image
 
-def preprocess_mask(mask_path, width, height, device, save_refined=False, refined_dir=None, filename=None):
+def preprocess_mask(mask_path, width, height, device, dtype, save_refined=False, refined_dir=None, filename=None):
     # Load mask - convert RGBA to RGB first, then to grayscale
     mask_img = Image.open(mask_path)
     
@@ -280,7 +280,7 @@ def process_single_image(image_file, mask_path, args, pipeline, device, dtype, r
         source_image = preprocess_image(input_path, width, height, device)
         
         # Always create the refined mask
-        mask = preprocess_mask(mask_path, width, height, device, save_refined=True, refined_dir=refined_mask_dir, filename=os.path.basename(mask_path))
+        mask = preprocess_mask(mask_path, width, height, device, dtype, save_refined=True, refined_dir=refined_mask_dir, filename=os.path.basename(mask_path))
 
         # Check if mask is black after preprocessing - skip AttentiveEraser but keep refined mask
         mask_max = torch.max(mask).item() if mask is not None else 0
@@ -310,7 +310,7 @@ def run_attentive_eraser(source_image, mask, args, pipeline, generator, height, 
     strength = 0.9
     num_inference_steps = 75
     END_STEP = int(strength * num_inference_steps)
-    
+
     if args.method == "DIP":
         start_code, latents_list = pipeline.invert(
             source_image, "", generator=generator, guidance_scale=1,
@@ -340,14 +340,14 @@ def apply_blending(source_image, mask, result_image, orig_width, orig_height, de
     img_redder = make_redder(img_tensor, mask_red)
     pil_mask = to_pil_image(mask.squeeze(0))
     mask_blurred = to_tensor(pil_mask).unsqueeze_(0).to(mask.device)
-    mask_f = 1-(1-mask)*(1-mask_blurred)
-    
+    mask_f = 1 - (1 - mask) * (1 - mask_blurred)
+
     image_1 = result_image.unsqueeze(0)
     out_tile = mask_f * image_1 + (1 - mask_f) * (source_image * 0.5 + 0.5)
-    
+
     if orig_width != 1024 or orig_height != 1024:
         out_tile = Functional.interpolate(out_tile, (orig_height, orig_width), mode='bicubic', align_corners=False)
-    
+
     return out_tile
 
 def save_difference_image(input_path, final_image, output_dir, base_name, ext, orig_width, orig_height, device):
@@ -465,7 +465,6 @@ if __name__ == '__main__':
         )
         pipeline.to(device)
         pipeline.enable_attention_slicing()
-        pipeline.enable_model_cpu_offload()
 
         # Pre-filter images that have valid, non-empty masks
         valid_image_mask_pairs = []

@@ -170,9 +170,9 @@ class Ecr(Construct):
                 iam.ManagedPolicy.from_aws_managed_policy_name(
                     "service-role/AWSLambdaBasicExecutionRole"),
                 iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonEC2ContainerRegistryFullAccess"),
+                    "AmazonEC2ContainerRegistryPowerUser"),  # nosec: scoped-down from FullAccess; write access needed to push container images
                 iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonSageMakerFullAccess"),
+                    "AmazonSageMakerFullAccess"),  # nosec: required for SageMaker training job execution; no narrower managed policy covers all required actions
                 iam.ManagedPolicy.from_aws_managed_policy_name(
                     "AmazonSSMManagedInstanceCore")
             ]

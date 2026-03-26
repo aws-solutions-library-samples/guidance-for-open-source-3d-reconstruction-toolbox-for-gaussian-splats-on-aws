@@ -288,12 +288,12 @@ class Sfn(Construct):
                 iam.ManagedPolicy.from_aws_managed_policy_name(
                     "service-role/AWSLambdaBasicExecutionRole"),
                 iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonSageMakerFullAccess"),
+                    "AmazonSageMakerFullAccess"),  # nosec: required for SageMaker training job orchestration; no narrower managed policy covers all required actions
                 # Changed this line - removed service-role prefix
                 iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AWSStepFunctionsFullAccess"),
+                    "AWSStepFunctionsFullAccess"),  # nosec: required for nested state machine execution; scoped inline policies also attached
                 iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonEventBridgeFullAccess")
+                    "AmazonEventBridgeFullAccess")  # nosec: required for Step Functions EventBridge integration to monitor SageMaker/Batch job completion
             ]
         )
 

@@ -94,8 +94,8 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
                             original_filename = parent_job['originalMediaFilename']
                         elif 's3' in parent_job and 'inputKey' in parent_job['s3']:
                             original_filename = parent_job['s3']['inputKey'].split('/')[-1]
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Warning: could not retrieve parent job filename: {e}")
         
         # Final fallback
         if not original_filename or original_filename == 'model.tar.gz':
@@ -132,7 +132,9 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
                     }
                 }),
                 "enableEnhancedFeatureExtraction": str(selected_job.get('enableEnhancedFeatureExtraction', shared_state.enhanced_feature)) == "True",
-                "matchingMethod": str(selected_job.get('matchingMethod', shared_state.matching_method))
+                "matchingMethod": str(selected_job.get('matchingMethod', shared_state.matching_method)),
+                "enableFlHeuristic": str(selected_job.get('reconstruction', {}).get('enableFlHeuristic', selected_job.get('enableFlHeuristic', 'false'))).lower() == 'true',
+                "flHeuristicValue": str(selected_job.get('reconstruction', {}).get('flHeuristicValue', selected_job.get('flHeuristicValue', '1.1')))
             },
             "training": {
                 "enable": True,

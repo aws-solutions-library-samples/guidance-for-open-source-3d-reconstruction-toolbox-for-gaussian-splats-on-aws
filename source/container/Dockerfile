@@ -460,11 +460,7 @@ COPY ./src/pipeline/reconstruction/run_map_anything.py                          
 COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py                            ${CODE_PATH}/training
 COPY ./src/pipeline/training/run_gsplat_trainer.sh                                  ${CODE_PATH}/training
 RUN chmod +x ${CODE_PATH}/training/run_gsplat_trainer.sh
-# Use upstream COLMAP panorama_sfm.py directly from the repo
-RUN wget -O ${CODE_PATH}/spherical/panorama_sfm.py \
-    https://raw.githubusercontent.com/colmap/colmap/main/python/examples/panorama_sfm.py \
-    && sed -i 's/loop_detection=True/loop_detection=True, vocab_tree_path="\/opt\/ml\/code\/vocab_tree_flickr100K_words32K.bin"/' \
-       ${CODE_PATH}/spherical/panorama_sfm.py
+COPY ./src/pipeline/reconstruction/spherical/panorama_sfm.py                        ${CODE_PATH}/spherical
 COPY ./src/pipeline/pre_processing/segmentation/remove_object_using_mask.py         ${CODE_PATH}/pre_processing/segmentation
 COPY ./src/pipeline/pre_processing/segmentation/remove_background.py                ${CODE_PATH}/pre_processing/segmentation
 COPY ./src/pipeline/pre_processing/segmentation/erase_object_using_mask.py          ${CODE_PATH}/pre_processing/segmentation

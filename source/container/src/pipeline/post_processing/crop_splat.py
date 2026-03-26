@@ -60,7 +60,7 @@ def main():
     
     # Run extract_center_cube.py
     cmd1 = [
-        'python', os.path.join(script_dir, 'extract_center_cube.py'),
+        sys.executable, os.path.join(script_dir, 'extract_center_cube.py'),
         args.input_path, intermediate_output,
         '--method', 'std',
         '--std-multiplier', '3.0' # Higher value = less crop, expand bounding box
@@ -75,7 +75,7 @@ def main():
             # Run refine_center_object.py for rigid body mode
             logging.info("Running refine_center_object.py for rigid body refinement")
             cmd2 = [
-                'python', os.path.join(script_dir, 'refine_center_object.py'),
+                sys.executable, os.path.join(script_dir, 'refine_center_object.py'),
                 intermediate_output, final_output,
                 '--method', 'density_percentile',
                 '--percentile', '89',

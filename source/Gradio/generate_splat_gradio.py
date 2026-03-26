@@ -50,7 +50,7 @@ class SharedState:
     def __init__(self):
         # !!! vvv COMPLETE BELOW vvv !!!
         self.aws_region = "us-east-1"
-        self.stack_unique_id = ""
+        self.stack_unique_id = "vtmxcr"
         # !!! ^^^ COMPLETE ABOVE ^^^ !!!
         self.stack_unique_id = os.environ.get('STACK_UNIQUE_ID', self.stack_unique_id)
         self.s3_bucket = f"3dgs-bucket-{self.stack_unique_id}"
@@ -98,6 +98,8 @@ class SharedState:
         self.video_stop_time = None
         self.preserve_scene_scale = "false"
         self.isp_3d = "none"
+        self.enable_fl_heuristic = "false"
+        self.fl_heuristic_value = 1.1
 
 # Create a singleton instance
 shared_state = SharedState()
@@ -353,7 +355,9 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
                 }
             },
             "enableEnhancedFeatureExtraction": enhanced_feature == "true",
-            "matchingMethod": matching_method
+            "matchingMethod": matching_method,
+            "enableFlHeuristic": shared_state.enable_fl_heuristic == "true",
+            "flHeuristicValue": str(shared_state.fl_heuristic_value)
         },
         "training": {
             "enable": training_enable == "true",
@@ -475,7 +479,9 @@ def generate_splat(s3_bucket_name, s3_input_prefix, s3_output_prefix, file_obj,
                     }
                 },
                 "enableEnhancedFeatureExtraction": enhanced_feature == "true",
-                "matchingMethod": matching_method
+                "matchingMethod": matching_method,
+                "enableFlHeuristic": shared_state.enable_fl_heuristic == "true",
+                "flHeuristicValue": str(shared_state.fl_heuristic_value)
             },
             "training": {
                 "enable": training_enable == "true",
@@ -627,7 +633,9 @@ def create_upload_aws_tab():
                                     }
                                 },
                                 "enableEnhancedFeatureExtraction": shared_state.enhanced_feature == "true",
-                                "matchingMethod": shared_state.matching_method
+                                "matchingMethod": shared_state.matching_method,
+                                "enableFlHeuristic": shared_state.enable_fl_heuristic == "true",
+                                "flHeuristicValue": str(shared_state.fl_heuristic_value)
                             },
                             "training": {
                                 "enable": shared_state.training_enable == "true",
@@ -893,6 +901,19 @@ def create_advanced_settings_tab():
                     choices=["sequential", "exhaustive", "vocab", "spatial"],
                     value="sequential"
                 )
+                enable_fl_heuristic = gr.Radio(
+                    label="Enable Focal Length Heuristic",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Enable focal length heuristic for approximating focal length for reconstruction"
+                )
+                fl_heuristic_value = gr.Number(
+                    label="Focal Length Heuristic Value",
+                    value=1.1,
+                    minimum=0.1,
+                    maximum=10.0,
+                    info="Focal length heuristic multiplier (default: 1.1)"
+                )
             with gr.Column():
                 gr.Markdown("### Pose Priors-Colmap")
                 use_colmap_model = gr.Radio(
@@ -1045,7 +1066,8 @@ def create_advanced_settings_tab():
                      shared_state.spherical_enable,
                      shared_state.remove_bg, shared_state.remove_objects,
                      shared_state.object_removal_action, shared_state.objects_to_remove, shared_state.source_coordinate, shared_state.pose_world_to_cam,
-                     shared_state.log_verbosity, shared_state.mask_threshold, shared_state.ply_coords, shared_state.spz_coords, shared_state.sog_coords, shared_state.usdz_coords, shared_state.preserve_scene_scale, shared_state.isp_3d) = args
+                     shared_state.log_verbosity, shared_state.mask_threshold, shared_state.ply_coords, shared_state.spz_coords, shared_state.sog_coords, shared_state.usdz_coords, shared_state.preserve_scene_scale, shared_state.isp_3d,
+                     shared_state.enable_fl_heuristic, shared_state.fl_heuristic_value) = args
                     return "Advanced settings updated"
 
                 # Get all advanced settings components after they're defined
@@ -1057,7 +1079,8 @@ def create_advanced_settings_tab():
                     crop_output_bounds, crop_mode, clean_splat,
                     spherical_enable, remove_bg, remove_objects,
                     object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam,
-                    log_verbosity, mask_threshold, ply_coords, spz_coords, sog_coords, usdz_coords, preserve_scene_scale, isp_3d
+                    log_verbosity, mask_threshold, ply_coords, spz_coords, sog_coords, usdz_coords, preserve_scene_scale, isp_3d,
+                    enable_fl_heuristic, fl_heuristic_value
                 ]
                 
                 def save_configuration(config_name, *settings):
@@ -1100,7 +1123,9 @@ def create_advanced_settings_tab():
                         'sog_coords': settings[32],
                         'usdz_coords': settings[33],
                         'preserve_scene_scale': settings[34],
-                        'isp_3d': settings[35]
+                        'isp_3d': settings[35],
+                        'enable_fl_heuristic': settings[36],
+                        'fl_heuristic_value': settings[37]
                     }
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -1170,6 +1195,8 @@ def create_advanced_settings_tab():
                         shared_state.usdz_coords = config_data.get('usdz_coords', 'rhyu')
                         shared_state.preserve_scene_scale = config_data.get('preserve_scene_scale', 'false')
                         shared_state.isp_3d = config_data.get('isp_3d', 'none')
+                        shared_state.enable_fl_heuristic = config_data.get('enable_fl_heuristic', 'false')
+                        shared_state.fl_heuristic_value = config_data.get('fl_heuristic_value', 1.1)
                         
                         return [
                             f"Configuration '{config_name}' loaded successfully",
@@ -1208,10 +1235,12 @@ def create_advanced_settings_tab():
                             config_data.get('sog_coords', 'rhyu'),
                             config_data.get('usdz_coords', 'rhyu'),
                             config_data.get('preserve_scene_scale', 'false'),
-                            config_data.get('isp_3d', 'none')
+                            config_data.get('isp_3d', 'none'),
+                            config_data.get('enable_fl_heuristic', 'false'),
+                            config_data.get('fl_heuristic_value', 1.1)
                         ]
                     except Exception as e:
-                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(35)]
+                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(37)]
                 
                 # Wire up save/load buttons
                 save_config_btn.click(
@@ -2453,8 +2482,8 @@ def get_job_progress_data():
                                 media_filename = str(parent_item['s3']['inputKey']).split('/')[-1]
                             elif 'inputKey' in parent_item:
                                 media_filename = str(parent_item['inputKey']).split('/')[-1]
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"Warning: could not retrieve parent job filename: {e}")
             elif 's3' in item and 'inputKey' in item['s3']:
                 s3_key = str(item['s3']['inputKey'])
                 media_filename = s3_key.split('/')[-1]

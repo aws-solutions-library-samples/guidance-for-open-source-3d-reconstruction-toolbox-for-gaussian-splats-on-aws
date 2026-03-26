@@ -872,39 +872,39 @@ def print_container_version_info():
             print(f"  CUDA: {cuda_version}")
         else:
             print("  CUDA: Not found")
-    except:
-        print("  CUDA: Not found")
+    except Exception as e:
+        print(f"  CUDA: Not found ({e})")
     
     try:
         print(f"  PyTorch: {torch.__version__}")
-    except:
-        print("  PyTorch: Not found")
+    except Exception as e:
+        print(f"  PyTorch: Not found ({e})")
     
     try:
         print(f"  TorchVision: {torchvision.__version__}")
-    except:
-        print("  TorchVision: Not found")
+    except Exception as e:
+        print(f"  TorchVision: Not found ({e})")
     
     try:
         if torch.cuda.is_available():
             vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
             print(f"  GPU: {torch.cuda.get_device_name()} ({vram:.2f}GB VRAM)")
-    except:
-        pass
+    except Exception as e:
+        print(f"  GPU: Not available ({e})")
     
     try:
         with open('/proc/meminfo', 'r') as f:
             meminfo = f.read()
             mem_total = int([line for line in meminfo.split('\n') if 'MemTotal' in line][0].split()[1]) / 1024**2
             print(f"  System RAM: {mem_total:.2f}GB")
-    except:
-        pass
+    except Exception as e:
+        print(f"  System RAM: Not available ({e})")
     
     try:
         shm_result = subprocess.check_output(['df', '-h', '/dev/shm']).decode().split('\n')[1].split()
         print(f"  Shared memory (/dev/shm): Size={shm_result[1]}, Used={shm_result[2]}, Available={shm_result[3]}")
-    except:
-        pass
+    except Exception as e:
+        print(f"  Shared memory: Not available ({e})")
     
     print(f"  Execution mode: {'AWS Batch' if 'AWS_BATCH_JOB_ID' in os.environ else 'SageMaker'}")
     
@@ -914,8 +914,8 @@ def print_container_version_info():
         try:
             ulimit_result = subprocess.check_output(['/bin/bash', '-c', 'ulimit -a']).decode()
             print(f"  Resource limits:\n{ulimit_result}")
-        except:
-            pass
+        except Exception as e:
+            print(f"  Resource limits: Not available ({e})")
     
     try:
         result = subprocess.run(['colmap', '-h'], capture_output=True, text=True)
@@ -924,8 +924,8 @@ def print_container_version_info():
             print(f"  COLMAP: {colmap_version}")
         else:
             print("  COLMAP: Not found")
-    except:
-        print("  COLMAP: Not found")
+    except Exception as e:
+        print(f"  COLMAP: Not found ({e})")
     
     try:
         result = subprocess.run(['glomap', '-h'], capture_output=True, text=True)
@@ -934,13 +934,13 @@ def print_container_version_info():
             print(f"  Glomap: {glomap_version}")
         else:
             print("  Glomap: Not found")
-    except:
-        print("  Glomap: Not found")
+    except Exception as e:
+        print(f"  Glomap: Not found ({e})")
     
     try:
         print(f"  pycolmap: {pycolmap.__version__}")
-    except:
-        print(f"  pycolmap: Not available")
+    except Exception as e:
+        print(f"  pycolmap: Not available ({e})")
     
     print("=== END VERSION INFORMATION ===")
     print()
@@ -1055,14 +1055,14 @@ def parse_3dgrut_metrics_from_log(log_output, output_json_path):
     
     metrics = {'psnr': 0.0, 'ssim': 0.0, 'lpips': 0.0}
     
-    # Parse from table format: │ 0.053     │ 0.963     │ 31.632     │
-    # 3DGRUT render.py outputs columns in order: mean_lpips | mean_ssim | mean_psnr
+    # Parse from table format: │ 22.387 │ 0.643 │ 0.379 │ ...
+    # 3DGRUT render.py outputs columns in order: mean_psnr | mean_ssim | mean_lpips
     table_match = re.search(r'│\s*([0-9.]+)\s*│\s*([0-9.]+)\s*│\s*([0-9.]+)\s*│', log_output)
     
     if table_match:
-        metrics['lpips'] = float(table_match.group(1))
+        metrics['psnr'] = float(table_match.group(1))
         metrics['ssim'] = float(table_match.group(2))
-        metrics['psnr'] = float(table_match.group(3))
+        metrics['lpips'] = float(table_match.group(3))
     
     # Only save if at least one metric was found
     if any(v > 0 for v in metrics.values()):
