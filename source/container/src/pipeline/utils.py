@@ -17,10 +17,11 @@
 # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY
-#
-# This file serves as the utilities that are used in the container image for
-# creating splats using NerfStudio, GSplat, Colmap, etc
 
+"""
+This file serves as the utilities that are used in the container image for
+creating splats using NerfStudio, GSplat, Colmap, etc
+"""
 
 import os
 import shutil

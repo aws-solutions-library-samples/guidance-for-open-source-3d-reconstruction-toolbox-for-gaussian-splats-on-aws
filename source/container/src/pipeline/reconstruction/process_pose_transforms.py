@@ -590,16 +590,12 @@ def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
         # Connect to the COLMAP database
         conn = sqlite3.connect(colmap_db_path)
         cursor = conn.cursor()
-        
+
         # First, clear any existing pose priors
-        cursor.execute(
-            """
-            DELETE FROM pose_priors
-            """
-        )
-        #cursor.execute("DELETE FROM pose_priors")
-        
+        cursor.execute("DELETE FROM pose_priors")
+
         # Update the pose_priors table with the pose information
+        # COLMAP 4.x schema: primary key is image_name (text)
         for image_id, pose_data in image_poses.items():
             # Get translation
             tx, ty, tz = pose_data['translation']
@@ -629,23 +625,20 @@ def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
             position_blob = position.tobytes()
             
             # Create a default identity covariance matrix (low uncertainty)
-            # Small values indicate high confidence in the pose
             covariance = np.eye(3, dtype=np.float64) * 0.01
             covariance_blob = covariance.tobytes()
             
             # Use coordinate system 1 (COLMAP world coordinate system)
             coordinate_system = 1
-            
-            # Insert into pose_priors table using parameterized query
+
             cursor.execute("""
-                INSERT OR REPLACE INTO pose_priors 
-                (image_id, position, coordinate_system, position_covariance)
+                INSERT OR REPLACE INTO pose_priors
+                (image_name, position, coordinate_system, position_covariance)
                 VALUES (?, ?, ?, ?)
-            """, (image_id, position_blob, coordinate_system, covariance_blob))
-            
-            # Check if the insert was successful
+            """, (pose_data['name'], position_blob, coordinate_system, covariance_blob))  # nosemgrep
+
             if cursor.rowcount == 0:
-                print("Warning: Failed to insert pose prior for image ID", image_id)
+                print("Warning: Failed to insert pose prior for image", pose_data['name'])
         
         # Commit changes and close connection
         conn.commit()

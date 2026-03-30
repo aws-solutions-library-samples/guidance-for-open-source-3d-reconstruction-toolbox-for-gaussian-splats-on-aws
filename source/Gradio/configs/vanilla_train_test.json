@@ -13,13 +13,13 @@
   "use_colmap_model": "false",
   "use_transform_json": "false",
   "training_enable": "true",
-  "max_steps": 15000,
+  "max_steps": 30000,
   "enable_spz": "true",
   "enable_sog": "true",
-  "enable_usdz": "true",
+  "enable_usdz": "false",
   "crop_output_bounds": "true",
   "crop_mode": "rigid_body",
-  "clean_splat": "true",
+  "clean_splat": "false",
   "spherical_enable": "false",
   "remove_bg": "false",
   "remove_objects": "false",
@@ -33,5 +33,8 @@
   "spz_coords": "rhyu",
   "sog_coords": "rhyu",
   "usdz_coords": "rhyu",
-  "preserve_scene_scale": "false"
+  "preserve_scene_scale": "false",
+  "isp_3d": "bilagrid",
+  "enable_fl_heuristic": "false",
+  "fl_heuristic_value": 1.1
 }

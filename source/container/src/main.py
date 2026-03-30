@@ -27,9 +27,9 @@ It uses a pipeline class to create and configure a pipeline containing a
 list of components (each containing a script command with parameters). Each
 pipeline component will get executed sequentially and there can be infinite
 amount of components that can be chained together. The component types can be
-loader, filter, transform, renderer, or exporter based on the component function use.
+pre-processing, reconstruction, training, or post-processing based on the component function use.
 The scripts for components are ordered by task type under the pipeline directory
-such as image_processing, segmentation, post_processing
+such as post_processing, training, etc.
 
 Component Types = ['PRE_PROCESSING', 'RECONSTRUCTION', 'TRAINING', 'POST_PROCESSING']
 Component Environments = ['EXECUTABLE', 'PYTHON']
@@ -1489,9 +1489,15 @@ if __name__ == "__main__":
                         "--max-num-iterations", str(int(config['MAX_STEPS']))
                     ])
                         if isp_mode == "bilagrid":
+                            #if config['MODEL'] == "splatfacto-mcmc":
+                            #    log.info("Bilateral-Grid is not compatible with splatfacto-mcmc (causes MCMC relocation crash), ignoring ISP mode")
+                            #else:
                             args.extend(["--pipeline.model.use-bilateral-grid", "True"])
                         elif isp_mode == "ppisp":
                             log.info("PPISP not currently supported with Splatfacto, using Bilateral-Grid instead")
+                            #if config['MODEL'] == "splatfacto-mcmc":
+                            #    log.info("Bilateral-Grid is not compatible with splatfacto-mcmc (causes MCMC relocation crash), ignoring ISP mode")
+                            #else:
                             args.extend(["--pipeline.model.use-bilateral-grid", "True"])
                             #args.extend(["--pipeline.model.use-ppisp", "True"])
                 elif config['MODEL'] == "splatfacto-w-light":

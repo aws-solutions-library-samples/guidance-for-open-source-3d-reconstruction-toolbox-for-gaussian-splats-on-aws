@@ -18,12 +18,14 @@
 # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY
-#
-# This file serves as the utility to convert coordinate systems from one system to another
-# right-hand, y-up (rhyu) - gradio.Model3D,playcanvas,three.js,webgl,godot
-# left-hand, y-up (lhyu) - Babylon.js, Unity
-# right-hand, z-up (rhzu) - Blender
-# left-hand, z-up (lhzu) - Unreal
+
+"""
+This file serves as the utility to convert coordinate systems from one system to another
+right-hand, y-up (rhyu) - gradio.Model3D,playcanvas,three.js,webgl,godot
+left-hand, y-up (lhyu) - Babylon.js, Unity
+right-hand, z-up (rhzu) - Blender
+left-hand, z-up (lhzu) - Unreal
+"""
 
 import sys
 import argparse

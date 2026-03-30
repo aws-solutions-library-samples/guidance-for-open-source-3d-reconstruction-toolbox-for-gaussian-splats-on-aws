@@ -406,32 +406,28 @@ def _apply_object_removal(args, image_dir: Path) -> None:
                 if target.exists():
                     shutil.rmtree(target)
                 shutil.copytree(subfolder, target)
-    else:  # erase — copy non-black erased images then resize all to match
+    else:  # erase — copy inpainted images then resize all to match
         for subfolder in mask_human_output_dir.iterdir():
             if not (subfolder.is_dir() and subfolder.name.startswith("pano_camera")):
                 continue
             target_dir = image_dir / subfolder.name
-            refined_dir = subfolder / "refined_masks"
-            if refined_dir.exists():
-                for img_file in refined_dir.iterdir():
-                    if img_file.is_file() and img_file.suffix.lower() in (".png", ".jpg", ".jpeg"):
-                        img = cv2.imread(str(img_file))
-                        if img is not None and np.max(img) > 10:
-                            cv2.imwrite(str(target_dir / img_file.name), img)
-                logging.info(f"Copied non-black erased images into {subfolder.name}")
-
-        # Resize ALL perspective images to 960x960 to match eraser output dimensions
-        for subfolder in image_dir.iterdir():
-            if not (subfolder.is_dir() and subfolder.name.startswith("pano_camera")):
-                continue
+            # Inpainted images are written to the eraser output root (not refined_masks)
             for img_file in subfolder.iterdir():
                 if not (img_file.is_file() and img_file.suffix.lower() in (".png", ".jpg", ".jpeg")):
                     continue
                 img = cv2.imread(str(img_file))
-                if img is not None and (img.shape[0] != 960 or img.shape[1] != 960):
-                    cv2.imwrite(str(img_file),
-                                cv2.resize(img, (960, 960), interpolation=cv2.INTER_LANCZOS4))
-            logging.info(f"Resized all images to 960x960 in {subfolder.name}")
+                if img is not None and np.max(img) > 10:
+                    # Match to original filename in target_dir by stem
+                    target_file = target_dir / img_file.name
+                    if not target_file.exists():
+                        # Try matching by stem with different extension
+                        for ext in (".jpg", ".jpeg", ".png"):
+                            candidate = target_dir / (img_file.stem + ext)
+                            if candidate.exists():
+                                target_file = candidate
+                                break
+                    cv2.imwrite(str(target_file), img)
+            logging.info(f"Copied non-black erased images into {subfolder.name}")
 
         # Resize ALL perspective images to 960x960 to match eraser output dimensions
         for subfolder in image_dir.iterdir():

@@ -265,13 +265,11 @@ RUN mkdir -p /opt/splatfacto_w_env \
     && pip install --target=/opt/splatfacto_w_env --upgrade git+https://github.com/KevinXu02/splatfacto-w
 
 # Copy and make wrapper scripts executable
-COPY src/pipeline/training/run_splatfacto_w_wrapper.sh /opt/ml/code/training/run_splatfacto_w_wrapper.sh
 COPY src/pipeline/training/run_splatfacto_w_wrapper.py /opt/ml/code/training/run_splatfacto_w_wrapper.py
 COPY src/pipeline/training/run_splatfacto_w_export.py /opt/ml/code/training/run_splatfacto_w_export.py
 COPY src/pipeline/training/run_splatfacto_w_eval.py /opt/ml/code/training/run_splatfacto_w_eval.py
 COPY src/pipeline/training/run_splatfacto_w_render.py /opt/ml/code/training/run_splatfacto_w_render.py
-RUN chmod +x /opt/ml/code/training/run_splatfacto_w_wrapper.sh \
-    /opt/ml/code/training/run_splatfacto_w_wrapper.py \
+RUN chmod +x /opt/ml/code/training/run_splatfacto_w_wrapper.py \
     /opt/ml/code/training/run_splatfacto_w_export.py \
     /opt/ml/code/training/run_splatfacto_w_eval.py \
     /opt/ml/code/training/run_splatfacto_w_render.py
@@ -464,9 +462,7 @@ COPY ./src/pipeline/reconstruction/spherical/panorama_sfm.py                    
 COPY ./src/pipeline/pre_processing/segmentation/remove_object_using_mask.py         ${CODE_PATH}/pre_processing/segmentation
 COPY ./src/pipeline/pre_processing/segmentation/remove_background.py                ${CODE_PATH}/pre_processing/segmentation
 COPY ./src/pipeline/pre_processing/segmentation/erase_object_using_mask.py          ${CODE_PATH}/pre_processing/segmentation
-COPY ./src/pipeline/pre_processing/segmentation/generate_masks_from_filtered.py     ${CODE_PATH}/pre_processing/segmentation
 COPY ./src/pipeline/pre_processing/segmentation/remove_background_sam2.py           ${CODE_PATH}/sam
-COPY ./src/pipeline/pre_processing/video/filter_blurry_images.py                    ${CODE_PATH}/pre_processing/video
 COPY ./src/pipeline/pre_processing/video/simple_video_to_images.py                  ${CODE_PATH}/pre_processing/video
 COPY ./src/pipeline/pre_processing/video/sharp_video_to_images.py                   ${CODE_PATH}/pre_processing/video
 COPY ./src/pipeline/pre_processing/video/rotate_portrait_images.py                  ${CODE_PATH}/pre_processing/video

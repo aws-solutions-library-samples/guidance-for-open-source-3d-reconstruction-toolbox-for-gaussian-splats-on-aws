@@ -19,6 +19,17 @@
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY
 
+"""
+Crops the bounding box of a 3D Gaussian Splat using either rigid body or environment mode.
+The process involves:
+1. Extracting a center cube using standard deviation thresholding
+2. Refining the center for rigid body mode using density percentile method
+3. Saving the final cropped PLY file
+
+Usage:
+    python crop_splat.py <input_ply> <output_ply> --mode <rigid_body|environment>
+"""
+
 import argparse
 import subprocess
 import sys

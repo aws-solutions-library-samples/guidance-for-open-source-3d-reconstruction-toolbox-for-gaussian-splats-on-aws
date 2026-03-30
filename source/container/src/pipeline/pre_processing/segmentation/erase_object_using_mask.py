@@ -123,12 +123,12 @@ def preprocess_mask(mask_path, width, height, device, dtype, save_refined=False,
     
     num_labels, labels = cv2.connectedComponents(binary_mask)
     if num_labels > 1:  # If there are any components
-        min_blob_size = 1000  # Minimum pixels for a valid blob
+        min_blob_size = 500   # Minimum pixels for a valid blob
         valid_components = []
         
         # Calculate total image area and min required percentage
         total_pixels = mask_np.shape[0] * mask_np.shape[1]
-        min_area_percentage = 0.01  # 1% of image area minimum
+        min_area_percentage = 0.002  # 0.2% of image area minimum (lowered for panorama perspective crops)
         min_required_pixels = int(total_pixels * min_area_percentage)
         
         for i in range(1, num_labels):
@@ -157,7 +157,7 @@ def preprocess_mask(mask_path, width, height, device, dtype, save_refined=False,
         # Check if single blob meets minimum size requirement
         total_pixels = mask_np.shape[0] * mask_np.shape[1]
         mask_pixels = np.count_nonzero(mask_smooth > 0.1)
-        min_area_percentage = 0.02
+        min_area_percentage = 0.002
         min_required_pixels = int(total_pixels * min_area_percentage)
         
         if mask_pixels >= min_required_pixels:
@@ -311,39 +311,53 @@ def run_attentive_eraser(source_image, mask, args, pipeline, generator, height, 
     num_inference_steps = 75
     END_STEP = int(strength * num_inference_steps)
 
+    # Pipeline is float16 and expects [0,1] range.
+    # source_image is float32 in [-1,1] - convert and cast for pipeline input.
+    # Keep original float32 [-1,1] version for apply_blending.
+    source_fp16 = ((source_image * 0.5 + 0.5).clamp(0, 1)).half()
+    mask_fp16 = mask.half()
+
     if args.method == "DIP":
-        start_code, latents_list = pipeline.invert(
-            source_image, "", generator=generator, guidance_scale=1,
-            num_inference_steps=END_STEP, return_intermediates=True
-        )
-        return pipeline(
-            prompt="", image=source_image, latents=start_code, mask_image=mask,
-            height=height, width=width, AAS=True, strength=strength,
-            rm_guidance_scale=9, ss_steps=9, ss_scale=0.3, AAS_start_step=0,
-            AAS_start_layer=34, AAS_end_layer=70, num_inference_steps=num_inference_steps,
-            x0_latents=latents_list[0], record_list=list(reversed(latents_list)),
-            generator=generator, guidance_scale=1, output_type='pt'
-        ).images[0]
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            start_code, latents_list = pipeline.invert(
+                source_fp16, "", generator=generator, guidance_scale=1,
+                num_inference_steps=END_STEP, return_intermediates=True
+            )
+            return pipeline(
+                prompt="", image=source_fp16, latents=start_code, mask_image=mask_fp16,
+                height=height, width=width, AAS=True, strength=strength,
+                rm_guidance_scale=9, ss_steps=9, ss_scale=0.3, AAS_start_step=0,
+                AAS_start_layer=34, AAS_end_layer=70, num_inference_steps=num_inference_steps,
+                x0_latents=latents_list[0], record_list=list(reversed(latents_list)),
+                generator=generator, guidance_scale=1, output_type='pt'
+            ).images[0]
     else:
-        return pipeline(
-            prompt="", image=source_image, mask_image=mask, height=height, width=width,
-            AAS=True, strength=strength, rm_guidance_scale=9, ss_steps=9, ss_scale=0.3,
-            AAS_start_step=0, AAS_start_layer=34, AAS_end_layer=70,
-            num_inference_steps=num_inference_steps, generator=generator,
-            guidance_scale=1, output_type='pt'
-        ).images[0]
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            return pipeline(
+                prompt="", image=source_fp16, mask_image=mask_fp16, height=height, width=width,
+                AAS=True, strength=strength, rm_guidance_scale=9, ss_steps=9, ss_scale=0.3,
+                AAS_start_step=0, AAS_start_layer=34, AAS_end_layer=70,
+                num_inference_steps=num_inference_steps, generator=generator,
+                guidance_scale=1, output_type='pt'
+            ).images[0]
 
 def apply_blending(source_image, mask, result_image, orig_width, orig_height, device):
     """Apply custom blending and resize to original dimensions"""
-    img_tensor = (source_image * 0.5 + 0.5).squeeze(0)
-    mask_red = mask.squeeze(0)
-    img_redder = make_redder(img_tensor, mask_red)
-    pil_mask = to_pil_image(mask.squeeze(0))
-    mask_blurred = to_tensor(pil_mask).unsqueeze_(0).to(mask.device)
-    mask_f = 1 - (1 - mask) * (1 - mask_blurred)
+    # Normalise all tensors to float32 for blending - pipeline returns float16,
+    # source_image is float32; mixing dtypes causes 'expected Half but found Float'.
+    source_f32 = source_image.float()
+    mask_f32 = mask.float()
+    result_f32 = result_image.float()
 
-    image_1 = result_image.unsqueeze(0)
-    out_tile = mask_f * image_1 + (1 - mask_f) * (source_image * 0.5 + 0.5)
+    img_tensor = (source_f32 * 0.5 + 0.5).squeeze(0)
+    mask_red = mask_f32.squeeze(0)
+    img_redder = make_redder(img_tensor, mask_red)
+    pil_mask = to_pil_image(mask_f32.squeeze(0))
+    mask_blurred = to_tensor(pil_mask).unsqueeze_(0).to(device)
+    mask_f = 1 - (1 - mask_f32) * (1 - mask_blurred)
+
+    image_1 = result_f32.unsqueeze(0)
+    out_tile = mask_f * image_1 + (1 - mask_f) * (source_f32 * 0.5 + 0.5)
 
     if orig_width != 1024 or orig_height != 1024:
         out_tile = Functional.interpolate(out_tile, (orig_height, orig_width), mode='bicubic', align_corners=False)

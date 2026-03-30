@@ -50,7 +50,7 @@ class SharedState:
     def __init__(self):
         # !!! vvv COMPLETE BELOW vvv !!!
         self.aws_region = "us-east-1"
-        self.stack_unique_id = "vtmxcr"
+        self.stack_unique_id = ""
         # !!! ^^^ COMPLETE ABOVE ^^^ !!!
         self.stack_unique_id = os.environ.get('STACK_UNIQUE_ID', self.stack_unique_id)
         self.s3_bucket = f"3dgs-bucket-{self.stack_unique_id}"
@@ -197,19 +197,6 @@ def parse_aws_credentials(creds_string):
         print(f"DEBUG: Exception occurred: {str(e)}")
         return f"Error parsing credentials: {str(e)}"
 
-def get_thumbnail_url(job_id):
-    """Get thumbnail URL for a job if it exists - optimized version"""
-    try:
-        bucket_name = shared_state.s3_bucket
-        output_prefix = shared_state.s3_output or "workflow-output"
-        thumbnail_key = f"{output_prefix}/{job_id}/render_thumbnail.png"
-        
-        # Generate presigned URL without checking if file exists
-        # The browser will handle 404s gracefully
-        return generate_presigned_url(bucket_name, thumbnail_key)
-    except Exception as e:
-        print(f"Error getting thumbnail for {job_id}: {e}")
-        return None
 
 def refresh_s3_contents():
     """Refresh contents from DynamoDB and return grouped data by job ID - optimized"""
@@ -397,148 +384,6 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
     }
     return json.dumps(file_contents, indent=2)
 
-def generate_splat(s3_bucket_name, s3_input_prefix, s3_output_prefix, file_obj, 
-                  instance_type, sfm_software, training_model, cube_faces_remove, 
-                  bg_removal_model, filter_blurry, max_images, 
-                  sfm_enable, enhanced_feature, matching_method, use_colmap_model,
-                  use_transform_json, training_enable, max_steps, 
-                  spherical_enable, remove_bg, remove_objects, source_coordinate, 
-                  pose_world_to_cam, log_verbosity, mask_threshold, enable_spz, enable_sog, media_input_prefix="media-input"):
-    try:
-        session = boto3.Session()
-        s3 = session.client('s3')
-        unique_uuid = uuid.uuid4()
-
-        # Get actual values from Gradio components
-        s3_bucket_name = getattr(s3_bucket_name, 'value', s3_bucket_name)
-        s3_input_prefix = getattr(s3_input_prefix, 'value', s3_input_prefix)
-        s3_output_prefix = getattr(s3_output_prefix, 'value', s3_output_prefix)
-        instance_type = getattr(instance_type, 'value', instance_type)
-        sfm_software = getattr(sfm_software, 'value', sfm_software)
-        training_model = getattr(training_model, 'value', training_model)
-        cube_faces_remove = getattr(cube_faces_remove, 'value', cube_faces_remove)
-        bg_removal_model = getattr(bg_removal_model, 'value', bg_removal_model)
-        filter_blurry = getattr(filter_blurry, 'value', filter_blurry)
-        max_images = getattr(max_images, 'value', max_images)
-        sfm_enable = getattr(sfm_enable, 'value', sfm_enable)
-        enhanced_feature = getattr(enhanced_feature, 'value', enhanced_feature)
-        matching_method = getattr(matching_method, 'value', matching_method)
-        use_colmap_model = getattr(use_colmap_model, 'value', use_colmap_model)
-        use_transform_json = getattr(use_transform_json, 'value', use_transform_json)
-        training_enable = getattr(training_enable, 'value', training_enable)
-        max_steps = getattr(max_steps, 'value', max_steps)
-        spherical_enable = getattr(spherical_enable, 'value', spherical_enable)
-        enable_spz = getattr(enable_spz, 'value', enable_spz)
-        enable_sog = getattr(enable_sog, 'value', enable_sog)
-        remove_bg = getattr(remove_bg, 'value', remove_bg)
-        remove_objects = getattr(remove_objects, 'value', remove_objects)
-        source_coordinate = getattr(source_coordinate, 'value', source_coordinate)
-        pose_world_to_cam = getattr(pose_world_to_cam, 'value', pose_world_to_cam)
-        log_verbosity = getattr(log_verbosity, 'value', log_verbosity)
-        mask_threshold = getattr(mask_threshold, 'value', mask_threshold)
-        media_input_prefix = getattr(media_input_prefix, 'value', media_input_prefix)
-
-        # Step 1: Upload the video file to media-input prefix with basename_uuid.ext format
-        original_filename = os.path.basename(file_obj.name)
-        file_name, file_extension = os.path.splitext(original_filename)
-        filename = f"{file_name}_{str(unique_uuid)}{file_extension}"
-        video_key = f"{media_input_prefix}/{filename}"
-        
-        print(f"Uploading video to s3://{s3_bucket_name}/{video_key}")
-        s3.upload_file(
-            Filename=file_obj.name,
-            Bucket=s3_bucket_name,
-            Key=video_key
-        )
-
-        # Step 2: Create the job JSON with correct media-input prefix
-        job_config = {
-            "uuid": str(unique_uuid),
-            "instanceType": instance_type.strip(),
-            "useSpotInstance": "false",
-            "logVerbosity": log_verbosity,
-            "s3": {
-                "bucketName": s3_bucket_name,
-                "inputPrefix": media_input_prefix,  # Use media_input_prefix instead of s3_input_prefix
-                "inputKey": filename,
-                "outputPrefix": s3_output_prefix
-            },
-            "videoProcessing": {
-                "maxNumImages": str(max_images),
-                "filterBlurryImages": filter_blurry == "true"
-            },
-            "reconstruction": {
-                "enable": sfm_enable == "true",
-                "softwareName": sfm_software,
-                "posePriors": {
-                    "usePosePriorColmapModelFiles": use_colmap_model == "true",
-                    "usePosePriorTransformJson": {
-                        "enable": use_transform_json == "true",
-                        "sourceCoordinateName": source_coordinate,
-                        "poseIsWorldToCam": pose_world_to_cam == "true"
-                    }
-                },
-                "enableEnhancedFeatureExtraction": enhanced_feature == "true",
-                "matchingMethod": matching_method,
-                "enableFlHeuristic": shared_state.enable_fl_heuristic == "true",
-                "flHeuristicValue": str(shared_state.fl_heuristic_value)
-            },
-            "training": {
-                "enable": training_enable == "true",
-                "maxSteps": str(max_steps),
-                "model": training_model,
-                "preserveSceneScale": shared_state.preserve_scene_scale == "true",
-                "3dIsp": shared_state.isp_3d
-            },
-            "postProcessing": {
-                "cropOutputBounds": shared_state.crop_output_bounds == "true",
-                "cropMode": shared_state.crop_mode,
-                "cleanSplat": shared_state.clean_splat == "true",
-                "enableSpz": enable_spz == "true",
-                "enableSog": enable_sog == "true",
-                "enableUsdz": shared_state.enable_usdz == "true",
-                "plyCoords": shared_state.ply_coords,
-                "spzCoords": shared_state.spz_coords,
-                "sogCoords": shared_state.sog_coords,
-                "usdzCoords": shared_state.usdz_coords
-            },
-            "sphericalCamera": {
-                "enable": spherical_enable == "true",
-                "cubeFacesToRemove": cube_faces_remove if isinstance(cube_faces_remove, list) else []
-            },
-            "segmentation": {
-                "backgroundRemoval": {
-                    "enable": remove_bg == "true",
-                    "model": bg_removal_model,
-                    "maskThreshold": str(mask_threshold)
-                },
-                "objectRemoval": {
-                    "enable": remove_objects == "true",
-                    "action": "erase",
-                    "objects": "['human']"
-                }
-            }
-        }
-
-        # Step 3: Upload the job JSON to workflow-input prefix
-        job_json_key = f"{s3_input_prefix}/{unique_uuid}.json"
-        print(f"Uploading job configuration to s3://{s3_bucket_name}/{job_json_key}")
-        
-        # Convert job config to JSON string
-        job_json = json.dumps(job_config, indent=4)
-        
-        # Upload JSON using put_object
-        s3.put_object(
-            Bucket=s3_bucket_name,
-            Key=job_json_key,
-            Body=job_json.encode('utf-8'),
-            ContentType='application/json'
-        )
-
-        return f"Successfully uploaded video and job configuration.\nVideo: {filename}\nJob ID: {unique_uuid}"
-
-    except Exception as e:
-        return f"Error processing file: {str(e)}"
 
 def create_upload_aws_tab():
     with gr.Tab("Upload Media"):
@@ -1505,32 +1350,6 @@ def handle_view(selected_row):
     result = handle_view_with_progress(selected_row)
     return result[0], result[1]
 
-def create_playcanvas_sog_viewer(presigned_url, filename):
-    """Create PlayCanvas SOG viewer using exact working method"""
-    # Fetch the SOG file and convert to base64 (like the working version)
-    import requests
-    import base64
-    try:
-        response = requests.get(presigned_url)
-        file_data = base64.b64encode(response.content).decode('utf-8')
-        file_size = f"{len(response.content):,} bytes"
-        
-        # Store the data globally and trigger the viewer
-        viewer_html = f"""
-        <div id="sog-container" style="height: 900px; background: #1a1a1a; border: 1px solid #444; display: flex; align-items: center; justify-content: center; color: white;">Loading SOG viewer...</div>
-        <script>
-        window.sogData = {{
-            fileData: '{file_data}',
-            fileName: '{html.escape(filename)}',
-            fileSize: '{html.escape(file_size)}'
-        }};
-        window.sogLoaded = false;
-        </script>
-        """
-        return viewer_html
-        
-    except Exception as e:
-        return f"<div style='color: red;'>Error loading SOG file: {str(e)}</div>"
 
 def handle_view_multi(selected_row):
     """Handle view button click for 3D models, SOG files, and videos"""
@@ -1863,438 +1682,6 @@ def add_to_favorites(selected_data):
         import traceback
         traceback.print_exc()
         return f"Error adding favorite: {str(e)}"
-
-# This is the modified implementation of create_s3_browser_tab
-def create_s3_browser_tab():
-    with gr.Tab("Viewer & Library"):
-        # Create favorites section first
-        gr.Markdown("### Local Favorites")
-        favorites = load_favorites()
-        favorite_buttons = []
-        
-        with gr.Row(elem_classes="favorites-buttons-row"):
-            if not favorites:
-                gr.HTML('<div class="no-favorites-text">No favorites yet</div>')
-            else:
-                for favorite in favorites:
-                    with gr.Column(scale=1, min_width=100):
-                        display_name = favorite.get('display_name', favorite['filename'])
-                        favorite_btn = gr.Button(
-                            value=f"📌 {display_name}", 
-                            elem_classes=["favorite-button"],
-                            size="sm"
-                        )
-                        favorite_buttons.append((favorite_btn, favorite['path'], favorite['filename']))
-        
-        # Create hidden components for SOG data and filename tracking
-        sog_file_data = gr.Textbox(visible=False)
-        current_filename = gr.Textbox(visible=False)
-        
-        # Create viewer modal
-        with Modal(visible=False, elem_id="viewer-modal-content") as viewer_modal:
-            with gr.Row():
-                gr.Markdown("### 3D Viewer")
-                viewer_close_btn = gr.Button("✕ Close", size="sm", elem_classes=["close-button"])
-            
-            viewer = gr.Model3D(visible=False, label="3D Viewer")
-            viewer_status = gr.Textbox(value="", visible=False, label="Viewer Status")
-            with gr.Tabs():
-                with gr.Tab("3D Splat Viewer"):
-                    sog_viewer = gr.HTML(
-                        value="<div id='sog-container' style='height: 700px; background: #1a1a1a; border: 1px solid #444; display: flex; align-items: center; justify-content: center; color: white;'>Select a .sog or .spz file to view</div>",
-                        label="SOG Viewer"
-                    )
-                    sog_status = gr.Textbox(
-                        label="SOG Viewer Status",
-                        interactive=False,
-                        show_label=True,
-                        value="",
-                        lines=3,
-                        max_lines=5
-                    )
-                    spz_viewer = gr.Textbox(value="", visible=False, label="SPZ Data")
-
-                with gr.Tab("Video Preview"):
-                    video_viewer = gr.Video(
-                        label="Trajectory Video",
-                        height=700,
-                        interactive=False,
-                        format="mp4"
-                    )
-                    video_status = gr.Textbox(
-                        label="Video Status",
-                        interactive=False,
-                        show_label=True,
-                        value="",
-                        lines=1,
-                        max_lines=1
-                    )
-        
-        # Connect favorite button handlers to open viewer modal
-        def open_favorite_in_modal(path, name):
-            favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
-            if not os.path.realpath(path).startswith(os.path.realpath(favorites_dir) + os.sep):
-                return (gr.update(), gr.update(), "", "", gr.update(), gr.update(), "", "", "")
-            if name.lower().endswith('.sog'):
-                import base64
-                with open(path, 'rb') as f:
-                    file_data = base64.b64encode(f.read()).decode('utf-8')
-                payload = json.dumps({"data": file_data, "filename": name, "ts": __import__('time').time()})
-                return (
-                    gr.update(visible=True),
-                    gr.update(value=None),
-                    "",
-                    payload,
-                    gr.update(),
-                    gr.update(value=None),
-                    "",
-                    name,
-                    ""
-                )
-            elif name.lower().endswith('.spz'):
-                import base64
-                with open(path, 'rb') as f:
-                    file_data = base64.b64encode(f.read()).decode('utf-8')
-                payload = json.dumps({"data": file_data, "filename": name, "ts": __import__('time').time()})
-                return (
-                    gr.update(visible=True),
-                    gr.update(value=None),
-                    "",
-                    "",
-                    gr.update(),
-                    gr.update(value=None),
-                    "",
-                    name,
-                    payload
-                )
-            else:
-                return (
-                    gr.update(visible=True),
-                    gr.update(value=path),
-                    f"Loaded: {name}",
-                    "",
-                    gr.update(),
-                    gr.update(value=None),
-                    "",
-                    name,
-                    ""
-                )
-        
-        for btn, path, name in favorite_buttons:
-            btn.click(
-                fn=lambda p=path, n=name: open_favorite_in_modal(p, n),
-                inputs=[],
-                outputs=[
-                    viewer_modal,
-                    viewer,
-                    viewer_status,
-                    sog_file_data,
-                    sog_viewer,
-                    video_viewer,
-                    video_status,
-                    current_filename,
-                    spz_viewer
-                ]
-            )
-        
-        # Store the current model URL
-        current_model = gr.State(None)
-
-        # File browser section
-        with gr.Row():
-            with gr.Column(scale=2):
-                gr.Markdown("### S3 Contents")
-                refresh_button = gr.Button(
-                    "Refresh Input Contents", 
-                    variant="primary",
-                    size="sm"
-                )
-                with gr.Row():
-                    download_btn = gr.Button(
-                        "Download Selected", 
-                        interactive=False,
-                        size="sm"
-                    )
-                    add_favorite_btn = gr.Button(
-                        "Add to Favorites", 
-                        interactive=False,
-                        size="sm"
-                    )
-                    refine_btn = gr.Button(
-                        "Refine Splat (Resume Training)", 
-                        interactive=False,
-                        size="sm"
-                    )
-                    view_btn = gr.Button(
-                        "View Selected", 
-                        interactive=False,
-                        size="sm"
-                    )
-                files_box = gr.Dataframe(
-                    headers=["Job ID", "Filename", "Size", "Last Modified", "Thumbnail"],
-                    interactive=False,
-                    value=[],
-                    visible=True,
-                    elem_id="files_table",
-                    datatype=["str", "str", "str", "str", "html"],
-                    wrap=True
-                )
-
-                selected_data = gr.State(None)
-        
-        download_iframe = gr.HTML(visible=True)
-
-        # Create refine modal dialog with custom CSS for popup
-        with Modal(visible=False, elem_id="refine-modal-content") as refine_modal:
-            gr.Markdown("### Refine Splat Settings", elem_classes="padded-markdown")
-            gr.Markdown("Review and modify settings for refinement job:", elem_classes="padded-markdown")
-            
-            refine_instance = gr.Dropdown(
-                label="Instance Type",
-                choices=["ml.g5.4xlarge", "ml.g5.8xlarge", "ml.g5.12xlarge", "ml.g6.4xlarge", "ml.g6.8xlarge", "ml.g6e.4xlarge"],
-                value=shared_state.instance
-            )
-            refine_compute = gr.Radio(
-                label="Compute Type",
-                choices=[("AWS Batch (Spot Instances - Up to 50% cost savings)", "true"), ("SageMaker (On-Demand)", "false")],
-                value=shared_state.use_spot_instance
-            )
-            refine_crop = gr.Radio(
-                label="Crop Output Bounds",
-                choices=["true", "false"],
-                value=shared_state.crop_output_bounds
-            )
-            refine_crop_mode = gr.Dropdown(
-                label="Crop Mode",
-                choices=["environment", "rigid_body"],
-                value=shared_state.crop_mode
-            )
-            refine_clean_splat = gr.Radio(
-                label="Clean Splat (Remove Noise)",
-                choices=["true", "false"],
-                value=shared_state.clean_splat
-            )
-            refine_enable_spz = gr.Radio(
-                label="Enable SPZ Export",
-                choices=["true", "false"],
-                value=shared_state.enable_spz
-            )
-            refine_enable_sog = gr.Radio(
-                label="Enable SOG Export",
-                choices=["true", "false"],
-                value=shared_state.enable_sog
-            )
-            refine_enable_usdz = gr.Radio(
-                label="Enable USDZ Export",
-                choices=["true", "false"],
-                value=shared_state.enable_usdz
-            )
-            refine_ply_coords = gr.Dropdown(
-                label="PLY Coordinate System",
-                choices=[
-                    ("Right-Hand, Y-Up (playcanvas)", "rhyu"),
-                    ("Left-Hand, Y-Up (babylon.js)", "lhyu"),
-                    ("Right-Hand, Z-Up (blender)", "rhzu"),
-                    ("Left-Hand, Z-Up (unreal)", "lhzu")
-                ],
-                value=shared_state.ply_coords
-            )
-            refine_spz_coords = gr.Dropdown(
-                label="SPZ Coordinate System",
-                choices=[
-                    ("Right-Hand, Y-Up (playcanvas)", "rhyu"),
-                    ("Left-Hand, Y-Up (babylon.js)", "lhyu"),
-                    ("Right-Hand, Z-Up (blender)", "rhzu"),
-                    ("Left-Hand, Z-Up (unreal)", "lhzu")
-                ],
-                value=shared_state.spz_coords
-            )
-            refine_sog_coords = gr.Dropdown(
-                label="SOG Coordinate System",
-                choices=[
-                    ("Right-Hand, Y-Up (playcanvas)", "rhyu"),
-                    ("Left-Hand, Y-Up (babylon.js)", "lhyu"),
-                    ("Right-Hand, Z-Up (blender)", "rhzu"),
-                    ("Left-Hand, Z-Up (unreal)", "lhzu")
-                ],
-                value=shared_state.sog_coords
-            )
-            refine_usdz_coords = gr.Dropdown(
-                label="USDZ Coordinate System",
-                choices=[
-                    ("Right-Hand, Y-Up (playcanvas)", "rhyu"),
-                    ("Left-Hand, Y-Up (babylon.js)", "lhyu"),
-                    ("Right-Hand, Z-Up (blender)", "rhzu"),
-                    ("Left-Hand, Z-Up (unreal)", "lhzu")
-                ],
-                value=shared_state.usdz_coords
-            )
-            
-            with gr.Row():
-                refine_cancel_btn = gr.Button("Cancel", variant="secondary")
-                refine_submit_btn = gr.Button("Submit Refinement Job", variant="primary")
-        
-        # Create action status for both refine and favorites
-        action_status = gr.Textbox(
-            label="Action Status",
-            value="",
-            visible=True,
-            lines=3
-        )
-
-        # Create cost display before using it
-        cost_display = gr.HTML(
-            value="<div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #e8e8e8; color: #333;'>Click 'Refresh Input Contents' to calculate costs</div>",
-            label="Job Costs"
-        )
-        
-        # Connect refresh button to refresh function with cost calculation
-        refresh_button.click(
-            fn=refresh_and_update,
-            inputs=[],
-            outputs=[files_box, selected_data, download_btn, add_favorite_btn, refine_btn, cost_display]
-        )
-
-        # Create metadata display AFTER the files table (moved to the bottom)
-        metadata_display = gr.HTML(
-            value="Select a job to view metadata",
-            label="Job Configuration"
-        )
-        
-        # Update the select event handler (no longer opens viewer automatically)
-        files_box.select(
-            fn=on_select,
-            inputs=[files_box],
-            outputs=[
-                selected_data,
-                download_btn,
-                view_btn,
-                add_favorite_btn,
-                refine_btn,
-                metadata_display
-            ]
-        )
-        
-        # View button opens the viewer modal
-        def open_viewer_modal(selected_data_val):
-            if not selected_data_val:
-                return tuple([gr.update(visible=False)] + [gr.update() for _ in range(7)])
-            
-            viewer_result = handle_view_multi(selected_data_val)
-            filename = selected_data_val[1].replace("  └─ ", "")
-            return (
-                                gr.update(visible=True),
-                viewer_result[0],  # viewer
-                viewer_result[1],  # viewer_status
-                viewer_result[2],  # sog_file_data
-                viewer_result[3],  # sog_status
-                viewer_result[4],  # video_viewer
-                viewer_result[5],  # video_status
-                viewer_result[6],  # spz_viewer
-                filename
-            )
-        
-        view_btn.click(
-            fn=open_viewer_modal,
-            inputs=[selected_data],
-            outputs=[
-                viewer_modal,
-                viewer,
-                viewer_status,
-                sog_file_data,
-                sog_status,
-                video_viewer,
-                video_status,
-                spz_viewer,
-                current_filename
-            ]
-        )
-        
-        # Add JavaScript tab switching when filename changes
-        current_filename.change(
-            fn=None,
-            inputs=[current_filename],
-            js="""(filename) => {
-                if(filename) {
-                    const fname = filename.toLowerCase();
-                    setTimeout(() => {
-                        const allTabs = document.querySelectorAll('#viewer-modal-content button[role="tab"]');
-                        allTabs.forEach((tab) => {
-                            const tabText = tab.textContent.trim();
-                            if(fname.endsWith('.mp4') && tabText.includes('Video Preview')) {
-                                tab.click();
-                            } else if(!fname.endsWith('.mp4') && tabText.includes('3D Splat Viewer')) {
-                                tab.click();
-                            }
-                        });
-                    }, 200);
-                }
-            }"""
-        )
-        
-        viewer_close_btn.click(
-            fn=lambda: gr.update(visible=False),
-            outputs=[viewer_modal]
-        )
-        
-        # Connect download button
-        download_btn.click(
-            fn=handle_download,
-            inputs=[selected_data],
-            outputs=[download_iframe]
-        )
-        download_iframe.change(
-            fn=None,
-            inputs=[download_iframe],
-            outputs=None,
-            js="""(url) => {
-                if (url) { const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); document.body.removeChild(a); }
-            }"""
-        )
-        
-        # Favorite buttons already set filename in open_favorite_in_modal, no need for second handler
-        
-        # Store SOG data and trigger viewer
-        # Connect add to favorites button
-        add_to_favorites_btn.click(
-            fn=add_to_favorites,
-            inputs=[selected_data],
-            outputs=[action_status]
-        )
-        
-        # Show modal when refine button is clicked
-        def show_refine_modal(selected_data):
-            if not selected_data:
-                return gr.update(visible=False), "No file selected"
-            return gr.update(visible=True), ""
-        
-        refine_btn.click(
-            fn=show_refine_modal,
-            inputs=[selected_data],
-            outputs=[refine_modal, action_status]
-        )
-        
-        # Hide modal on cancel
-        refine_cancel_btn.click(
-            fn=lambda: gr.update(visible=False),
-            outputs=[refine_modal]
-        )
-        
-        # Submit refinement job with user selections
-        def submit_refine_job(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords):
-            result = refine_splat(selected_data, instance, compute, crop, crop_mode, clean_splat, spz, sog, usdz, ply_coords, spz_coords, sog_coords, usdz_coords, shared_state.isp_3d)
-            return gr.update(visible=False), result
-        
-        refine_submit_btn.click(
-            fn=submit_refine_job,
-            inputs=[selected_data, refine_instance, refine_compute, refine_crop, refine_crop_mode, refine_clean_splat, refine_enable_spz, refine_enable_sog, refine_enable_usdz, refine_ply_coords, refine_spz_coords, refine_sog_coords, refine_usdz_coords],
-            outputs=[refine_modal, action_status]
-        )
-        
-        # Add SuperSplat link at the bottom of the viewer tab
-        supersplat_link = gr.HTML(
-            '<div style="text-align:center; margin:10px 0;"><a href="https://superspl.at/editor" target="_blank" style="display:inline-block; background:#f97316; color:white; padding:8px 16px; text-decoration:none; border-radius:6px; font-size:14px; font-weight:500;">🚀 Open SuperSplat Editor</a></div>'
-        )
                 
 
 def get_job_output_files(job_id):
@@ -2722,22 +2109,6 @@ def refresh_and_update():
         print(f"Error in refresh_and_update: {str(e)}")
         return [], None, gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), "Error calculating costs"
 
-def add_to_favorites_and_reload(selected_data):
-    """Add to favorites and force a page reload"""
-    status = add_to_favorites(selected_data)
-    
-    # Create a JavaScript snippet that will reload the page
-    reload_html = """
-    <script>
-    // Force a complete page reload (not from cache)
-    setTimeout(function() {
-        window.location.href = window.location.href + '?t=' + new Date().getTime();
-    }, 1000);
-    </script>
-    """
-    
-    gr.Info("Adding to favorites...the Favorites list will be updated when the local website is re-launched.")
-    return gr.HTML(reload_html)
 
 
 def handle_download(selected_data):
@@ -2794,29 +2165,6 @@ def generate_presigned_url(bucket_name, key, expiration=3600):
         print(f"Error generating presigned URL: {str(e)}")
         return None
 
-def create_credentials_tab():
-    with gr.Tab("AWS Credentials"):
-        with gr.Column():
-            gr.Markdown("### AWS Credentials")
-            gr.Markdown("Paste your AWS credentials exactly as shown from PowerShell.\nAll environment variables should be on one line, separated by spaces:")
-            aws_creds = gr.Textbox(
-                label="AWS Credentials",
-                placeholder='$Env:ISENGARD_PRODUCTION_ACCOUNT="123" $Env:AWS_ACCESS_KEY_ID="ASIA..." $Env:AWS_SECRET_ACCESS_KEY="abcd..." $Env:AWS_SESSION_TOKEN="IQoJ..."',
-                value="",
-                type="password",
-                lines=1  # Single line input
-            )
-            gr.Markdown("""Tips:
-    1. Copy and paste all variables from PowerShell
-    2. Make sure there are spaces between each variable
-    3. Keep everything on one line""")
-            creds_submit_btn = gr.Button("Update Credentials", elem_classes="orange-button")
-            creds_status = gr.Textbox(label="Credentials Status", value="")
-    creds_submit_btn.click(
-        parse_aws_credentials,
-        inputs=[aws_creds],
-        outputs=[creds_status]
-    )
 
 def cleanup_local_files():
     """Clean up local temporary files and favorites to free disk space"""
@@ -4776,10 +4124,6 @@ window.createSPZViewer = async function(fileData, fileName) {
         scene.clearColor = new BABYLON.Color4(0.1, 0.1, 0.1, 1);
         var camera = new BABYLON.ArcRotateCamera('cam', -Math.PI/2, Math.PI/3, 5, BABYLON.Vector3.Zero(), scene);
         camera.attachControl(canvas, true);
-        camera.wheelPrecision = 50;          // lower = faster zoom (default ~3), higher = slower
-        camera.panningSensibility = 100;     // lower = faster pan (default ~1000), higher = slower
-        camera.panningInertia = 0.9;
-        camera.lowerRadiusLimit = 0.01;      // allow zooming very close (default ~0.1)
         new BABYLON.HemisphericLight('light', new BABYLON.Vector3(0,1,0), scene);
         var blobUrl;
         if (fileData.startsWith('blob:') || fileData.startsWith('http')) {
@@ -4791,6 +4135,53 @@ window.createSPZViewer = async function(fileData, fileName) {
         }
         BABYLON.SceneLoader.Append('', blobUrl, scene, function() {
             scene.createDefaultCameraOrLight(true, true, true);
+            // Re-apply zoom settings after createDefaultCameraOrLight replaces the camera
+            var cam = scene.activeCamera;
+            if (cam) {
+                cam.lowerRadiusLimit = 0.01;
+                cam.panningInertia = 0.9;
+                // Proportional zoom: each scroll tick = fixed % of current distance
+                cam.inputs.removeByType('ArcRotateCameraMouseWheelInput');
+                canvas.addEventListener('wheel', function(e) {
+                    e.preventDefault();
+                    cam.radius = Math.max(cam.lowerRadiusLimit || 0.01,
+                        cam.radius * (1 + e.deltaY * 0.0005));
+                }, { passive: false });
+                // Proportional panning: pan speed scales with radius so it feels
+                // consistent whether zoomed in close or far away
+                cam.inputs.removeByType('ArcRotateCameraPointersInput');
+                var pointers = new BABYLON.ArcRotateCameraPointersInput();
+                pointers.buttons = [0, 1, 2];
+                cam.inputs.add(pointers);
+                var isPanning = false;
+                var lastX = 0, lastY = 0;
+                canvas.addEventListener('mousedown', function(e) {
+                    if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+                        isPanning = true;
+                        lastX = e.clientX; lastY = e.clientY;
+                        e.preventDefault();
+                    }
+                });
+                canvas.addEventListener('mousemove', function(e) {
+                    if (!isPanning) return;
+                    var dx = e.clientX - lastX;
+                    var dy = e.clientY - lastY;
+                    lastX = e.clientX; lastY = e.clientY;
+                    // Scale pan by radius so it's proportional at any zoom level
+                    var scale = cam.radius * 0.001;
+                    var right = BABYLON.Vector3.TransformNormal(
+                        new BABYLON.Vector3(1, 0, 0),
+                        cam.getViewMatrix().clone().invert());
+                    var up = BABYLON.Vector3.TransformNormal(
+                        new BABYLON.Vector3(0, 1, 0),
+                        cam.getViewMatrix().clone().invert());
+                    cam.target.addInPlace(right.scale(-dx * scale));
+                    cam.target.addInPlace(up.scale(dy * scale));
+                });
+                window.addEventListener('mouseup', function(e) {
+                    if (e.button === 1 || e.button === 0) isPanning = false;
+                });
+            }
             if (!fileData.startsWith('blob:') && !fileData.startsWith('http')) URL.revokeObjectURL(blobUrl);
         }, null, null, '.spz');
         engine.runRenderLoop(function() { scene.render(); });

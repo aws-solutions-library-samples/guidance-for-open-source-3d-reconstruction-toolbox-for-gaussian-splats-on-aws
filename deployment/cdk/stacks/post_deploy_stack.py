@@ -164,8 +164,6 @@ class GSWorkflowPostDeployStack(Stack):
             current_dir = os.path.dirname(os.path.abspath(__file__))
             lambda_code_path = os.path.join(current_dir, "..", "..", "..", "source", "lambda", "model_deployment")
             
-            # Use the existing index.py file that we've already created
-            
             model_deployment_lambda = lambda_.Function(
                 self,
                 "ModelDeploymentLambda",
