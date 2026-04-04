@@ -50,7 +50,9 @@ parser.add_argument(
 args = parser.parse_args()
 
 path = str(args.data_dir)
-sparse_path = f"{path}/sparse/0"
+# Support both sparse/0 (direct) and colmap/sparse/0 (NerfStudio layout)
+_sparse_candidate = f"{path}/colmap/sparse/0"
+sparse_path = _sparse_candidate if os.path.isdir(_sparse_candidate) else f"{path}/sparse/0"
 ply_path = f"{sparse_path}/sparse.ply"
 
 if os.path.isdir(path):

@@ -64,13 +64,12 @@ PANO_RENDER_OPTIONS: dict[str, PanoRenderOptions] = {
 }
 
 
-def check_for_valid_rigid_objects(
-    mask_dir: Path, min_area_percentage: float = 0.01, min_blob_size: int = 1000
-) -> bool:
-    """Return True if any mask contains a significant rigid object."""
+def get_frames_with_valid_rigid_objects(
+    mask_dir: Path, min_area_percentage: float = 0.003, min_blob_size: int = 1000
+) -> list[str]:
+    """Return list of stems of mask files that contain a significant rigid object."""
     mask_files = [f for f in mask_dir.iterdir() if f.suffix.lower() == ".png"]
-    if not mask_files:
-        return False
+    valid: list[str] = []
     for mask_file in mask_files:
         try:
             mask_img = cv2.imread(str(mask_file), cv2.IMREAD_UNCHANGED)
@@ -95,11 +94,12 @@ def check_for_valid_rigid_objects(
             for i in range(1, num_labels):
                 if np.sum(labels == i) >= min_blob_size and np.sum(labels == i) >= min_pixels:
                     logging.info(f"Found valid rigid object in {mask_file.name}")
-                    return True
+                    valid.append(mask_file.stem)
+                    break
         except Exception as e:
             logging.warning(f"Error checking mask {mask_file}: {e}")
-    logging.info(f"No valid rigid objects found in {len(mask_files)} masks")
-    return False
+    logging.info(f"{len(valid)}/{len(mask_files)} frames have valid rigid objects in {mask_dir.name}")
+    return valid
 
 
 def create_virtual_camera(
@@ -231,6 +231,8 @@ class PanoProcessor:
             return
 
         pano_exif = pano_pil_image.getexif()
+        if pano_pil_image.mode != 'RGB':
+            pano_pil_image = pano_pil_image.convert('RGB')
         pano_image = np.asarray(pano_pil_image)
         gpsonly_exif = PIL.Image.Exif()
         gpsonly_exif[PIL.ExifTags.IFD.GPSInfo] = pano_exif.get_ifd(
@@ -320,131 +322,6 @@ def render_perspective_images(
     return processor.rig_config
 
 
-def _apply_object_removal(args, image_dir: Path) -> None:
-    """Run object removal on each pano_camera subfolder after perspective rendering."""
-    logging.info(f"Performing object removal: action={args.object_action}, model={args.model}")
-    mask_human_output_dir = args.output_path / "masked_human_images"
-    filter_output_dir = args.output_path / "filtered_images"
-    mask_human_output_dir.mkdir(exist_ok=True, parents=True)
-    filter_output_dir.mkdir(exist_ok=True, parents=True)
-
-    for subfolder in sorted(image_dir.iterdir()):
-        if not (subfolder.is_dir() and subfolder.name.startswith("pano_camera")):
-            continue
-        logging.info(f"Processing {subfolder.name}")
-        subfolder_filter = filter_output_dir / subfolder.name
-        subfolder_masked = mask_human_output_dir / subfolder.name
-        subfolder_filter.mkdir(exist_ok=True, parents=True)
-        subfolder_masked.mkdir(exist_ok=True, parents=True)
-
-        # Generate segmentation masks
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "pre_processing.segmentation.remove_background",
-                 "-i", str(subfolder), "-o", str(subfolder_filter),
-                 "-nt", str(args.num_threads), "-ng", str(args.num_gpus), "-m", args.model],
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Mask generation failed for {subfolder.name}: {e}")
-            continue
-
-        if not check_for_valid_rigid_objects(subfolder_filter):
-            logging.info(f"No significant objects in {subfolder.name}, skipping")
-            continue
-
-        if args.object_action == "remove":
-            try:
-                subprocess.run(
-                    [sys.executable, "-m", "segmentation.remove_object_using_mask",
-                     "-oi", str(subfolder), "-om", str(subfolder_filter),
-                     "-od", str(subfolder_masked)],
-                    check=True,
-                )
-            except subprocess.CalledProcessError as e:
-                logging.error(f"Object removal failed for {subfolder.name}: {e}")
-        else:  # erase
-            pp_path = (
-                Path(os.path.dirname(os.path.realpath(__file__))).parent.parent
-                / "AttentiveEraser" / "pipelines"
-                / "pipeline_stable_diffusion_xl_attentive_eraser.py"
-            )
-            try:
-                subprocess.run(
-                    [sys.executable, "-m", "pre_processing.segmentation.erase_object_using_mask",
-                     "-id", str(subfolder), "-md", str(subfolder_filter),
-                     "-od", str(subfolder_masked),
-                     "-mp", str(args.output_path / "stable-diffusion-xl-base-1.0"),
-                     "-pp", str(pp_path),
-                     "-gpu", args.use_gpu, "-log", "info", "-method", "SIP"],
-                    check=True,
-                )
-            except subprocess.CalledProcessError as e:
-                logging.error(f"Object erase failed for {subfolder.name}: {e}")
-
-    # Replace perspective images with processed versions
-    any_processed = any(
-        any(f.is_file() and f.suffix.lower() in ('.png', '.jpg', '.jpeg')
-            for f in (mask_human_output_dir / sf.name).iterdir())
-        for sf in image_dir.iterdir()
-        if sf.is_dir() and sf.name.startswith("pano_camera")
-        and (mask_human_output_dir / sf.name).exists()
-    )
-    if not any_processed:
-        logging.info("No objects processed, keeping original perspective images")
-        return
-
-    original_backup = args.output_path / "original_images"
-    if original_backup.exists():
-        shutil.rmtree(original_backup)
-    shutil.copytree(image_dir, original_backup)
-
-    if args.object_action == "remove":
-        for subfolder in mask_human_output_dir.iterdir():
-            if subfolder.is_dir() and subfolder.name.startswith("pano_camera"):
-                target = image_dir / subfolder.name
-                if target.exists():
-                    shutil.rmtree(target)
-                shutil.copytree(subfolder, target)
-    else:  # erase — copy inpainted images then resize all to match
-        for subfolder in mask_human_output_dir.iterdir():
-            if not (subfolder.is_dir() and subfolder.name.startswith("pano_camera")):
-                continue
-            target_dir = image_dir / subfolder.name
-            # Inpainted images are written to the eraser output root (not refined_masks)
-            for img_file in subfolder.iterdir():
-                if not (img_file.is_file() and img_file.suffix.lower() in (".png", ".jpg", ".jpeg")):
-                    continue
-                img = cv2.imread(str(img_file))
-                if img is not None and np.max(img) > 10:
-                    # Match to original filename in target_dir by stem
-                    target_file = target_dir / img_file.name
-                    if not target_file.exists():
-                        # Try matching by stem with different extension
-                        for ext in (".jpg", ".jpeg", ".png"):
-                            candidate = target_dir / (img_file.stem + ext)
-                            if candidate.exists():
-                                target_file = candidate
-                                break
-                    cv2.imwrite(str(target_file), img)
-            logging.info(f"Copied non-black erased images into {subfolder.name}")
-
-        # Resize ALL perspective images to 960x960 to match eraser output dimensions
-        for subfolder in image_dir.iterdir():
-            if not (subfolder.is_dir() and subfolder.name.startswith("pano_camera")):
-                continue
-            for img_file in subfolder.iterdir():
-                if not (img_file.is_file() and img_file.suffix.lower() in (".png", ".jpg", ".jpeg")):
-                    continue
-                img = cv2.imread(str(img_file))
-                if img is not None and (img.shape[0] != 960 or img.shape[1] != 960):
-                    cv2.imwrite(str(img_file),
-                                cv2.resize(img, (960, 960), interpolation=cv2.INTER_LANCZOS4))
-            logging.info(f"Resized all images to 960x960 in {subfolder.name}")
-
-    logging.info("Perspective images replaced with object-removed versions")
-
-
 def run(args: argparse.Namespace) -> None:
     pycolmap.set_random_seed(0)
 
@@ -487,7 +364,169 @@ def run(args: argparse.Namespace) -> None:
     )
 
     if args.remove_object:
-        _apply_object_removal(args, image_dir)
+        logging.info(f"Performing object removal: action={args.object_action}, model={args.model}")
+        mask_human_output_dir = args.output_path / "masked_human_images"
+        filter_output_dir = args.output_path / "filtered_images"
+        mask_human_output_dir.mkdir(exist_ok=True, parents=True)
+        filter_output_dir.mkdir(exist_ok=True, parents=True)
+
+        for subfolder in sorted(image_dir.iterdir()):
+            if not (subfolder.is_dir() and subfolder.name.startswith("pano_camera")):
+                continue
+            logging.info(f"Processing {subfolder.name}")
+            subfolder_filter = filter_output_dir / subfolder.name
+            subfolder_masked = mask_human_output_dir / subfolder.name
+
+            # Clear stale output from previous runs
+            if subfolder_filter.exists():
+                shutil.rmtree(subfolder_filter)
+            subfolder_filter.mkdir(parents=True)
+            if subfolder_masked.exists():
+                shutil.rmtree(subfolder_masked)
+            subfolder_masked.mkdir(parents=True)
+
+            # Generate segmentation masks from perspective images
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pre_processing.segmentation.remove_background",
+                     "-i", str(subfolder), "-o", str(subfolder_filter),
+                     "-nt", str(args.num_threads), "-ng", str(args.num_gpus), "-m", args.model],
+                    check=True,
+                )
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Mask generation failed for {subfolder.name}: {e}")
+                continue
+
+            valid_frames = get_frames_with_valid_rigid_objects(subfolder_filter)
+            if not valid_frames:
+                logging.info(f"No significant objects in {subfolder.name}, skipping")
+                continue
+            logging.info(f"{len(valid_frames)} frames with objects in {subfolder.name}, proceeding with {args.object_action}")
+
+            # Build temp dirs containing only the frames that have valid objects
+            tmp_images = subfolder_filter.parent / f"{subfolder.name}_tmp_images"
+            tmp_masks = subfolder_filter.parent / f"{subfolder.name}_tmp_masks"
+            for d in (tmp_images, tmp_masks):
+                if d.exists():
+                    shutil.rmtree(d)
+                d.mkdir(parents=True)
+            for stem in valid_frames:
+                for ext in (".png", ".jpg", ".jpeg"):
+                    src = subfolder / (stem + ext)
+                    if src.exists():
+                        shutil.copy2(src, tmp_images / src.name)
+                        break
+                src_mask = subfolder_filter / (stem + ".png")
+                if src_mask.exists():
+                    # remove_background outputs RGBA where alpha=255 means human.
+                    # Extract and binarize the alpha channel as the inpainting mask.
+                    mask_img = cv2.imread(str(src_mask), cv2.IMREAD_UNCHANGED)
+                    if mask_img is not None and mask_img.ndim == 3 and mask_img.shape[2] == 4:
+                        alpha = mask_img[:, :, 3]
+                    elif mask_img is not None:
+                        alpha = cv2.cvtColor(mask_img, cv2.COLOR_BGR2GRAY)
+                    else:
+                        continue
+                    binary = np.where(alpha > 10, 255, 0).astype(np.uint8)
+                    cv2.imwrite(str(tmp_masks / src_mask.name), binary)
+
+            pp_path = (
+                Path(os.path.dirname(os.path.realpath(__file__))).parent.parent
+                / "AttentiveEraser" / "pipelines"
+                / ("pipeline_stable_diffusion_xl_attentive_eraser_inversion.py"
+                   if args.object_action == "erase" else
+                   "pipeline_stable_diffusion_xl_attentive_eraser.py")
+            )
+
+            if args.object_action == "remove":
+                try:
+                    subprocess.run(
+                        [sys.executable, "-m", "segmentation.remove_object_using_mask",
+                         "-oi", str(tmp_images), "-om", str(tmp_masks),
+                         "-od", str(subfolder_masked)],
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    logging.error(f"Object removal failed for {subfolder.name}: {e}")
+            else:  # erase
+                try:
+                    subprocess.run(
+                        [sys.executable, "-m", "pre_processing.segmentation.erase_object_using_mask",
+                         "-id", str(tmp_images), "-md", str(tmp_masks),
+                         "-od", str(subfolder_masked),
+                         "-mp", str(args.output_path / "stable-diffusion-xl-base-1.0"),
+                         "-pp", str(pp_path),
+                         "-gpu", args.use_gpu, "-log", "info", "-method", "DIP"],
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    logging.error(f"Object erase failed for {subfolder.name}: {e}")
+
+        # Check if any camera produced valid (non-black) inpainted images
+        def _has_valid_erased_images(cam_dir: Path) -> bool:
+            for f in cam_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in ('.png', '.jpg', '.jpeg') and f.parent.name != 'refined_masks':
+                    img = cv2.imread(str(f))
+                    if img is not None and np.max(img) > 10:
+                        return True
+            return False
+
+        eraser_ran = any(
+            _has_valid_erased_images(mask_human_output_dir / sf.name)
+            for sf in image_dir.iterdir()
+            if sf.is_dir() and sf.name.startswith("pano_camera")
+            and (mask_human_output_dir / sf.name).exists()
+        )
+
+        if not eraser_ran:
+            logging.info("No objects processed, keeping original perspective images")
+        else:
+            original_backup = args.output_path / "original_images"
+            if original_backup.exists():
+                shutil.rmtree(original_backup)
+            shutil.copytree(image_dir, original_backup)
+
+            if args.object_action == "remove":
+                for subfolder in mask_human_output_dir.iterdir():
+                    if not (subfolder.is_dir() and subfolder.name.startswith("pano_camera")):
+                        continue
+                    target_dir = image_dir / subfolder.name
+                    for img_file in subfolder.iterdir():
+                        if not (img_file.is_file() and img_file.suffix.lower() in (".png", ".jpg", ".jpeg")):
+                            continue
+                        img = cv2.imread(str(img_file))
+                        if img is not None and np.max(img) > 10:
+                            cv2.imwrite(str(target_dir / img_file.name), img)
+                    logging.info(f"Copied non-black removed images into {subfolder.name}")
+            else:  # erase — copy erased images (skip refined_masks subdir), then resize all to match
+                for subfolder in mask_human_output_dir.iterdir():
+                    if not (subfolder.is_dir() and subfolder.name.startswith("pano_camera")):
+                        continue
+                    target_dir = image_dir / subfolder.name
+                    for img_file in subfolder.iterdir():
+                        if not (img_file.is_file() and img_file.suffix.lower() in (".png", ".jpg", ".jpeg")):
+                            continue
+                        if img_file.parent.name == 'refined_masks':
+                            continue
+                        img = cv2.imread(str(img_file))
+                        if img is not None and np.max(img) > 10:
+                            cv2.imwrite(str(target_dir / img_file.name), img)
+                    logging.info(f"Copied non-black erased images into {subfolder.name}")
+
+                # Resize all perspective images to 960x960 to match eraser output
+                for subfolder in image_dir.iterdir():
+                    if not (subfolder.is_dir() and subfolder.name.startswith("pano_camera")):
+                        continue
+                    for img_file in subfolder.iterdir():
+                        if not (img_file.is_file() and img_file.suffix.lower() in (".png", ".jpg", ".jpeg")):
+                            continue
+                        img = cv2.imread(str(img_file))
+                        if img is not None and (img.shape[0] != 960 or img.shape[1] != 960):
+                            img = cv2.resize(img, (960, 960), interpolation=cv2.INTER_LANCZOS4)
+                            cv2.imwrite(str(img_file), img)
+                    logging.info(f"Resized all images to 960x960 in {subfolder.name}")
+
+            logging.info("Perspective images replaced with object-removed versions")
 
     pycolmap.extract_features(
         database_path,

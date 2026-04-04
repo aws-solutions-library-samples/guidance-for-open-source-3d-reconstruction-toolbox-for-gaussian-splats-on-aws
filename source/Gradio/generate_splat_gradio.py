@@ -731,7 +731,7 @@ def create_advanced_settings_tab():
                 )
                 sfm = gr.Dropdown(
                     label="Reconstruction Software",
-                    choices=["colmap", "glomap", "map_anything"],
+                    choices=["colmap", "glomap", "hloc", "map_anything"],
                     value="glomap"
                 )
             with gr.Column():
@@ -3575,9 +3575,18 @@ async () => {
                 });
                 app.root.addChild(entity);
                 
-                // Focus camera on splat
-                //camera.setPosition(5, 2, 5);
-                //camera.lookAt(0, 0, 0);
+                // Focus camera on splat bounding box center
+                app.once('update', () => {
+                    const gsplatComponent = entity.gsplat;
+                    if (gsplatComponent && gsplatComponent.instance) {
+                        const aabb = gsplatComponent.instance.meshInstance && gsplatComponent.instance.meshInstance.aabb;
+                        if (aabb) {
+                            target.copy(aabb.center);
+                            cameraDistance = aabb.halfExtents.length() * 2.5;
+                            updateCameraPosition();
+                        }
+                    }
+                });
             });
             
             asset.on('error', (err) => {
@@ -4102,6 +4111,17 @@ window.createSOGViewer = function(fileData, fileName, fileSize) {
             var entity = new pc.Entity('GaussianSplat');
             entity.addComponent('gsplat', { asset: asset });
             app.root.addChild(entity);
+            app.once('update', function() {
+                var gsplatComponent = entity.gsplat;
+                if (gsplatComponent && gsplatComponent.instance) {
+                    var aabb = gsplatComponent.instance.meshInstance && gsplatComponent.instance.meshInstance.aabb;
+                    if (aabb) {
+                        target.copy(aabb.center);
+                        dist = aabb.halfExtents.length() * 2.5;
+                        updateCam();
+                    }
+                }
+            });
             console.log('GSplat loaded successfully');
         });
         asset.on('error', function(err) { console.error('GSplat error:', err); });

@@ -140,10 +140,14 @@ def apply_enhanced_mask(image, mask, threshold=0.05):
     return Image.fromarray(result, 'RGBA')
 
 def process_human_segmentation(input_dir, output_dir):
-    """Process images using enhanced human segmentation"""
+    """Process images using enhanced human segmentation with dual-model detection.
+    Runs u2net_human_seg + birefnet-portrait and merges masks to catch both
+    prominent and distant/small humans.
+    """
     try:
         from rembg import remove, new_session
-        session = new_session('u2net_human_seg')
+        session_u2net = new_session('u2net_human_seg')
+        session_birefnet = new_session('birefnet-portrait')
     except ImportError:
         raise RuntimeError("rembg library not available. Please install with: pip install rembg")
     
@@ -169,11 +173,19 @@ def process_human_segmentation(input_dir, output_dir):
         output_path = os.path.join(output_dir, f"{base_name}.png")
         
         try:
-            # Segment human
-            mask, original_image, segmented_image = segment_human_rembg(input_path, session)
+            original_image = Image.open(input_path).convert('RGB')
             
-            # Apply enhanced processing
-            enhanced_image = apply_enhanced_mask(original_image, mask)
+            # Pass 1: u2net_human_seg - good for prominent humans
+            mask1, _, _ = segment_human_rembg(input_path, session_u2net)
+            
+            # Pass 2: birefnet-portrait - better for distant/small humans
+            mask2, _, _ = segment_human_rembg(input_path, session_birefnet)
+            
+            # Merge: take the maximum (union) of both masks
+            merged_mask = np.maximum(mask1, mask2)
+            
+            # Apply enhanced processing on merged mask
+            enhanced_image = apply_enhanced_mask(original_image, merged_mask)
             
             # Save result
             enhanced_image.save(output_path)
@@ -335,7 +347,7 @@ if __name__ == '__main__':
     print(f"Has_alpha:{has_alpha}")
     try:
         # Validate model parameter
-        allowed_models = ["u2net", "u2net_human_seg"]
+        allowed_models = ["u2net", "u2net_human_seg", "birefnet-portrait"]
         if model not in allowed_models:
             raise ValueError(f"Invalid model: {model}")
         

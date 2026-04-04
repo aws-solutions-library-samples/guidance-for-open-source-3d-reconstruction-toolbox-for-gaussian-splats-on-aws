@@ -358,7 +358,12 @@ if __name__ == "__main__":
         os.makedirs(mask_human_output_dir, exist_ok=True)
 
     # Setup Colmap and Nerfstudio directories
-    colmap_db_path = os.path.join(config['DATASET_PATH'], "database.db")
+    # In LOCAL_DEBUG mode (typically EFS-mounted), place COLMAP database on local
+    # storage to avoid SQLite locking protocol errors (EFS lacks POSIX file locks).
+    if LOCAL_DEBUG:
+        colmap_db_path = os.path.join('/tmp', 'colmap_database.db')
+    else:
+        colmap_db_path = os.path.join(config['DATASET_PATH'], "database.db")
     transforms_in_path = os.path.join(config['DATASET_PATH'], "transforms-in.json")
     transforms_out_path = os.path.join(config['DATASET_PATH'], "transforms.json")
     colmap_vocab_path = os.path.join(config['CODE_PATH'], "vocab_tree_flickr100K_words32K.bin")
@@ -398,8 +403,37 @@ if __name__ == "__main__":
     ##################################
     # Check if input is a model.tar.gz file for resuming training OR if resuming training look for model.tar.gz
     model_tar_found = False
+    colmap_zip_found = False
+    resume_training_active = False
+    
     if config['FILENAME'].endswith('model.tar.gz') or config['FILENAME'].endswith('.tar.gz'):
         model_tar_found = True
+    elif config['RUN_RECON'] == 'false' and config['RUN_TRAIN'] == 'true':
+        # Check if this is a COLMAP reconstruction zip (not a model archive)
+        if config['FILENAME'].endswith('.zip'):
+            colmap_zip_found = True
+            log.info(f"Detected potential COLMAP reconstruction zip: {config['FILENAME']}")
+        else:
+            # Check if FILENAME.zip exists (user may have omitted the extension)
+            zip_candidate = config['FILENAME'] + '.zip'
+            if os.path.exists(os.path.join(config['DATASET_PATH'], zip_candidate)):
+                config['FILENAME'] = zip_candidate
+                colmap_zip_found = True
+                log.info(f"Found matching zip file: {zip_candidate}")
+            # Check if FILENAME is a directory with reconstruction data already extracted
+            elif os.path.isdir(os.path.join(config['DATASET_PATH'], config['FILENAME'])):
+                dir_path = os.path.join(config['DATASET_PATH'], config['FILENAME'])
+                has_images = os.path.exists(os.path.join(dir_path, 'images'))
+                has_sparse = os.path.exists(os.path.join(dir_path, 'sparse')) or \
+                            os.path.exists(os.path.join(dir_path, 'colmap', 'sparse'))
+                if has_images and has_sparse:
+                    colmap_zip_found = True
+                    log.info(f"Detected pre-extracted COLMAP reconstruction directory: {config['FILENAME']}")
+            # Check if sparse/ exists directly in DATASET_PATH (already extracted)
+            elif os.path.exists(os.path.join(config['DATASET_PATH'], 'sparse')) and \
+                 os.path.exists(os.path.join(config['DATASET_PATH'], 'images')):
+                colmap_zip_found = True
+                log.info(f"Detected COLMAP reconstruction data already in dataset directory")
     elif config['RUN_RECON'] == 'false' or config['RUN_TRAIN'] == 'false':
         # Look for model.tar.gz in dataset directory for resume training or export-only
         for file in os.listdir(config['DATASET_PATH']):
@@ -409,6 +443,94 @@ if __name__ == "__main__":
                 log.info(f"Found model archive for resume training/export: {file}")
                 break
     
+    colmap_zip_needs_conversion = False  # True when zip has sparse/ but no transforms.json
+    if colmap_zip_found:
+        log.info(f"Processing COLMAP reconstruction: {config['FILENAME']}")
+        zip_path = os.path.join(config['DATASET_PATH'], config['FILENAME'])
+        
+        # Handle zip file extraction
+        if config['FILENAME'].endswith('.zip') and os.path.exists(zip_path):
+            # Extract zip to temp directory
+            temp_path = os.path.join(config['DATASET_PATH'], 'temp')
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                # Validate entries to prevent zip slip attacks
+                for entry in zip_ref.namelist():
+                    entry_path = os.path.realpath(os.path.join(temp_path, entry))
+                    if not entry_path.startswith(os.path.realpath(temp_path) + os.sep):
+                        raise ValueError(f"Zip slip detected: {entry}")
+                zip_ref.extractall(temp_path)
+            
+            # Check if extracted content is in a subdirectory
+            temp_contents = os.listdir(temp_path)
+            if len(temp_contents) == 1 and os.path.isdir(os.path.join(temp_path, temp_contents[0])):
+                extract_source = os.path.join(temp_path, temp_contents[0])
+            else:
+                extract_source = temp_path
+            
+            # Verify required COLMAP structure exists
+            has_images = os.path.exists(os.path.join(extract_source, 'images'))
+            has_sparse = os.path.exists(os.path.join(extract_source, 'sparse')) or \
+                        os.path.exists(os.path.join(extract_source, 'colmap', 'sparse'))
+            has_transforms = os.path.exists(os.path.join(extract_source, 'transforms.json'))
+            
+            if has_images and (has_sparse or has_transforms):
+                log.info(f"Valid COLMAP reconstruction found: images={has_images}, sparse={has_sparse}, transforms={has_transforms}")
+                if has_sparse and not has_transforms:
+                    colmap_zip_needs_conversion = True
+                    log.info("No transforms.json in zip - Colmap-to-Nerfstudio conversion will be required")
+                
+                # Move contents to dataset directory
+                for item in os.listdir(extract_source):
+                    src = os.path.join(extract_source, item)
+                    dst = os.path.join(config['DATASET_PATH'], item)
+                    if os.path.exists(dst):
+                        if os.path.isdir(dst):
+                            shutil.rmtree(dst)
+                        else:
+                            os.remove(dst)
+                    shutil.move(src, dst)
+                
+                # Clean up temp directory
+                if os.path.exists(temp_path):
+                    shutil.rmtree(temp_path)
+            else:
+                log.warning(f"Zip does not contain valid COLMAP reconstruction structure")
+                colmap_zip_found = False
+                if os.path.exists(temp_path):
+                    shutil.rmtree(temp_path)
+        
+        # Handle directory input - move contents to dataset root if in a subdirectory
+        elif os.path.isdir(zip_path):
+            for item in os.listdir(zip_path):
+                src = os.path.join(zip_path, item)
+                dst = os.path.join(config['DATASET_PATH'], item)
+                if os.path.exists(dst):
+                    if os.path.isdir(dst):
+                        shutil.rmtree(dst)
+                    else:
+                        os.remove(dst)
+                shutil.move(src, dst)
+            log.info(f"Moved reconstruction data from {zip_path} to dataset root")
+        
+        # Ensure colmap/sparse structure exists for NerfStudio (not needed for 3DGRUT)
+        if colmap_zip_found and config['MODEL'] not in ('3dgrt', '3dgut'):
+            if not os.path.exists(os.path.join(config['DATASET_PATH'], 'colmap', 'sparse')):
+                if os.path.exists(os.path.join(config['DATASET_PATH'], 'sparse')):
+                    colmap_dir = os.path.join(config['DATASET_PATH'], 'colmap')
+                    os.makedirs(colmap_dir, exist_ok=True)
+                    shutil.move(os.path.join(config['DATASET_PATH'], 'sparse'), 
+                               os.path.join(colmap_dir, 'sparse'))
+                    log.info(f"Moved sparse/ to colmap/sparse/ for NerfStudio compatibility")
+            
+            log.info(f"Successfully processed COLMAP reconstruction from {config['FILENAME']}")
+            log.info(f"Dataset contents: {os.listdir(config['DATASET_PATH'])}")
+            # Verify colmap/sparse/0 has required files
+            sparse_0 = os.path.join(config['DATASET_PATH'], 'colmap', 'sparse', '0')
+            if os.path.exists(sparse_0):
+                log.info(f"colmap/sparse/0 contents: {os.listdir(sparse_0)}")
+            else:
+                log.warning(f"colmap/sparse/0 does not exist after extraction")
+
     if model_tar_found:
         log.info(f"Detected model archive: {config['FILENAME']} for resuming training")
         model_tar_path = os.path.join(config['DATASET_PATH'], config['FILENAME'])
@@ -1041,8 +1163,7 @@ if __name__ == "__main__":
                     "feature_extractor",
                     "--database_path", colmap_db_path,
                     "--image_path", image_path,
-                    "--ImageReader.single_camera", "1"#,
-                    #"--SiftExtraction.num_threads", str(pipeline.config.num_threads),
+                    "--ImageReader.single_camera", "1"
                 ]
                 if ENABLE_MULTI_GPU == "true" or \
                     config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
@@ -1053,8 +1174,8 @@ if __name__ == "__main__":
 
                 if config['ENABLE_ENHANCED_FEATURE_EXTRACTION'] == "true":
                     args.extend([
-                        "--SiftExtraction.estimate_affine_shape", "1",
-                        "--SiftExtraction.domain_size_pooling", "1"
+                        "--SiftExtraction.estimate_affine_shape", "1"
+                        #"--SiftExtraction.domain_size_pooling", "1"
                     ])
 
                 if config['LOG_VERBOSITY'] == "error":
@@ -1278,21 +1399,6 @@ if __name__ == "__main__":
                             args=args,
                             requires_gpu=False
                         )
-                        args = [
-                            'bundle_adjuster',
-                            '--input_path', sparse_model_path,
-                            '--output_path', sparse_model_path,
-                            '--BundleAdjustment.refine_principal_point', '0'
-                        ]
-                        pipeline.create_component(
-                            name="HlocSfM-Ba",
-                            comp_type=ComponentType.RECONSTRUCTION,
-                            comp_environ=ComponentEnvironment.EXECUTABLE,
-                            command="colmap",
-                            cwd=current_dir_path,
-                            args=args,
-                            requires_gpu=False
-                        )
                 # IMAGE UNDISTORTER
                 # Run undistorter for multi-GPU or when using 3DGRUT with pose priors (to convert SIMPLE_RADIAL to PINHOLE)
                 if ENABLE_MULTI_GPU == "true" or (config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt") and \
@@ -1354,6 +1460,28 @@ if __name__ == "__main__":
                 )
         else:
             log.info("Reconstruction configured to be skipped...skipping reconstruction")
+            # 3DGRUT requires undistorted images (PINHOLE only) — run undistorter on pre-existing COLMAP
+            if colmap_zip_found and config['MODEL'] in ('3dgrt', '3dgut'):
+                undist_output = os.path.join(config['DATASET_PATH'], '_undistorted')
+                undist_args = [
+                    "image_undistorter",
+                    "--image_path", image_path,
+                    "--input_path", sparse_model_path,
+                    "--output_path", undist_output,
+                    "--output_type", "COLMAP"
+                ]
+                if config['LOG_VERBOSITY'] == "error":
+                    undist_args.extend(["--log_level", "1"])
+                pipeline.create_component(
+                    name="ColmapSfM-Image-Undistorter",
+                    comp_type=ComponentType.RECONSTRUCTION,
+                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                    command="colmap",
+                    args=undist_args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
+                log.info("Added undistorter for 3DGRUT with pre-existing COLMAP reconstruction")
     except Exception as e:
         error_message = f"Issue creating the reconstruction component: {e}"
         pipeline.report_error(750, error_message)
@@ -1381,6 +1509,19 @@ if __name__ == "__main__":
                     750,
                     f"Reconstruction software name given not implemented:{config['RECON_SOFTWARE_NAME']}"
                 )
+        elif colmap_zip_needs_conversion and config['MODEL'] not in ('3dgrt', '3dgut'):
+            # zip had COLMAP sparse data but no transforms.json — run conversion now
+            log.info("colmap_zip_needs_conversion=True: adding Colmap-to-Nerfstudio component")
+            args = ["--data_dir", config['DATASET_PATH']]
+            pipeline.create_component(
+                name="Colmap-to-Nerfstudio",
+                comp_type=ComponentType.RECONSTRUCTION,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="training/colmap_to_nerfstudio_cam.py",
+                cwd=current_dir_path,
+                args=args,
+                requires_gpu=False
+            )
         else:
             log.info("Not configured to perform SfM reconstruction...skipping dataset conversion.")
     except Exception as e:
@@ -1416,7 +1557,7 @@ if __name__ == "__main__":
                     ])
                 elif config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
                     config['MODEL'] == "splatfacto-mcmc":
-                    if config['RUN_RECON'] == "false": # Resume training
+                    if config['RUN_RECON'] == "false" and not colmap_zip_found: # Resume training
                         dataset_config_path = os.path.join(config['DATASET_PATH'], "config.yml")
 
                         if not os.path.exists(dataset_config_path):
@@ -1467,6 +1608,7 @@ if __name__ == "__main__":
                                 _f.write(_cfg)
                             log.info(f"Resume: ckpt_step={_ckpt_step}, max_num_iterations={_total_steps}, "
                                      f"stop_split_at={_stop_split_at}")
+                            resume_training_active = True
                         except Exception as _e:
                             log.warning(f"Failed to patch config.yml for resume: {_e}")
 
@@ -1482,6 +1624,7 @@ if __name__ == "__main__":
                             ])
                         log.info(f"Resume training using --load-config: {dataset_config_path}")
                     else:
+                        # Initial training (either RUN_RECON=true or colmap_zip_found)
                         isp_mode = config.get('THREED_ISP', 'none').lower()
                         args.extend([
                         "--timestamp", TRAIN_EXPERIMENT_NAME,
@@ -1489,15 +1632,9 @@ if __name__ == "__main__":
                         "--max-num-iterations", str(int(config['MAX_STEPS']))
                     ])
                         if isp_mode == "bilagrid":
-                            #if config['MODEL'] == "splatfacto-mcmc":
-                            #    log.info("Bilateral-Grid is not compatible with splatfacto-mcmc (causes MCMC relocation crash), ignoring ISP mode")
-                            #else:
                             args.extend(["--pipeline.model.use-bilateral-grid", "True"])
                         elif isp_mode == "ppisp":
                             log.info("PPISP not currently supported with Splatfacto, using Bilateral-Grid instead")
-                            #if config['MODEL'] == "splatfacto-mcmc":
-                            #    log.info("Bilateral-Grid is not compatible with splatfacto-mcmc (causes MCMC relocation crash), ignoring ISP mode")
-                            #else:
                             args.extend(["--pipeline.model.use-bilateral-grid", "True"])
                             #args.extend(["--pipeline.model.use-ppisp", "True"])
                 elif config['MODEL'] == "splatfacto-w-light":
@@ -1543,6 +1680,7 @@ if __name__ == "__main__":
                 # encoded in config.yml; re-specifying it causes ns-train to ignore the checkpoint.
                 is_splatfacto_resume = (
                     config['RUN_RECON'] == "false" and
+                    not colmap_zip_found and
                     config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc")
                 )
                 if not is_splatfacto_resume:
@@ -1631,7 +1769,7 @@ if __name__ == "__main__":
                     args.append("model.print_stats=true")
                 else:
                     args.append("model.print_stats=false")
-                if config['RUN_RECON'] == "false": # 3dgrut resume training
+                if config['RUN_RECON'] == "false" and not colmap_zip_found: # 3dgrut resume training
                     # Validate checkpoint exists and is readable
                     # Check if model_ckpt_path already points to the checkpoint file
                     if os.path.isfile(model_ckpt_path):
@@ -1761,16 +1899,33 @@ if __name__ == "__main__":
                     )
                 else:
                     # Use correct output path for resume training
-                    if config['RUN_RECON'] == "false":
-                        # Use the nerfstudio-generated config from outputs/ — it has the
-                        # correct load_dir pointing to train-stage-2/nerfstudio_models.
-                        config_path = f"outputs/unnamed/splatfacto/{RESUME_TRAIN_EXPERIMENT_NAME}/config.yml"
+                    if resume_training_active:
+                        # Resume training - use config from dataset directory
+                        config_path = os.path.join(config['DATASET_PATH'], "config.yml")
+                        checkpoint_dir = os.path.join(config['DATASET_PATH'], 'nerfstudio_models')
+                        
+                        # Update config.yml to use absolute path only in LOCAL_DEBUG mode
+                        if LOCAL_DEBUG:
+                            try:
+                                with open(config_path, 'r') as f:
+                                    config_content = f.read()
+                                config_content = re.sub(
+                                    r'relative_model_dir: !!python/object/apply:pathlib\.PosixPath\s*\n\s*- nerfstudio_models',
+                                    f'relative_model_dir: !!python/object/apply:pathlib.PosixPath\n- {checkpoint_dir}',
+                                    config_content
+                                )
+                                with open(config_path, 'w') as f:
+                                    f.write(config_content)
+                                log.info(f"Updated config.yml to use absolute checkpoint path: {checkpoint_dir}")
+                            except Exception as e:
+                                log.warning(f"Failed to update config.yml: {e}")
                         args = [
                             "gaussian-splat",
                             "--load-config", config_path,
                             "--output-dir", output_path
                         ]
                         log.info(f"Resume training export using config: {config_path}")
+                        log.info(f"Resume training export using checkpoint dir: {checkpoint_dir}")
                     else:
                         # Initial training - use config from outputs directory
                         config_path = f"outputs/unnamed/splatfacto/{TRAIN_EXPERIMENT_NAME}/config.yml"
@@ -1803,11 +1958,12 @@ if __name__ == "__main__":
         if ENABLE_MULTI_GPU == "false":
             if config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
                 config['MODEL'] == "splatfacto-mcmc" or config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto-w-light":
-                if config['RUN_RECON'] == "false":
-                    # Use the nerfstudio-generated config from outputs/ for all resume cases.
+                if resume_training_active:
+                    # Resume training - use config from dataset directory for splatfacto models
                     if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
-                        config_path = f"outputs/unnamed/splatfacto/{RESUME_TRAIN_EXPERIMENT_NAME}/config.yml"
+                        config_path = os.path.join(config['DATASET_PATH'], "config.yml")
                     else:
+                        # For splatfacto-w-light, use the train-stage-2 config from outputs
                         config_path = f"outputs/unnamed/splatfacto-w-light/{RESUME_TRAIN_EXPERIMENT_NAME}/config.yml"
                 else:
                     if config['MODEL'] == "splatfacto-w-light":
@@ -1868,9 +2024,12 @@ if __name__ == "__main__":
                 if config['MODEL'] == "nerfacto":
                     model = "nerfacto"
                 # Use correct output path for resume training
-                if config['RUN_RECON'] == "false":
+                if resume_training_active:
                     train_stage = RESUME_TRAIN_EXPERIMENT_NAME
-                    config_path = f"outputs/unnamed/{model}/{train_stage}/config.yml"
+                    if LOCAL_DEBUG:
+                        config_path = os.path.join(config['DATASET_PATH'], "config.yml")
+                    else:
+                        config_path = f"outputs/unnamed/{model}/{train_stage}/config.yml"
                 else:
                     train_stage = TRAIN_EXPERIMENT_NAME
                     config_path = f"outputs/unnamed/{model}/{train_stage}/config.yml"
@@ -1878,7 +2037,7 @@ if __name__ == "__main__":
                     "interpolate",
                     "--load-config", config_path,
                     "--output-path", os.path.join(output_path, "render.mp4"),
-                    "--frame-rate", "5" #10
+                    "--frame-rate", "5"
                 ]
                 # Use wrapper for splatfacto-w-light
                 if config['MODEL'] == "splatfacto-w-light":
@@ -2530,17 +2689,6 @@ if __name__ == "__main__":
                     )
                 elif last_phase is not None and not ddb_table_name:
                     log.debug(f"Skipping DynamoDB update for {last_phase} - no table name configured")
-
-                # Clear GPU cache when transitioning into TRAINING to free memory
-                # held by reconstruction (COLMAP/Glomap/MapAnything) or pre-processing
-                if component.comp_type == ComponentType.TRAINING and last_phase is not None:
-                    try:
-                        import torch
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                            log.info("Cleared GPU cache before training")
-                    except Exception:
-                        pass
                 
                 pipeline.session.comp_start_names.append(component.name)
                 phase_start_times[component.comp_type.name] = int(time.time())
@@ -2553,6 +2701,11 @@ if __name__ == "__main__":
                     video_found = False
                     # Check if input is a directory with files (for folder input mode)
                     IS_FOLDER_INPUT = os.path.isdir(input_file_path) and len(os.listdir(input_file_path)) > 0
+                    # Skip if COLMAP reconstruction was already provided
+                    if colmap_zip_found:
+                        log.info("Skipping VideoToImages - COLMAP reconstruction already provided")
+                        i += 1
+                        continue
                     if (VIDEO is False and config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true') or \
                         (VIDEO is False and config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'true'):
                         continue
@@ -2608,7 +2761,7 @@ if __name__ == "__main__":
                                 # No video found, process as images
                                 temp_dir_input = os.listdir(temp_path)[0]
                                 if os.path.isdir(os.path.join(temp_path, temp_dir_input)): # Archive has a directory
-                                    log.info("Moving directory from {temp_path} to {temp_dir_input}")
+                                    log.info(f"Moving directory from {temp_path} to {temp_dir_input}")
                                     # Remove existing images directory if it exists
                                     if os.path.exists(image_path):
                                         shutil.rmtree(image_path)
@@ -2629,8 +2782,11 @@ if __name__ == "__main__":
                             # Clean up temp directory
                             if os.path.exists(temp_path):
                                 shutil.rmtree(temp_path)
-                        if config['RUN_RECON'] == "true" and config['RUN_TRAIN'] == "true":
-                            # Only process images if no video was found
+                        if config['RUN_RECON'] == "true" and config['RUN_TRAIN'] == "true" and \
+                                config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'false' and \
+                                config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'false' and \
+                                not colmap_zip_found:
+                            # Only process images if no video was found and not resuming/skipping recon
                             if not video_found:
                                 validate_and_resize_images(image_path, config, log, pipeline)
                             else:
@@ -2692,6 +2848,26 @@ if __name__ == "__main__":
                             log.warning(f"PRESERVE_SCENE_SCALE focal heuristic failed, "
                                         f"falling back to COLMAP defaults: {_e}")
                     pipeline.run_component(i)
+                case "ColmapSfM-Image-Undistorter":
+                    pipeline.run_component(i)
+                    # For 3DGRUT with pre-existing COLMAP: move undistorted output into place
+                    undist_dir = os.path.join(config['DATASET_PATH'], '_undistorted')
+                    if config['MODEL'] in ('3dgrt', '3dgut') and os.path.isdir(undist_dir):
+                        undist_sparse = os.path.join(undist_dir, 'sparse')
+                        undist_images = os.path.join(undist_dir, 'images')
+                        if os.path.isdir(undist_sparse):
+                            # Replace sparse/0/ contents with undistorted model
+                            for f in os.listdir(undist_sparse):
+                                shutil.move(os.path.join(undist_sparse, f),
+                                            os.path.join(sparse_model_path, f))
+                            log.info(f"Moved undistorted model into {sparse_model_path}")
+                        if os.path.isdir(undist_images):
+                            # Replace images with undistorted versions
+                            for f in os.listdir(undist_images):
+                                shutil.move(os.path.join(undist_images, f),
+                                            os.path.join(image_path, f))
+                            log.info(f"Moved undistorted images into {image_path}")
+                        shutil.rmtree(undist_dir)
                 case "Colmap-to-Nerfstudio":
                     # Ensure we use the largest Colmap model if multiple found
                     if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" \
@@ -2705,10 +2881,17 @@ if __name__ == "__main__":
                             log.info(f"Moving {transforms_out_path} to {transforms_in_path} to preserve original")
                             shutil.move(transforms_out_path, transforms_in_path)
                     pipeline.run_component(i)
+                    # Copy COLMAP database back to dataset path for archiving
+                    if LOCAL_DEBUG and os.path.exists(colmap_db_path):
+                        dataset_db = os.path.join(config['DATASET_PATH'], 'database.db')
+                        shutil.copy2(colmap_db_path, dataset_db)
+                        log.info(f"Copied COLMAP database from {colmap_db_path} to {dataset_db}")
                 case "Nerfstudio-Export":
                     if LOCAL_DEBUG and config['RUN_RECON'] == "false" and config['RUN_TRAIN'] == "false":
                         continue
                     pipeline.run_component(i)
+                    # Clean up CUDA memory after export
+                    cleanup_cuda_memory()
                 case "Train":
                     if LOCAL_DEBUG and config['RUN_RECON'] == "false" and config['RUN_TRAIN'] == "false":
                         continue
@@ -2748,18 +2931,28 @@ if __name__ == "__main__":
                         if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
                             if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
                                 config['RECON_SOFTWARE_NAME'] == "map_anything" or config['RECON_SOFTWARE_NAME'] == "hloc":
-                                # Move the sparse point cloud from sparse/0/* to colmap/sparse/*
+                                # Ensure colmap/sparse structure exists for NerfStudio
                                 log.info('Running Training...')
-                                if config['RUN_RECON'] == "true":
-                                    sparse_path_out = os.path.join(config['DATASET_PATH'], "colmap", "sparse")
-                                    # Remove existing destination if it exists
+                                sparse_path_out = os.path.join(config['DATASET_PATH'], "colmap", "sparse")
+                                if os.path.exists(sparse_path) and os.listdir(sparse_path):
+                                    # sparse/ has content - move it to colmap/sparse/
                                     if os.path.exists(sparse_path_out):
-                                        log.info(f"Removing existing sparse point cloud at {sparse_path_out}")
                                         shutil.rmtree(sparse_path_out)
-                                    # Ensure parent directory exists
                                     log.info(f"Moving sparse point cloud from {sparse_path} to {sparse_path_out}")
                                     os.makedirs(os.path.dirname(sparse_path_out), exist_ok=True)
                                     shutil.move(sparse_path, sparse_path_out)
+                                elif not os.path.exists(sparse_path_out):
+                                    log.error(f"No sparse reconstruction found at {sparse_path} or {sparse_path_out}")
+                                    raise RuntimeError("No sparse reconstruction data found for training")
+                                # Verify colmap/sparse/0 has required files
+                                sparse_0 = os.path.join(sparse_path_out, "0")
+                                if os.path.exists(sparse_0):
+                                    sparse_files = os.listdir(sparse_0)
+                                    log.info(f"colmap/sparse/0 contents: {sparse_files}")
+                                    if not any(f in sparse_files for f in ['cameras.bin', 'cameras.txt']):
+                                        log.error(f"cameras.bin/txt missing in {sparse_0}")
+                                else:
+                                    log.warning(f"colmap/sparse/0 does not exist, contents of colmap/sparse: {os.listdir(sparse_path_out) if os.path.exists(sparse_path_out) else 'N/A'}")                              
                         else: # 3dgrut
                             if has_alpha_channel(os.path.join(image_path, os.listdir(image_path)[0])):
                                 process_images(image_path)
@@ -2777,12 +2970,26 @@ if __name__ == "__main__":
                             log.error(f"CUDA assertion error detected: {error_str}")
                             log.error("Consider reducing the number of Gaussians or using more conservative training parameters.")
                         raise e
+                    # Copy checkpoint and config to output directory immediately after training
+                    # so they are available for debugging if export crashes
+                    if ENABLE_MULTI_GPU == "false" and config['MODEL'] not in ["3dgut", "3dgrt"]:
+                        try:
+                            output_ckpt_dst = os.path.join(output_path, "nerfstudio_models")
+                            output_config_dst = os.path.join(output_path, "config.yml")
+                            if os.path.exists(model_ckpt_path) and not os.path.exists(output_ckpt_dst):
+                                shutil.copytree(model_ckpt_path, output_ckpt_dst)
+                                log.info(f"Copied checkpoint to output for crash recovery: {output_ckpt_dst}")
+                            if os.path.exists(model_config_path) and not os.path.exists(output_config_dst):
+                                shutil.copy2(model_config_path, output_config_dst)
+                                log.info(f"Copied config to output for crash recovery: {output_config_dst}")
+                        except Exception as copy_err:
+                            log.warning(f"Could not copy checkpoint/config to output: {copy_err}")
 
                     # Copy the output ply and checkpoint over to where we expect it (keep originals for export)
                     if ENABLE_MULTI_GPU == "false":
                         if config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
                             root_exp_dir = os.path.join(output_path, TRAIN_EXPERIMENT_NAME)
-                            if config['RUN_RECON'] == "false":
+                            if config['RUN_RECON'] == "false" and not colmap_zip_found:
                                 root_exp_dir = os.path.join(output_path, RESUME_TRAIN_EXPERIMENT_NAME)
                             if LOCAL_DEBUG:
                                 # Find the actual experiment directory (with timestamp) - LOCAL_DEBUG only
@@ -2810,15 +3017,11 @@ if __name__ == "__main__":
                         if config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
                             dest_dir = os.path.join(config['DATASET_PATH'], "3dgrut_models")
                             base_dir = os.path.join(config['DATASET_PATH'], 'exports', TRAIN_EXPERIMENT_NAME)
-                            if config['RUN_RECON'] == "false":
+                            if config['RUN_RECON'] == "false" and not colmap_zip_found:
                                 base_dir = os.path.join(config['DATASET_PATH'], 'exports', RESUME_TRAIN_EXPERIMENT_NAME)
                             src_dir = os.path.join(base_dir, sorted(os.listdir(base_dir))[-1])
                             os.makedirs(dest_dir, exist_ok=True)
                             shutil.copytree(src_dir, dest_dir, dirs_exist_ok=True)
-                case "Nerfstudio-Export":
-                    pipeline.run_component(i)
-                    # Clean up CUDA memory after export
-                    cleanup_cuda_memory()
                 case "Nerfstudio-Export-Nerfacto":
                     # NERFSTUDIO NERFACTO EXPORT CONDITIONAL COMPONENT
                     pipeline.run_component(i)

@@ -316,7 +316,7 @@ RUN wget "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -O "awscliv2
     && unzip awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip
 
 # Install utilities and ensure numpy==1.26.4 for compatibility
-RUN pip install --no-cache-dir scipy 'numpy==1.26.4' Pillow>=10.3.0 'timm>=1.0.0' einops omegaconf fvcore iopath rembg rich natsort trimesh onnxruntime onnxruntime-gpu boto3 
+RUN pip install --no-cache-dir scipy 'numpy==1.26.4' 'Pillow>=9.4.0,<10.0.0' 'timm>=1.0.0' einops omegaconf fvcore iopath rembg rich natsort trimesh onnxruntime onnxruntime-gpu boto3
 
 # Install sharp-frame-extractor separately after scipy is available
 RUN pip install --no-cache-dir sharp-frame-extractor
@@ -364,7 +364,45 @@ RUN git clone --recursive https://github.com/nv-tlabs/3dgrut.git \
     && sed -i 's/^xformers/#xformers/' requirements.txt \
     && sed -i 's/^diffusers/#diffusers/' requirements.txt \
     && pip install -r requirements.txt \
-    && cd ${CODE_PATH}
+    && cd ${CODE_PATH} \
+    && python3 - <<'PATCH_SCRIPT'
+import urllib.request, re
+
+# Download latest SIP pipeline from AttentiveEraser repo
+urls = [
+    ('https://raw.githubusercontent.com/Anonym0u3/AttentiveEraser/master/pipelines/pipeline_stable_diffusion_xl_attentive_eraser.py',
+     '/opt/ml/code/AttentiveEraser/pipelines/pipeline_stable_diffusion_xl_attentive_eraser.py'),
+    ('https://raw.githubusercontent.com/Anonym0u3/AttentiveEraser/master/pipelines/pipeline_stable_diffusion_xl_attentive_eraser_inversion.py',
+     '/opt/ml/code/AttentiveEraser/pipelines/pipeline_stable_diffusion_xl_attentive_eraser_inversion.py'),
+]
+for url, path in urls:
+    urllib.request.urlretrieve(url, path)
+    print(f'Downloaded: {path}')
+
+# Patch DIP inversion pipeline for PyTorch 2.9 + diffusers 0.37+ compatibility
+with open('/opt/ml/code/AttentiveEraser/pipelines/pipeline_stable_diffusion_xl_attentive_eraser_inversion.py') as f:
+    content = f.read()
+
+# Fix 1: record_list dtype cast to prevent Half/Float mismatch
+content = content.replace(
+    'latents = (1 - mask) * self._record_list[i] + mask * latents',
+    'latents = (1 - mask) * self._record_list[i].to(latents.dtype) + mask * latents'
+)
+# Fix 2: x0_latents dtype cast
+content = content.replace(
+    'latents = latents * mask + (1-mask) * self._x0_latents',
+    'latents = latents * mask + (1-mask) * self._x0_latents.to(latents.dtype)'
+)
+# Fix 3: init_image cast - use VAE dtype instead of hardcoded float32
+content = content.replace(
+    'init_image = init_image.to(dtype=torch.float32)',
+    'init_image = init_image.to(dtype=next(self.vae.parameters()).dtype)'
+)
+
+with open('/opt/ml/code/AttentiveEraser/pipelines/pipeline_stable_diffusion_xl_attentive_eraser_inversion.py', 'w') as f:
+    f.write(content)
+print('Patched DIP inversion pipeline for PyTorch 2.9 compatibility')
+PATCH_SCRIPT
 
 # Copy and apply patch for 3DGRUT to fix all CUDA extension import issues with v13
 COPY ./src/pipeline/training/patch_tracer.py ${CODE_PATH}/
@@ -408,7 +446,8 @@ RUN pip install --force-reinstall --no-cache-dir --no-deps pycolmap
 RUN pip install --no-cache-dir --no-deps diffusers && pip install --no-cache-dir accelerate safetensors regex requests transformers
 
 # Final NumPy constraint to fix Numba compatibility (requires NumPy < 2.0)
-RUN pip install --force-reinstall --no-cache-dir 'numpy<2.0,>=1.26.4' 'moviepy==1.0.3'
+# Pin Pillow < 10.0.0 last to prevent NerfStudio pil_to_numpy breakage (ImagingCore.setimage API change)
+RUN pip install --force-reinstall --no-cache-dir 'numpy<2.0,>=1.26.4' 'moviepy==1.0.3' 'Pillow>=9.4.0,<10.0.0'
 
 # Aggressively remove xformers completely after ALL installations
 RUN pip uninstall -y xformers || true && \

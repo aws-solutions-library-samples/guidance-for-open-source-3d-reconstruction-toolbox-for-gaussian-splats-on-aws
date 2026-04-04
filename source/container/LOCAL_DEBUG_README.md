@@ -11,7 +11,7 @@ When `LOCAL_DEBUG` is enabled either as an environment variable or in the `sourc
 - **GPU**: CUDA-capable GPU with 24GB VRAM or more
 - **Memory**: 64GB RAM or more
 - **Storage**: 50GB free disk space minimum
-- **Docker**: GPU support enabled (nvidia-docker or Docker with NVIDIA Container Toolkit)
+- **Docker**: GPU support enabled (NVIDIA Container Toolkit with `nvidia-container-runtime`)
 
 ### Directory Structure
 
@@ -65,11 +65,16 @@ docker run -it \
   -e LOCAL_DEBUG=true \
   -e UUID=test-job-001 \
   -e FILENAME=input.mp4 \
-  -e DATASET_PATH=/mnt/data/workflow-input \
   -v <YOUR-LOCAL-PATH>/guidance-for-open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws/source/container:/mnt/data \
   -v <YOUR-LOCAL-PATH>/guidance-for-open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws/source/container/models:/opt/ml/input/data/model \
   --entrypoint python \
-  --gpus all \
+  --runtime nvidia \
+  --device=/dev/nvidia0:/dev/nvidia0 \
+  --device=/dev/nvidiactl:/dev/nvidiactl \
+  --device=/dev/nvidia-modeset:/dev/nvidia-modeset \
+  --device=/dev/nvidia-uvm:/dev/nvidia-uvm \
+  --device=/dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools \
+  --device=/dev/nvidia-caps:/dev/nvidia-caps \
   --shm-size=8g \
   3dgs-container:latest \
   /opt/ml/code/main.py
@@ -84,7 +89,7 @@ docker run -it \
 cd /<YOUR-LOCAL-PATH>/guidance-for-open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws/source/container
 mkdir -p workflow-input workflow-output models
 
-# Copy your input media
+# Copy your input media (or folder of images)
 cp your-video.mov workflow-input/
 
 # Copy models (if not already in container)
@@ -100,14 +105,16 @@ docker run -it \
   -e LOCAL_DEBUG=true \
   -e UUID=test-job-001 \
   -e FILENAME=input.mov \
-  -e DATASET_PATH=/mnt/data/workflow-input \
-  -e RECON_SOFTWARE_NAME=glomap \
-  -e MODEL=splatfacto \
-  -e MAX_STEPS=15000 \
   -v $(pwd):/mnt/data \
   -v $(pwd)/models:/opt/ml/input/data/model \
   --entrypoint python \
-  --gpus all \
+  --runtime nvidia \
+  --device=/dev/nvidia0:/dev/nvidia0 \
+  --device=/dev/nvidiactl:/dev/nvidiactl \
+  --device=/dev/nvidia-modeset:/dev/nvidia-modeset \
+  --device=/dev/nvidia-uvm:/dev/nvidia-uvm \
+  --device=/dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools \
+  --device=/dev/nvidia-caps:/dev/nvidia-caps \
   --shm-size=8g \
   3dgs-container:latest \
   /opt/ml/code/main.py
@@ -115,6 +122,64 @@ docker run -it \
 # Check results
 ls -lh $(pwd)/workflow-output/job-*/
 ```
+
+### Example Commands
+
+#### Image Directory Input, Set SfM, Set Model, Set Max Steps
+```bash
+docker run -it \
+  -e LOCAL_DEBUG=true \
+  -e UUID=amazon-sphere-images-22k-splatfacto \
+  -e FILENAME=amazon-sphere-images \
+  -e RECON_SOFTWARE_NAME=colmap \
+  -e MODEL=splatfacto \
+  -e THREED_ISP=bilagrid \
+  -e PRESERVE_SCENE_SCALE=true \
+  -e MAX_STEPS=22000 \
+  -v $(pwd):/mnt/data \
+  -v $(pwd)/models:/opt/ml/input/data/model \
+  --entrypoint python \
+  --runtime nvidia \
+  --device=/dev/nvidia0:/dev/nvidia0 \
+  --device=/dev/nvidiactl:/dev/nvidiactl \
+  --device=/dev/nvidia-modeset:/dev/nvidia-modeset \
+  --device=/dev/nvidia-uvm:/dev/nvidia-uvm \
+  --device=/dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools \
+  --device=/dev/nvidia-caps:/dev/nvidia-caps \
+  --shm-size=8g \
+  3dgs-container:latest \
+  /opt/ml/code/main.py
+
+```
+
+#### Resume Model Input, Set Max Steps, Set Export Options
+```bash
+docker run -it \
+  -e LOCAL_DEBUG=true \
+  -e UUID=amazon-sphere-images-30k-splatfacto \
+  -e FILENAME=model.tar.gz \
+  -e RUN_RECON=false \
+  -e MAX_STEPS=30000 \
+  -e ENABLE_USDZ=false \
+  -e ENABLE_SPZ=false \
+  -e CROP_OUTPUT_BOUNDS=true \
+  -e CROP_MODE=large_scale \
+  -v $(pwd):/mnt/data \
+  -v $(pwd)/models:/opt/ml/input/data/model \
+  --entrypoint python \
+  --runtime nvidia \
+  --device=/dev/nvidia0:/dev/nvidia0 \
+  --device=/dev/nvidiactl:/dev/nvidiactl \
+  --device=/dev/nvidia-modeset:/dev/nvidia-modeset \
+  --device=/dev/nvidia-uvm:/dev/nvidia-uvm \
+  --device=/dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools \
+  --device=/dev/nvidia-caps:/dev/nvidia-caps \
+  --shm-size=8g \
+  3dgs-container:latest \
+  /opt/ml/code/main.py
+
+```
+
 
 ## How It Works
 
@@ -137,13 +202,6 @@ ${LOCAL_MOUNT}/workflow-output/${UUID}/
     └── model.tar.gz (for resume training)
 ```
 
-### S3 Components Behavior
-
-When LOCAL_DEBUG is enabled:
-- `S3-Export-*` components copy files locally instead of uploading to S3
-- AWS CLI commands are skipped
-- No AWS credentials required
-
 ## Differences from AWS Mode
 
 | Feature | AWS Mode | Local Debug Mode |
@@ -159,7 +217,41 @@ When LOCAL_DEBUG is enabled:
 
 ## Troubleshooting
 
-### GPU Not Available Error
+### CUDA "No Device" Errors During Pipeline
+
+If you see `CUDA error: no CUDA-capable device is detected` or `RuntimeError: No CUDA GPUs are available` at various pipeline stages (SfM, training, export), the issue is typically how the GPU is passed through to the container. Using `--gpus all` can intermittently fail to expose NVIDIA device nodes to subprocesses.
+
+**Option 1 (Recommended):** Use `--runtime nvidia` with explicit device passthrough as shown in the examples above.
+
+If you get `unknown or invalid runtime name: nvidia`, register the runtime first:
+```bash
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+**Option 2:** Run the container in privileged mode (less secure, but simplest fix):
+```bash
+docker run -it --privileged \
+  -e NVIDIA_VISIBLE_DEVICES=all \
+  -e NVIDIA_DRIVER_CAPABILITIES=all \
+  ...
+```
+
+**Option 3:** If you must use `--gpus all`, ensure your `/etc/docker/daemon.json` has the nvidia runtime configured as default:
+```json
+{
+  "runtimes": {
+    "nvidia": {
+      "path": "nvidia-container-runtime",
+      "runtimeArgs": []
+    }
+  },
+  "default-runtime": "nvidia"
+}
+```
+Then restart Docker: `sudo systemctl restart docker`
+
+### GPU Driver Not Found Error
 
 If you see `could not select device driver "" with capabilities: [[gpu]]`, install NVIDIA Container Toolkit:
 
@@ -177,7 +269,7 @@ sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 
 # Verify GPU access
-docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
+docker run --rm --runtime nvidia --device=/dev/nvidia0:/dev/nvidia0 --device=/dev/nvidiactl:/dev/nvidiactl --device=/dev/nvidia-uvm:/dev/nvidia-uvm nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
 ```
 
 ### Permission Issues

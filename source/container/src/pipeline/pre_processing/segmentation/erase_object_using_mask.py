@@ -73,119 +73,52 @@ from torchvision.utils import save_image
 from diffusers.utils import load_image
 from torchvision.transforms.functional import to_tensor, gaussian_blur, to_pil_image
 
-def preprocess_image(image_path, width, height, device):
+def preprocess_image(image_path, width, height, device, dtype):
     image = to_tensor((load_image(image_path)))
     image = image.unsqueeze_(0).float() * 2 - 1  # [0,1] --> [-1,1]
     if image.shape[1] != 3:
         image = image.expand(-1, 3, -1, -1)
     image = Functional.interpolate(image, (1024, 1024))
-    image = image.to(device)
+    image = image.to(dtype).to(device)
     return image
 
 def preprocess_mask(mask_path, width, height, device, dtype, save_refined=False, refined_dir=None, filename=None):
-    # Load mask - convert RGBA to RGB first, then to grayscale
+    # Load mask - extract alpha channel from RGBA (remove_background output)
     mask_img = Image.open(mask_path)
-    
-    # Handle different mask formats
     if mask_img.mode == 'RGBA':
-        # For RGBA masks, use alpha channel if it exists, otherwise convert RGB
-        alpha = np.array(mask_img)[:, :, 3]
-        if np.max(alpha) > 0:
-            mask_np = alpha / 255.0
-        else:
-            mask_img = mask_img.convert('RGB')
-            mask_np = np.array(mask_img.convert('L')) / 255.0
+        # Alpha channel is the clean human mask from rembg
+        mask_np = np.array(mask_img)[:, :, 3].astype(np.float32) / 255.0
     else:
-        # For other formats, convert to grayscale
-        mask_np = np.array(mask_img.convert('L')) / 255.0
-    
-    # Resize to 1024x1024
-    mask_pil = Image.fromarray((mask_np * 255).astype(np.uint8), 'L')
-    mask_pil = mask_pil.resize((1024, 1024), Image.BILINEAR)
-    mask_np = np.array(mask_pil) / 255.0
-    
-    # If mask is empty after interpolation, skip processing
-    if np.max(mask_np) < 0.001:
-        return None
-    
-    # Boost weak mask values for better inpainting
-    mask_smooth = mask_np
-    if np.max(mask_smooth) < 0.1:  # If mask is very weak
-        mask_smooth = mask_smooth / np.max(mask_smooth)  # Normalize to 0-1
-        mask_smooth = np.power(mask_smooth, 0.5)  # Boost contrast
-    
-    # Blob detection - first merge nearby blobs, then filter
-    binary_mask = (mask_smooth > 0.05).astype(np.uint8)  # Lower threshold
-    
-    # Close gaps between nearby blobs
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel_close)
-    
-    num_labels, labels = cv2.connectedComponents(binary_mask)
-    if num_labels > 1:  # If there are any components
-        min_blob_size = 500   # Minimum pixels for a valid blob
-        valid_components = []
-        
-        # Calculate total image area and min required percentage
-        total_pixels = mask_np.shape[0] * mask_np.shape[1]
-        min_area_percentage = 0.002  # 0.2% of image area minimum (lowered for panorama perspective crops)
-        min_required_pixels = int(total_pixels * min_area_percentage)
-        
-        for i in range(1, num_labels):
-            component_size = np.sum(labels == i)
-            if component_size >= min_blob_size and component_size >= min_required_pixels:
-                valid_components.append(i)
-            elif component_size < min_required_pixels:
-                print(f"Blob {i} too small: {component_size} pixels ({component_size/total_pixels*100:.1f}% of image, need ≥1%)")
-        
-        if valid_components:
-            # Create mask with valid components
-            component_mask = np.zeros_like(labels, dtype=np.float32)
-            for comp_id in valid_components:
-                component_mask[labels == comp_id] = 1.0
-            
-            # Dilate the mask to expand it outward
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-            mask_smooth = cv2.dilate(component_mask, kernel, iterations=2)
-            mask_smooth = cv2.GaussianBlur(mask_smooth, (5, 5), 0)
-            #print(f"Kept {len(valid_components)} blobs (≥1% of image area), dilated")
-        else:
-            # No valid blobs - create black mask
-            mask_smooth = np.zeros_like(mask_smooth)
-            #print(f"All blobs filtered out (< 1% of image area) - creating black mask")
-    else:
-        # Check if single blob meets minimum size requirement
-        total_pixels = mask_np.shape[0] * mask_np.shape[1]
-        mask_pixels = np.count_nonzero(mask_smooth > 0.1)
-        min_area_percentage = 0.002
-        min_required_pixels = int(total_pixels * min_area_percentage)
-        
-        if mask_pixels >= min_required_pixels:
-            # Single blob meets minimum - dilate
-            binary_mask = (mask_smooth > 0.1).astype(np.float32)
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-            mask_smooth = cv2.dilate(binary_mask, kernel, iterations=2)
-            mask_smooth = cv2.GaussianBlur(mask_smooth, (5, 5), 0)
-            #print(f"Single blob meets minimum ({mask_pixels/total_pixels*100:.1f}% of image), dilated")
-        else:
-            # Single blob too small - create black mask
-            mask_smooth = np.zeros_like(mask_smooth)
-            #print(f"Single blob too small: {mask_pixels/total_pixels*100:.1f}% of image (need ≥2%) - creating black mask")
+        mask_np = np.array(mask_img.convert('L')).astype(np.float32) / 255.0
 
-    # Very permissive check - return black mask if empty
-    if np.max(mask_smooth) < 0.001 or np.count_nonzero(mask_smooth) < 10:
-        #print(f"Mask {filename} is empty - returning black mask")
-        mask_smooth = np.zeros_like(mask_smooth)
-    
-    # Save refined mask if requested
+    mask_pil = Image.fromarray((mask_np * 255).astype(np.uint8), 'L')
+    mask = to_tensor(mask_pil).unsqueeze_(0).float()
+    mask = Functional.interpolate(mask, (1024, 1024))
+    mask = gaussian_blur(mask, kernel_size=(3, 3))
+    mask[mask < 0.1] = 0
+    mask[mask >= 0.1] = 1
+    mask = mask.to(dtype).to(device)
+
     if save_refined and refined_dir and filename:
         refined_path = os.path.join(refined_dir, filename)
-        # Ensure mask values are in correct range [0, 255]
-        mask_to_save = np.clip(mask_smooth * 255, 0, 255).astype(np.uint8)
-        cv2.imwrite(refined_path, mask_to_save)
-    
-    # Convert back to tensor
-    mask = torch.from_numpy(mask_smooth).unsqueeze(0).to(dtype).to(device)
+        # Keep only the largest blob for a clean single-region refined mask
+        mask_np = mask.squeeze().cpu().float().numpy()
+        mask_uint8 = (mask_np * 255).astype(np.uint8)
+        binary = (mask_uint8 > 10).astype(np.uint8)
+        n_labels, labels = cv2.connectedComponents(binary)
+        if n_labels > 1:
+            largest = max(range(1, n_labels), key=lambda i: np.sum(labels == i))
+            single_blob = np.where(labels == largest, 255, 0).astype(np.uint8)
+            # Scale dilation with blob size so bleed is proportional to human size
+            blob_size = np.sum(labels == largest)
+            blob_radius = int(np.sqrt(blob_size / np.pi))  # approximate radius
+            dilation_px = max(3, min(20, blob_radius // 10))  # 1/10th of radius, clamped 3-20px
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_px*2+1, dilation_px*2+1))
+            single_blob = cv2.dilate(single_blob, kernel, iterations=1)
+            cv2.imwrite(refined_path, single_blob)
+        else:
+            cv2.imwrite(refined_path, mask_uint8)
+
     return mask
 
 def make_redder(img, mask, increase_factor=0.4):
@@ -234,7 +167,7 @@ def is_mask_black(mask_path, threshold=0.001):
             return True, max_value, non_zero_pixels, total_pixels
         
         # Check if any blob meets the minimum size requirements (similar to preprocess_mask)
-        min_area_percentage = 0.01  # 1% of image area minimum
+        min_area_percentage = 0.003  # 0.3% minimum for perspective crop blobs
         min_required_pixels = int(total_pixels * min_area_percentage)
         
         valid_blobs = 0
@@ -277,7 +210,7 @@ def process_single_image(image_file, mask_path, args, pipeline, device, dtype, r
         width, height = 1024, 1024
         seed = int(args.seed)
         generator = torch.Generator('cuda').manual_seed(seed) if str(args.use_gpu).lower() == "true" else torch.Generator().manual_seed(seed)
-        source_image = preprocess_image(input_path, width, height, device)
+        source_image = preprocess_image(input_path, width, height, device, dtype)
         
         # Always create the refined mask
         mask = preprocess_mask(mask_path, width, height, device, dtype, save_refined=True, refined_dir=refined_mask_dir, filename=os.path.basename(mask_path))
@@ -289,12 +222,16 @@ def process_single_image(image_file, mask_path, args, pipeline, device, dtype, r
             Image.open(input_path).save(output_path)
             return
 
-        # Process with AttentiveEraser
+        # Process with AttentiveEraser and save result directly
         result_image = run_attentive_eraser(source_image, mask, args, pipeline, generator, height, width)
         
-        # Apply blending and save
-        final_image = apply_blending(source_image, mask, result_image, orig_width, orig_height, device)
-        save_image(final_image.squeeze(0), output_path)
+        # Resize back to original dimensions if needed and save
+        if orig_width != 1024 or orig_height != 1024:
+            result_pil = to_pil_image(result_image.clamp(0, 1))
+            result_pil = result_pil.resize((orig_width, orig_height), Image.LANCZOS)
+            result_pil.save(output_path)
+        else:
+            save_image(result_image.clamp(0, 1), output_path)
         
         # Save diff if requested
         if str(args.save_diff).lower() == "true":
@@ -303,61 +240,84 @@ def process_single_image(image_file, mask_path, args, pipeline, device, dtype, r
         log.info(f"Processed {image_file}")
         
     except Exception as e:
+        import traceback
         log.warning(f"Error processing {image_file}: {e}")
+        log.debug(traceback.format_exc())
 
 def run_attentive_eraser(source_image, mask, args, pipeline, generator, height, width):
-    """Run AttentiveEraser inference"""
-    strength = 0.9
-    num_inference_steps = 75
-    END_STEP = int(strength * num_inference_steps)
-
-    # Pipeline is float16 and expects [0,1] range.
-    # source_image is float32 in [-1,1] - convert and cast for pipeline input.
-    # Keep original float32 [-1,1] version for apply_blending.
-    source_fp16 = ((source_image * 0.5 + 0.5).clamp(0, 1)).half()
-    mask_fp16 = mask.half()
-
+    """Run AttentiveEraser inference - SIP or DIP method"""
     if args.method == "DIP":
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
-            start_code, latents_list = pipeline.invert(
-                source_fp16, "", generator=generator, guidance_scale=1,
-                num_inference_steps=END_STEP, return_intermediates=True
-            )
-            return pipeline(
-                prompt="", image=source_fp16, latents=start_code, mask_image=mask_fp16,
-                height=height, width=width, AAS=True, strength=strength,
-                rm_guidance_scale=9, ss_steps=9, ss_scale=0.3, AAS_start_step=0,
-                AAS_start_layer=34, AAS_end_layer=70, num_inference_steps=num_inference_steps,
-                x0_latents=latents_list[0], record_list=list(reversed(latents_list)),
-                generator=generator, guidance_scale=1, output_type='pt'
-            ).images[0]
-    else:
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
-            return pipeline(
-                prompt="", image=source_fp16, mask_image=mask_fp16, height=height, width=width,
-                AAS=True, strength=strength, rm_guidance_scale=9, ss_steps=9, ss_scale=0.3,
-                AAS_start_step=0, AAS_start_layer=34, AAS_end_layer=70,
-                num_inference_steps=num_inference_steps, generator=generator,
-                guidance_scale=1, output_type='pt'
-            ).images[0]
+        # DIP: invert the source image first, then run with inverted latents
+        strength = 0.8
+        num_inference_steps = 50
+        END_STEP = int(strength * num_inference_steps)
+        start_code, latents_list = pipeline.invert(
+            source_image,
+            prompt="",
+            guidance_scale=1,
+            num_inference_steps=END_STEP,
+            return_intermediates=True,
+            generator=generator,
+        )
+        # Cast latents and ensure pipeline is back in fp16 after inversion
+        pipe_dtype = next(pipeline.unet.parameters()).dtype
+        start_code = start_code.to(pipe_dtype)
+        latents_list = [l.to(pipe_dtype) for l in latents_list]
+        pipeline.unet.to(pipe_dtype)  # ensure UNet is fp16 after inversion
+        image = pipeline(
+            prompt="",
+            image=source_image,
+            mask_image=mask,
+            height=height,
+            width=width,
+            AAS=True,
+            strength=strength,
+            rm_guidance_scale=9,
+            ss_steps=9,
+            ss_scale=0.3,
+            AAS_start_step=0,
+            AAS_start_layer=34,
+            AAS_end_layer=70,
+            num_inference_steps=num_inference_steps,
+            generator=generator,
+            guidance_scale=1,
+            latents=start_code,
+            x0_latents=latents_list[0],
+            record_list=list(reversed(latents_list)),
+        ).images[0]
+    else:  # SIP
+        image = pipeline(
+            prompt="",
+            image=source_image,
+            mask_image=mask,
+            height=height,
+            width=width,
+            AAS=True,
+            strength=0.8,
+            rm_guidance_scale=9,
+            ss_steps=9,
+            ss_scale=0.3,
+            AAS_start_step=0,
+            AAS_start_layer=34,
+            AAS_end_layer=70,
+            num_inference_steps=50,
+            generator=generator,
+            guidance_scale=1,
+        ).images[0]
+    # Convert PIL output to tensor [0,1]
+    return to_tensor(image).to(source_image.device)
 
 def apply_blending(source_image, mask, result_image, orig_width, orig_height, device):
     """Apply custom blending and resize to original dimensions"""
-    # Normalise all tensors to float32 for blending - pipeline returns float16,
-    # source_image is float32; mixing dtypes causes 'expected Half but found Float'.
-    source_f32 = source_image.float()
-    mask_f32 = mask.float()
-    result_f32 = result_image.float()
-
-    img_tensor = (source_f32 * 0.5 + 0.5).squeeze(0)
-    mask_red = mask_f32.squeeze(0)
+    img_tensor = (source_image * 0.5 + 0.5).squeeze(0)
+    mask_red = mask.squeeze(0)
     img_redder = make_redder(img_tensor, mask_red)
-    pil_mask = to_pil_image(mask_f32.squeeze(0))
-    mask_blurred = to_tensor(pil_mask).unsqueeze_(0).to(device)
-    mask_f = 1 - (1 - mask_f32) * (1 - mask_blurred)
+    pil_mask = to_pil_image(mask.squeeze(0))
+    mask_blurred = to_tensor(pil_mask).unsqueeze_(0).to(device=mask.device, dtype=mask.dtype)
+    mask_f = 1 - (1 - mask) * (1 - mask_blurred)
 
-    image_1 = result_f32.unsqueeze(0)
-    out_tile = mask_f * image_1 + (1 - mask_f) * (source_f32 * 0.5 + 0.5)
+    image_1 = result_image.unsqueeze(0)
+    out_tile = mask_f * image_1 + (1 - mask_f) * (source_image * 0.5 + 0.5)
 
     if orig_width != 1024 or orig_height != 1024:
         out_tile = Functional.interpolate(out_tile, (orig_height, orig_width), mode='bicubic', align_corners=False)
@@ -468,17 +428,30 @@ if __name__ == '__main__':
         
         log.info(f"Using pipeline: {pipeline_path}")
 
-        # Load pipeline with custom AttentiveEraser pipeline
+        # Load pipeline exactly like test.py - use custom_pipeline with local path
         pipeline = DiffusionPipeline.from_pretrained(
-            model_path, 
-            custom_pipeline=pipeline_path, 
-            scheduler=scheduler, 
-            variant=dtype_, 
-            use_safetensors=True, 
+            model_path,
+            custom_pipeline=pipeline_path,
+            scheduler=scheduler,
+            variant=dtype_,
+            use_safetensors=True,
             torch_dtype=dtype
         )
         pipeline.to(device)
         pipeline.enable_attention_slicing()
+        # Patch GroupNorm to handle fp16/fp32 dtype mismatches (PyTorch 2.9 compatibility)
+        import torch.nn as _nn
+        _orig_gn = _nn.GroupNorm.forward
+        def _patched_gn(self, x):
+            if x.dtype != self.weight.dtype:
+                x = x.to(self.weight.dtype)
+            return _orig_gn(self, x)
+        _nn.GroupNorm.forward = _patched_gn
+
+        # Disable flash attention - causes NaN with fp16 on PyTorch >= 2.0 + CUDA 12.x
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
 
         # Pre-filter images that have valid, non-empty masks
         valid_image_mask_pairs = []
