@@ -1,41 +1,146 @@
-### Understanding the configuration and capabilities
-This Guidance is built with a variety of open source tools that can be used for various use cases. Because of this, many options are contained in this Guidance. The following is a high-level overview of each option and its applicability:
+# Understanding the Configuration and Capabilities
+This Guidance is built with a variety of open source tools that can be used for various use cases. Because of this, many options are contained in this Guidance. The following is a high-level overview of each option and its applicability.
 
-- **Workflow input:**
-    - Video (.mov or .mp4)
-    - Archive (.zip) of images (.png or .jpeg)
-    - Archive (.zip) of pose priors and images (transforms.json, colmap model files)
-- **Workflow output:** .ply and .spz, archive of project files (images, point cloud, metadata)
-- **UUID:** A unique identifier used by backend system to record individual requests in DynamoDB
-- **Instance type:** The EC2 compute resource to use for the workflow. Currently, these instance types are tested and supported:
+## Deployment Configuration
+Each deployment, CDK and Terraform, have their own deployment configuration which can be found at `deployment/cdk/config.json` and `deployment/terraform/config.json`. Use this configuration to customize your deployment based on your use-case.
+
+### Current Deployment Configuration Supported
+- **Account ID:** the AWS account ID to use for the deployment.
+- **Region:** the AWS region to use for the deployment.
+- **Construct Name Prefix:** the string that will be prepended to deployment resources in order to search more easily and group resources.
+- **S3 Trigger Key:** the S3 bucket prefix (folder/directory) to use for the input job configuration. An SNS notification will be setup for this key.
+- **Admin Email:** an email address to receive notifications of job status.
+- **Maintain S3 Objects On Stack Deletion:** whether to delete or archive the S3 objects created with the resources upon stack deletion
+- **Enable CodeBuild Container Build:** whether to enable building the container on the cloud. This will free up your computer from building the container which can take up to an hour to install.
+
+### Current Job Schema Supported
+
+<details>
+    <summary>Click to expand Job JSON Schema</summary>
+
+    {
+        "uuid": "010d5342-1876-4012-8868-c548b020b91c",
+        "instanceType": "ml.g5.8xlarge",
+        "useSpotInstance": "true",
+        "logVerbosity": "info",
+        "s3": {
+            "bucketName": "3dgs-bucket-******",
+            "inputPrefix": "media-input",
+            "inputKey": "venetian_010d5342-1876-4012-8868-c548b020b91c.mp4",
+            "outputPrefix": "workflow-output"
+        },
+        "videoProcessing": {
+            "maxNumImages": "800",
+            "videoStartTime": 0,
+            "videoStopTime": null,
+            "filterBlurryImages": true
+        },
+        "reconstruction": {
+            "enable": true,
+            "softwareName": "glomap",
+            "posePriors": {
+                "usePosePriorColmapModelFiles": false,
+                "usePosePriorTransformJson": {
+                    "enable": false,
+                    "sourceCoordinateName": "arkit",
+                    "poseIsWorldToCam": true
+                }
+            },
+            "enableEnhancedFeatureExtraction": false,
+            "matchingMethod": "sequential",
+            "enableFlHeuristic": false,
+            "flHeuristicValue": "1.1"
+        },
+        "training": {
+            "enable": true,
+            "maxSteps": "30000",
+            "model": "splatfacto",
+            "preserveSceneScale": false,
+            "3dIsp": "bilagrid"
+        },
+        "postProcessing": {
+            "cropOutputBounds": true,
+            "cropMode": "environment",
+            "cleanSplat": false,
+            "enableSpz": true,
+            "enableSog": true,
+            "enableUsdz": false,
+            "plyCoords": "rhyu",
+            "spzCoords": "rhyu",
+            "sogCoords": "rhyu",
+            "usdzCoords": "rhyu"
+        },
+        "sphericalCamera": {
+            "enable": true,
+            "cubeFacesToRemove": [
+                "down",
+                "up"
+            ]
+        },
+        "segmentation": {
+            "backgroundRemoval": {
+                "enable": false,
+                "model": "sam2",
+                "maskThreshold": "0.6"
+            },
+            "objectRemoval": {
+                "enable": true,
+                "action": "erase",
+                "objects": "['human']"
+            }
+        }
+    }
+
+</details>
+
+## Container Configuration
+- **General**
+    - **Workflow input:**
+        - Video (.mov or .mp4)
+        - Archive (.zip) of images (.png or .jpeg)
+        - Archive (.zip) of pose priors and images (transforms.json, colmap model files)
+        - Archive (.tar.gz) of previous dataset and checkpoint (for resume training)
+    - **Workflow output:**
+        - .ply, .sog, .spz, .usdz
+        - .mp4 (trajectory rendering), .jpg (render thumbnail)
+        - archive of project files (images, point cloud, metadata)
+        - evaluation metrics (psnr, ssim, lpips)
+
+- **UUID:** (string), a unique identifier used by backend system to record individual requests in DynamoDB
+- **Instance type:** (string), the EC2 compute resource to use for the workflow. Currently, these instance types are tested and supported:
     - ml.g5.4xlarge (recommended for <500 4k images)
     - ml.g5.8xlarge (recommended for <500 4k images)
+    - ml.g5.12xlarge (multi-gpu for faster training)
     - ml.g6e.4xlarge (for large datasets (e.g. >500 4k images or 3DGRT))
     - ml.g6e.8xlarge (for large datasets (e.g. >500 4k images or 3DGRT))
+- **Use Spot instance:** (boolean), whether to use AWS Batch and spot instances for decrease in processing costs with an increase in queue times
+- **Log verbosity:** (string), log levels include info, warning, and error
 - **S3:**
-    - **Bucket name:** The name of the S3 bucket that was deployed by CDK/Terraform. This is an output from the deployment.
-    - **Input prefix:** The S3 prefix (initial directory minus the job prefix) for the input media
-    - **Input key:** The S3 key for the input media
-    - **Output prefix:** The S3 prefix (initial directory minus the job prefix) for the output files
-    - **S3 Job prefix:** The S3 prefix (initial directory) for the job json files
+    - **Bucket name:** (string), the name of the S3 bucket that was deployed by CDK/Terraform. This is an output from the deployment.
+    - **Input prefix:** (string), the S3 prefix (initial directory minus the job prefix) for the input media
+    - **Input key:** (string), the S3 key for the input media
+    - **Output prefix:** (string), the S3 prefix (initial directory minus the job prefix) for the output files
 - **Video processing:**
     - **Max number of images:** (integer), the maximum number of images to use when a video is given as input. If using a `.zip` file with images or pose priors, this parameter will be ignored.
-- **Image processing:**
     - **Filter blurry images:** (boolean), whether to remove blurry images from the dataset. If using a `.zip` file with pose priors, this parameter will be ignored.
-- **Structure from motion (SfM):**
-    - **Enable:** true or false, Whether to enable SfM or not. Future plans will enable input of SfM output
-    - **Software name:** colmap or glomap, software to use for the triangulation of the mapper
-    - **Enable enhanced feature extraction:** true or false, whether to enable enhanced feature extraction which uses `estimate_affine_shape` and `domain_size_pooling` to enhance the feature matching
+    - **Video start time:** (integer), the time in seconds to start extracting frames from the video.
+    - **Video stop time:** (integer), the time in seconds to stop extracting frames from the video.
+- **Reconstruction (SfM):**
+    - **Enable:** (boolean), whether to enable SfM or not. Future plans will enable input of SfM output
+    - **Software name:** (string), colmap, glomap, or hloc. Software to use for the triangulation of the mapper
+    - **Enable enhanced feature extraction:** (boolean), whether to enable enhanced feature extraction which uses `estimate_affine_shape` to enhance the feature matching
     - **Matching method:**
         - sequential (best for videos or images that share overlapping features)
-        - spatial (best to use for pose priors to take spatial orientation into account)
-        - vocab (best for large datasets that are not sequentially bound e.g. <1000 images)
+        - spatial (best to use for pose priors or GPS to take spatial orientation into account)
+        - vocab (best for large datasets that are not sequentially bound)
         - exhaustive (only use this method if dataset struggles to converge with other methods)
+    - **Enable focal length heuristic:** (boolean), whether to enable focal length estimate to help normalize the scene scale if focal length is unknown. This uses the formula `focal_length = fl_heur_val*max(x_res, y_res)`
+    - **Focal length heuristic value:** (string), coefficient used in focal length heuristic (default: 1.2). 
     - **Pose priors:** in order to speed up reconstruction, camera poses associated with the images can be used as input. In particular, this feature accepts a `.zip` archive folder that has the same schema as [NerfCapture](https://github.com/jc211/NeRFCapture/tree/main){:target="_blank"} or can be a `.zip` archive folder that contains images and sparse directories with [Colmap model text files](https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses){:target="_blank"}.
 
-        > At this time, depth images are not used in the splat process.
+        > *At this time, depth images are not used in the splat process.*
 
-        > ***Note: All image files must be sequentially named and padded (e.g. 001.png, 002.png, etc.)***
+        > ***Note:** All image files must be sequentially named and padded (e.g. 001.png, 002.png, etc.)*
 
         - **Use pose prior Colmap model files:** see [Colmap model text files](https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses){:target="_blank"}
             - The file schema for providing the already created Colmap model files looks like this
@@ -55,7 +160,7 @@ This Guidance is built with a variety of open source tools that can be used for 
                 </pre>
                 </details>
         - **Use pose prior transform JSON:** see [NerfCapture](https://github.com/jc211/NeRFCapture/tree/main){:target="_blank"}
-            > Ensure the `.zip` contains both the `transforms.json` file and an `/images` directory with sequentially named RGB images.
+            > *Ensure the `.zip` contains both the `transforms.json` file and an `/images` directory with sequentially named RGB images.*
             - **Enable:** (boolean), whether to enable using `transforms.json` file for pose priors.
             - **Source coordinate name:** ("arkit" or "arcore" or "opengl" or "opencv" or "ros"), the source coordinates used with pose priors
             - **Pose is world-to-camera:** (boolean), whether the source coordinates for pose priors are in world-to-camera (True) or camera-to-world (False)
@@ -142,11 +247,10 @@ This Guidance is built with a variety of open source tools that can be used for 
                 </code>
                 </pre>
                 </details>
-
 - **Training:**
-    - **Enable:** true or false, whether to enable 3DGS training or not. Future plans will enable user to only perform SfM
+    - **Enable:** (boolean), whether to enable 3DGS training or not. Future plans will enable user to only perform SfM
     - **Maximum steps:** (integer), The maximum training steps to use while training the splat
-    - **Splat model:** splatfacto, splatfacto-big, splatfacto-w-light, nerfacto, the GS model to use for training
+    - **Splat model:** (string), splatfacto, splatfacto-mcmc, splatfacto-big, splatfacto-w-light, 3dgrt, 3dgut, nerfacto, The 3DGS model to use for training
         - Pointers:
             - **splatfacto:** a great, generalized model that is perfect to start with if you are unsure what model to choose
             - **splatfacto-big:** high quality model that should be used to output feature-rich scenes and objects. This will yield a larger .ply file.
@@ -155,34 +259,63 @@ This Guidance is built with a variety of open source tools that can be used for 
             - **nerfacto:** used for testing and comparisons between NeRF and GS. The output will be a NeRF. Beware, this model will need more images than GS in order to maintain higher quality.
             - **3dgut:** used for enabling Distorted Cameras and Secondary Rays in Gaussian Splatting. Great for fisheye camera input.
             - **3dgrt:** used for 3D Gaussian Ray Tracing and Fast Tracing of Particle Scenes. Great for highly detailed scenes at the cost of processing power and time
-    - **Rotate splat:** true or false, whether to rotate the output splat for the Gradio 3D Model viewer coordinate system (set to true will rotate both the .ply and .spz)
+    - **Preserve scene scale:** (boolean), whether to preserve the reconstruction scale during gaussian splat training
+    - **3D image signal processing:** (string), technique to use for scene signal processing. Current options are bilagrid (bilateral grid), ppisp (physically plausible image signal processing)
+
+- **Post Processing:**
+    - **Crop output bounds:** (boolean), whether to crop gaussians that are outliers.
+    - **Crop mode:** (string), mode to use for cropping the gaussian scene. Options include environment and rigid_object.
+    - **Clean splat:** (boolean), whether to clean gaussians that are noisy.
+    - **Enable spz output:** (boolean), whether to output a compressed .spz file.
+    - **Enable sog output:** (boolean), whether to output a compressed .sog file.
+    - **Enable usdz output:** (boolean), whether to output a compressed .usdz file.
+    - **Ply Coordinates:** (string), the coordinate system to transform the .ply to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
+    - **Spz Coordinates:** (string), the coordinate system to transform the .spz to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
+    - **Sog Coordinates:** (string), the coordinate system to transform the .sog to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
+    - **Usdz Coordinates:** (string), the coordinate system to transform the .usdz to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
+
 - **Spherical camera:**
-    - **Enable:** true or false, whether to enable 360 camera support or not
+    - **Enable:** (boolean), whether to enable 360 camera support or not
     - **Cube faces to remove:** "['back', 'down', 'front', 'left', 'right', 'up']", a list of cube faces to remove from the spherical image. This is great for cropping out people or objects from the 360 image. 
-    > ***Note:** The above configurations were tested with an Insta360 ONE X2, exporting frame(s) in equirectangular format, 9:16 ratio, 5.7k resolution, and 30 frames per second. The captures were taken with the camera display aimed toward the person capturing the frame(s).*
+
+    > *Note: The above configurations were tested with an Insta360 ONE X2, exporting frame(s) in equirectangular format, 9:16 ratio, 5.7k resolution, and 30 frames per second. The captures were taken with the camera display aimed toward the person capturing the frame(s).*
+
 
     <div align="center">
-    {% include image.html file="open_3drt_images/erp-views.png" alt="Equirectangular Cube Map Views" %}
-    <i>Figure 12: Equirectangular cube map views from a spherical camera</i>
+    <img src="assets/images/erp-views.png" width=70%> 
+    <br/>
+    <i>Figure 1: Equirectangular cube map views from a spherical camera</i>
     </div>
     <p>
     <br>
     </p>
     <div align="center">
-    {% include image.html file="open_3drt_images/erp-masked.png" alt="Filtered equirectangular image" %}
-    <i>Figure 13: Example: Enable Spherical Camera = true, Cube Faces to Remove = "['back', 'down']"</i>
-    </div>
+    <img src="assets/images/erp-masked.png" width=70%> 
+    <br/>
+    <i>Figure 2: Equirectangular cube map views from a spherical cameraExample: Enable Spherical Camera = true, Cube Faces to Remove = "['back', 'down']"</i>
     <p>
     <br>
     </p>
 
 - **Segmentation:**
-    - **Remove background:** true or false, whether to remove the background when input an object (not scene) or not
-    - **Background removal model:** "u2net", "u2net-human", or "sam2" the background removal model to use
-    > *Note: The sam2 model can only be used on video at this time*
-    - **Remove human subject:** true or false, whether to remove humans from the scene or not. This can be combined with other removal methods such as background removal and cube face removal.
+    - **Background removal:**
+        - **Enable:** (boolean), whether to remove the background when input an object (not scene) or not
+        - **Background removal model:** "u2net" or "sam2" the background removal model to use
+        > *Note: The sam2 model can only be used on video at this time*
+        - **SAM2 mask threshold:** (string), threshold to use for mask. If object doesn't have large contrast from the background, use lower number like 0.38.
 
     <div align="center">
-    {% include image.html file="open_3drt_images/background-removal-img.gif" alt="Background removal" %}
-    <i>Figure 14: Background removal using SAM2</i>
-    </div>
+    <img src="assets/images/background-removal-img.gif" width=70%> 
+    <br/>
+    <i>Figure 3: Background removal using SAM2</i>
+    <br/>
+
+- **Object removal:**
+    - **Enable:** (boolean), whether to remove objects from images
+    - **Action:** (string), whether to erase or remove the objects.
+    - **Objects:** (string list), the list of objects to remove. Currently only human is supported.
+
+    <div align="center">
+    <img src="assets/images/object-removal-example.png" width=70%> 
+    <br/>
+    <i>Figure 4: Erasing humans from the dataset</i>

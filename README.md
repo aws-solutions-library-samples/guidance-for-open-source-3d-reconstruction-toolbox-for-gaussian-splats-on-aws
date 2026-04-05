@@ -80,6 +80,7 @@ This guidance will:
 
 In this project, there is only one Docker container that contains all of the 3D reconstruction tools for Gaussian Splatting. This container has a `Dockerfile`, `main.py`, and helper script files and open source libraries under the `source/container` directory. The main script processes each request from the SageMaker or Batch Training Job using ECS invoke message and saves the result to S3 upon successful completion.
 
+For debugging purposes, the container can be deployed locally using [this](source/container/LOCAL_DEBUG_README.md) document.
 
 Current features and open source libraries include:
 
@@ -93,6 +94,7 @@ Current features and open source libraries include:
 | Segmentation     | Remove Background                                            | [backgroundremover](https://github.com/nadermx/backgroundremover) [(MIT)](https://github.com/nadermx/backgroundremover?tab=MIT-1-ov-file#readme), [sam2](https://github.com/facebookresearch/sam2) [(Apache-2.0/BSD-3-Clause)](https://github.com/facebookresearch/sam2/blob/main/LICENSE) | Yes |Use u2net or SAM2 to detect objects (rigid body) and remove background. SAM2 only supports video.            |
 | Reconstruction   | Images to Point Cloud/Poses - Incremental SfM                | [Colmap](https://github.com/colmap/colmap) [(BSD)](https://github.com/colmap/colmap?tab=License-1-ov-file#readme) | Yes |Supports Colmap. input video/images only or images + pose-priors.                                            |
 | Reconstruction   | Images to Point Cloud/Poses - Global SfM                     | [Glomap](https://github.com/colmap/glomap) [(BSD-3-Clause)](https://github.com/colmap/glomap?tab=BSD-3-Clause-1-ov-file#readme) | Yes |Supports Glomap. input video/images only or images + pose-priors.                                            |
+| Reconstruction   | Images to Point Cloud/Poses - Hierarchical SfM               | [HLOC](https://github.com/cvg/Hierarchical-Localization) [(Apache-2.0)](https://github.com/cvg/Hierarchical-Localization?tab=Apache-2.0-1-ov-file#readme) | Yes |Supports Hloc. input video/images only or images + pose-priors.                                            |
 | Reconstruction   | Images to Point Cloud/Poses - Transformer                     | [MapAnything](https://github.com/facebookresearch/map-anything) [(Apache-2.0)](https://github.com/facebookresearch/map-anything#Apache-2.0-1-ov-file) | Yes | Supports MapAnything with GPU (limited to < 50 images)                                                 |
 | Training         | Images, Point Cloud, & Poses to Gaussian Splat               | [NerfStudio](https://github.com/nerfstudio-project/nerfstudio) [(Apache-2.0)](https://github.com/nerfstudio-project/nerfstudio/tree/main?tab=Apache-2.0-1-ov-file#readme), [gsplat](https://github.com/nerfstudio-project/gsplat) [(Apache-2.0)](https://github.com/nerfstudio-project/gsplat?tab=Apache-2.0-1-ov-file#readme), [splatfacto-w](https://github.com/KevinXu02/splatfacto-w) [(Apache-2.0)](https://github.com/KevinXu02/splatfacto-w?tab=Apache-2.0-1-ov-file#readme), [3DGRUT](https://github.com/nv-tlabs/3dgrut) [(Apache-2.0)](https://github.com/nv-tlabs/3dgrut#Apache-2.0-1-ov-file) | Yes | Supports splatfacto, splatfacto-big, splatfacto-mcmc, splatfacto-w-light, 3dgrt, 3dgut, nerfacto              |
 | Training         | 3D Image Signal Processing - Bilateral Grid, PPISP              | [PPISP](https://github.com/nv-tlabs/ppisp) [(Apache-2.0)](https://github.com/nv-tlabs/ppisp?tab=Apache-2.0-1-ov-file), [Bilateral Grid](https://github.com/yuehaowang/bilarf) [(Apache-2.0)](https://github.com/yuehaowang/bilarf?tab=Apache-2.0-1-ov-file) | Yes | Supports Bilateral Grid and PPISP            |
@@ -141,7 +143,7 @@ An active AWS Account with IAM user or role with elevated permissions to deploy 
 
 _You are responsible for the cost of the AWS services used while running this Guidance. As of May 2025, the cost for running this Guidance with the default settings in the default AWS Region (US East 1(N. Virginia)) is approximately $73.33 per month for processing 100 requests._
 
-_We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to help manage costs. Prices are subject to change. For full details, refer to the pricing webpage for each AWS service used in this Guidance._
+_We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to help manage costs. Prices are subject to change. For full details, refer to the pricing webpage for each AWS service used in this Guidance._
 
 ### Cost Table
 
@@ -229,4 +231,3 @@ This library is licensed under the MIT-0 License. See the [LICENSE](./LICENSE) f
 - [Dario Macangano](https://www.linkedin.com/in/dario-macagnano-6b7562b9/), Sr. Worldwide Visual Compute SA
 - [Stanford Lee](https://www.linkedin.com/in/stanfordlee/), Technical Account Manager (Spatial Computing TFC)
 - [Daniel Zilberman](https://www.linkedin.com/in/danzilberman/), Sr. Specialist SA, Prototyping & Scaling
-
