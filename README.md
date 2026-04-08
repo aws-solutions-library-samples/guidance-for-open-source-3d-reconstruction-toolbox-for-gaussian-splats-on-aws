@@ -14,7 +14,7 @@
 
 ## Overview
 
-The Open Source 3D Reconstruction Toolbox for Gaussian Splats provides an end-to-end, pipeline-based guidance on AWS to reconstruct 3D scenes or objects from images or video inputs. The infrastructure can be deployed via AWS Cloud Development Kit (CDK) or Terraform leveraging infrastructure-as-code.
+The Open Source 3D Reconstruction Toolbox for [Gaussian Splats](https://huggingface.co/blog/gaussian-splatting) provides an end-to-end, pipeline-based AWS prescriptive guidance to reconstruct 3D scenes or objects from images or video inputs. The infrastructure can be deployed via AWS Cloud Development Kit (CDK) or Terraform leveraging infrastructure-as-code.
 
 Once deployed, the guidance features a full 3D reconstruction back-end system with the following customizable components or pipelines:
 
@@ -46,7 +46,7 @@ This guidance will:
 ### Architecture Steps
 1. User authenticates to [AWS Identity and Access Management (IAM)](https://aws.amazon.com/iam/) via AWS Tools and SDKs.
 2. The input is uploaded to a dedicated [Amazon Simple Storage Service (S3)](https://aws.amazon.com/s3/)  job bucket location. This can be done using a Gradio interface and AWS Software Development Kit (SDK).
-3. Optionally, the solution supports external job submission by uploading a ‘.JSON’ job configuration file and media into a designated S3 job bucket location. 
+3. Optionally, the guidance supports external job submission by uploading a ‘.JSON’ job configuration file and media into a designated S3 job bucket location. 
 4. The job JSON file uploaded to the S3 job bucket will trigger an [Amazon Simple Notification Service (SNS)](https://aws.amazon.com/sns/) message that will invoke an initialization [AWS Lambda](https://aws.amazon.com/lambda/) function.
 5. The job trigger **AWS Lambda** function will perform input validation and set appropriate variables for the [AWS Step Function State Machine](https://aws.amazon.com/step-functions/).
 6. The workflow job record will be created in [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) job table.
@@ -111,13 +111,13 @@ Current features and open source libraries include:
 
 ### Third-party tools
 
-- Git
-- Docker
-- Terraform (if choosing not to deploy infrastructure using CDK)
+- [Git CLI](https://cli.github.com/)
+- [Docker](https://www.docker.com/) 
+- [Terraform](https://developer.hashicorp.com/terraform/tutorials/aws-get-started/install-cli) if choosing not to deploy infrastructure using [AWS CDK](https://aws.amazon.com/cdk/) 
 
 ### AWS account requirements
 
-An active AWS Account with IAM user or role with elevated permissions to deploy resources is required to deploy this guidance, along with either a local computer with appropriate AWS credentials to deploy the CDK or Terraform solution, or utilize an AWS EC2 workstation to build and deploy the CDK or Terraform solution. Please refer to the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.
+An active AWS Account with IAM user or role with elevated permissions to deploy resources is required to deploy this guidance, along with either a local computer with appropriate AWS credentials to deploy the CDK or Terraform guidance, or utilize an AWS EC2 instance to build and deploy the CDK or Terraform guidance. Please refer to the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.
 
 - EC2 (if choosing not to deploy infrastructure from your local computer)
 - IAM roles with permissions
@@ -129,13 +129,13 @@ An active AWS Account with IAM user or role with elevated permissions to deploy 
 - SageMaker Training Jobs
 - Batch Jobs
 - Step Functions State Machine
-- CDK (Please refer to the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.)
+- AWS CDK (Please refer to the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.)
 
 ### Service limits
 
 - [Service quotas](https://docs.aws.amazon.com/servicequotas/latest/userguide/intro.html) - increases can be requested via the AWS Management Console, AWS CLI, or AWS SDKs (see [Accessing Service Quotas](https://docs.aws.amazon.com/servicequotas/latest/userguide/intro.html#access))
 
-- This solution runs SageMaker Training Jobs or Batch Jobs which uses a Docker container to run the training. This deployment guide walks through building a custom container image for SageMaker or Batch.
+- This guidance runs SageMaker Training Jobs or Batch Jobs which uses a Docker container to run the training. This deployment guide walks through building a custom container image for SageMaker or Batch.
   - Depending on what instances you will be using to train on (configured during job submission, ml.g5.4xlarge is the default), you may need to adjust the SageMaker Training Jobs or Batch Jobs quota. This will be under the SageMaker service in Service Quotas named "training job usage" or AWS Batch Job "instance usage".
   - (Optional) You can optionally build and test this container locally (not running on AWS Services) on a GPU-enabled EC2 instance. If you plan to do this, increase the EC2 quota named "Running On-Demand G and VT instances" and/or "Running On-Demand P instances", depending on the instance family you plan to use, to a desired maximum number of vCPUs for running instances of the target family. Note, this is vCPUs NOT number of instances like the SageMaker Training Jobs quota.
 
@@ -209,15 +209,14 @@ At the time of publishing (Mar 2026), the codebase was scanned using [Semgrep](h
 | Error   | False Positive  | Codeguru     | Path traversal — sharp_video_to_images.py:65 | User-controlled input in file paths | The `video_path` and `output_dir` arguments in `sharp_video_to_images.py` are validated at the CLI entry point via `argparse` and originate from the job configuration validated in `main.py`. Codeguru does not trace the upstream validation. |
 | Error   | False Positive  | Codeguru     | Path traversal — rotate_portrait_images.py:109 | User-controlled input in file paths | The `image_dir` and `dataset_path` arguments are validated at the CLI entry point and originate from the job configuration validated in `main.py`. The video file path is constructed from `os.listdir()` on the validated dataset directory. Codeguru does not trace the upstream validation. |
 | Error   | False Positive  | Codeguru     | Path traversal — run_map_anything.py:108 | User-controlled input in file paths | All paths in `run_map_anything.py` are derived from the `scene_dir` argument validated at the CLI entry point. Internal paths are constructed using `os.path.join()` with the validated base directory. Codeguru does not trace the upstream validation. |
-|
 
 ## Deployment and User Guide
 
-For detailed guidance deployment steps and running the guidance as a user please see the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
+For detailed deployment steps and running this guidance, please see the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html)
 
 ## Next Steps
 
-This robust framework for 3D reconstruction serves as a fundamental building block for scalable construction of 3D environments and content workflows. You can extend this solution in multiple ways: embed it into your web applications, integrate it with game engines for interactive experiences, or implement it in virtual production environments - these are just a few possibilities to support your requirements.
+This robust framework for 3D reconstruction serves as a fundamental building block for scalable construction of 3D environments and content workflows. You can extend this guidance in multiple ways: embed it into your web applications, integrate it with game engines for interactive experiences, or implement it in virtual production environments - these are just a few possibilities to support your requirements.
 
 By leveraging other AWS services, you can further enhance your workflow to scale, share, and optimize your 3D reconstruction needs, whatever they might be.
 
