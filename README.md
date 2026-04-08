@@ -45,7 +45,7 @@ This guidance will:
 
 ### Architecture Steps
 1. User authenticates to [AWS Identity and Access Management (IAM)](https://aws.amazon.com/iam/) via AWS Tools and SDKs.
-2. The input is uploaded to a dedicated [Amazon Simple Storage Service (S3)](https://aws.amazon.com/s3/)  job bucket location. This can be done using a Gradio interface and AWS Software Development Kit (SDK).
+2. The input is uploaded to a dedicated [Amazon Simple Storage Service (S3)](https://aws.amazon.com/s3/) job bucket location. This can be done using a Gradio interface and AWS Software Development Kit (SDK).
 3. Optionally, the guidance supports external job submission by uploading a ‘.JSON’ job configuration file and media into a designated S3 job bucket location. 
 4. The job JSON file uploaded to the S3 job bucket will trigger an [Amazon Simple Notification Service (SNS)](https://aws.amazon.com/sns/) message that will invoke an initialization [AWS Lambda](https://aws.amazon.com/lambda/) function.
 5. The job trigger **AWS Lambda** function will perform input validation and set appropriate variables for the [AWS Step Function State Machine](https://aws.amazon.com/step-functions/).
@@ -55,7 +55,7 @@ This guidance will:
 9. The [Amazon Elastic Container Registry (ECR)](https://aws.amazon.com/ecr/) container image and S3 job bucket model artifacts will be used to spin up a new Graphics Processing Unit (GPU) container. The compute node instance type is determined by the job JSON configuration.
 10. The GPU container will run the entire pipeline as an **Amazon SageMaker** training or **AWS Batch** job.
 11. The job completion **AWS Lambda** function will complete the workflow job by updating the job metadata in **Amazon DynamoDB** and notifying the user via email upon completion using **Amazon SNS**.
-12. Internal workflow parameters are stored in [AWS System Manager Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html) during guidance deployment to decouple the job trigger **AWS Lambda** function and the **AWS Step Function State Machine**.
+12. Internal workflow parameters are stored in [AWS Systems Manager Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html) during guidance deployment to decouple the job trigger **AWS Lambda** function and the **AWS Step Function State Machine**.
 13. [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/) is used to monitor the training logs, surfacing errors to the user.
 
 ### AWS Services in this Guidance
@@ -67,8 +67,8 @@ This guidance will:
 | [Amazon Simple Notification Service (SNS)](https://aws.amazon.com/sns/)            | Core | Send completion status via notification to email                                                 |
 | [AWS Step Functions](https://aws.amazon.com/step-functions/)                       | Core | Orchestrate the 3D reconstruction workflow                                                       |
 | [Amazon DynamoDB](https://aws.amazon.com/dynamodb/)                                | Core | Store training job details and attributes                                                        |
-| [Amazon SageMaker](https://aws.amazon.com/sagemaker/)                              | Core | Run 3D reconstruction pipeline processing on container using On-Demand instances                                          |
-| [AWS Batch](https://aws.amazon.com/batch/)                              | Core | Run 3D reconstruction pipeline processing on container using Spot instances                                          |
+| [Amazon SageMaker](https://aws.amazon.com/sagemaker/)                              | Core | Run 3D reconstruction pipeline processing on a container using On-Demand instances                                          |
+| [AWS Batch](https://aws.amazon.com/batch/)                              | Core | Run 3D reconstruction pipeline processing on a container using Spot instances                                          |
 | [Amazon Elastic Container Service](https://aws.amazon.com/ecs/)                    | Core | Orchestrate 3D reconstruction pipeline processing on containers                                       |
 | [Amazon Elastic Container Registry](https://aws.amazon.com/ecr/)                   | Core | Image store for the custom created container                                                     |
 | [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/)                            | Core | Monitor logs and surface errors to SNS                                                           |
@@ -78,7 +78,7 @@ This guidance will:
 
 ### Custom GS Pipeline Container
 
-In this project, there is only one Docker container that contains all of the 3D reconstruction tools for Gaussian Splatting. This container has a `Dockerfile`, `main.py`, and helper script files and open source libraries under the `source/container` directory. The main script processes each request from the SageMaker or Batch Training Job using ECS invoke message and saves the result to S3 upon successful completion.
+In this project, there is only one Docker container that contains all of the 3D reconstruction tools for Gaussian Splatting. This container has a `Dockerfile`, `main.py`, and helper script files and open source libraries under the `source/container` directory. The main script processes each request from the SageMaker or Batch Training Job using an ECS invoke message and saves the result to S3 upon successful completion.
 
 For debugging purposes, the container can be deployed locally using [this](source/container/LOCAL_DEBUG_README.md) document.
 
@@ -92,8 +92,8 @@ Current features and open source libraries include:
 | Segmentation     | Erase Objects                                                | [rembg](https://github.com/danielgatis/rembg/) [(MIT)](https://github.com/danielgatis/rembg/#MIT-1-ov-file), [Attentive-Eraser](https://github.com/Anonym0u3/AttentiveEraser) [(Apache-2.0)](https://github.com/Anonym0u3/AttentiveEraser#Apache-2.0-1-ov-file) | Yes | Use u2net to classify objects and erase them using diffusion/in-painting. Supports "human".                  |
 | Segmentation     | Remove Objects                                               | [rembg](https://github.com/danielgatis/rembg/) [(MIT)](https://github.com/danielgatis/rembg/#MIT-1-ov-file) | Yes | Use u2net to classify objects and remove/mask them. Supports "human".                                        |
 | Segmentation     | Remove Background                                            | [backgroundremover](https://github.com/nadermx/backgroundremover) [(MIT)](https://github.com/nadermx/backgroundremover?tab=MIT-1-ov-file#readme), [sam2](https://github.com/facebookresearch/sam2) [(Apache-2.0/BSD-3-Clause)](https://github.com/facebookresearch/sam2/blob/main/LICENSE) | Yes |Use u2net or SAM2 to detect objects (rigid body) and remove background. SAM2 only supports video.            |
-| Reconstruction   | Images to Point Cloud/Poses - Incremental SfM                | [Colmap](https://github.com/colmap/colmap) [(BSD)](https://github.com/colmap/colmap?tab=License-1-ov-file#readme) | Yes |Supports Colmap. input video/images only or images + pose-priors.                                            |
-| Reconstruction   | Images to Point Cloud/Poses - Global SfM                     | [Glomap](https://github.com/colmap/glomap) [(BSD-3-Clause)](https://github.com/colmap/glomap?tab=BSD-3-Clause-1-ov-file#readme) | Yes |Supports Glomap. input video/images only or images + pose-priors.                                            |
+| Reconstruction   | Images to Point Cloud/Poses - Incremental SfM                | [Colmap](https://github.com/colmap/colmap) [(BSD)](https://github.com/colmap/colmap?tab=License-1-ov-file#readme) | Yes |Supports Colmap input video/images only or images + pose-priors.                                            |
+| Reconstruction   | Images to Point Cloud/Poses - Global SfM                     | [Glomap](https://github.com/colmap/glomap) [(BSD-3-Clause)](https://github.com/colmap/glomap?tab=BSD-3-Clause-1-ov-file#readme) | Yes |Supports Glomap input video/images only or images + pose-priors.                                            |
 | Reconstruction   | Images to Point Cloud/Poses - Hierarchical SfM               | [HLOC](https://github.com/cvg/Hierarchical-Localization) [(Apache-2.0)](https://github.com/cvg/Hierarchical-Localization?tab=Apache-2.0-1-ov-file#readme) | Yes |Supports Hloc. input video/images only or images + pose-priors.                                            |
 | Reconstruction   | Images to Point Cloud/Poses - Transformer                     | [MapAnything](https://github.com/facebookresearch/map-anything) [(Apache-2.0)](https://github.com/facebookresearch/map-anything#Apache-2.0-1-ov-file) | Yes | Supports MapAnything with GPU (limited to < 50 images)                                                 |
 | Training         | Images, Point Cloud, & Poses to Gaussian Splat               | [NerfStudio](https://github.com/nerfstudio-project/nerfstudio) [(Apache-2.0)](https://github.com/nerfstudio-project/nerfstudio/tree/main?tab=Apache-2.0-1-ov-file#readme), [gsplat](https://github.com/nerfstudio-project/gsplat) [(Apache-2.0)](https://github.com/nerfstudio-project/gsplat?tab=Apache-2.0-1-ov-file#readme), [splatfacto-w](https://github.com/KevinXu02/splatfacto-w) [(Apache-2.0)](https://github.com/KevinXu02/splatfacto-w?tab=Apache-2.0-1-ov-file#readme), [3DGRUT](https://github.com/nv-tlabs/3dgrut) [(Apache-2.0)](https://github.com/nv-tlabs/3dgrut#Apache-2.0-1-ov-file) | Yes | Supports splatfacto, splatfacto-big, splatfacto-mcmc, splatfacto-w-light, 3dgrt, 3dgut, nerfacto              |
@@ -111,13 +111,13 @@ Current features and open source libraries include:
 
 ### Third-party tools
 
-- [Git CLI](https://cli.github.com/)
+- [Git CLI](https://git-scm.com/install/)
 - [Docker](https://www.docker.com/) 
 - [Terraform](https://developer.hashicorp.com/terraform/tutorials/aws-get-started/install-cli) if choosing not to deploy infrastructure using [AWS CDK](https://aws.amazon.com/cdk/) 
 
 ### AWS account requirements
 
-An active AWS Account with IAM user or role with elevated permissions to deploy resources is required to deploy this guidance, along with either a local computer with appropriate AWS credentials to deploy the CDK or Terraform guidance, or utilize an AWS EC2 instance to build and deploy the CDK or Terraform guidance. Please refer to the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.
+An active AWS Account with IAM user or role with elevated permissions to deploy resources is required to deploy this guidance, along with either a local computer with appropriate AWS credentials to deploy the guidance using CDK or Terraform , or an AWS EC2 instance to build and deploy the guidance using CDK or Terraform . Please refer to the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.
 
 - EC2 (if choosing not to deploy infrastructure from your local computer)
 - IAM roles with permissions
@@ -135,9 +135,9 @@ An active AWS Account with IAM user or role with elevated permissions to deploy 
 
 - [Service quotas](https://docs.aws.amazon.com/servicequotas/latest/userguide/intro.html) - increases can be requested via the AWS Management Console, AWS CLI, or AWS SDKs (see [Accessing Service Quotas](https://docs.aws.amazon.com/servicequotas/latest/userguide/intro.html#access))
 
-- This guidance runs SageMaker Training Jobs or Batch Jobs which uses a Docker container to run the training. This deployment guide walks through building a custom container image for SageMaker or Batch.
-  - Depending on what instances you will be using to train on (configured during job submission, ml.g5.4xlarge is the default), you may need to adjust the SageMaker Training Jobs or Batch Jobs quota. This will be under the SageMaker service in Service Quotas named "training job usage" or AWS Batch Job "instance usage".
-  - (Optional) You can optionally build and test this container locally (not running on AWS Services) on a GPU-enabled EC2 instance. If you plan to do this, increase the EC2 quota named "Running On-Demand G and VT instances" and/or "Running On-Demand P instances", depending on the instance family you plan to use, to a desired maximum number of vCPUs for running instances of the target family. Note, this is vCPUs NOT number of instances like the SageMaker Training Jobs quota.
+- This guidance runs SageMaker Training Jobs or Batch Jobs which use Docker containers to run the training. This deployment guide walks through building a custom container image for SageMaker or Batch job.
+  - Depending on what instances you will be using to train on (configured during job submission, `ml.g5.4xlarge` is the default), you may need to adjust the SageMaker Training Jobs or Batch Jobs quota. This will be under the SageMaker service in Service Quotas named "training job usage" or AWS Batch Job "instance usage".
+  - (Optional) You can optionally build and test this container locally (not running on AWS Services) on a GPU-enabled EC2 instance. If you plan to do this, increase the EC2 account quota named "Running On-Demand G and VT instances" and/or "Running On-Demand P instances", depending on the instance family you plan to use, to a desired maximum number of vCPUs for running instances of the target family. Note: this is vCPUs NOT number of instances like the SageMaker Training Jobs quota.
 
 ## Cost
 
@@ -161,7 +161,7 @@ The following table provides a sample cost breakdown for deploying this Guidance
 | Amazon SNS         | Email notifications, 1 per request                                               | $0.01/month       |
 | Parameter Store    | Store 1 param                                                                    | $0.01/month       |
 | Amazon CloudWatch  | Metrics, 1GB                                                                     | $0.50/month       |
-| AWS CodeBuild      | Optional, $0.005 per minute, 100min free, only need build once, takes ~60mn      | -                 |
+| AWS CodeBuild      | Optional, $0.005 per minute, 100min free, only need build once, takes ~ 60min      | -                 |
 | Amazon ECS/Batch   | num_instance=1, num_hours_per_job=1, ml.g5.4xlarge, Volume_size_in_GB_per_job=15 | $68.00/month      |
 | **TOTAL**          | (est. 100 requests)                                                              | **$73.33/month**  |
 
@@ -177,11 +177,12 @@ which the services operate. For more information about AWS security, visit [AWS 
 - All data is encrypted at rest and at transit within the AWS Cloud services in this Guidance
 - An Amazon S3 access logging bucket logs all access to the asset bucket
 - Input validation on the job configuration will flag any misconfigurations in the json file
-- Least priviledge access rights on service actions
+- Least privilege access rights on service actions
 
 **Considerations**
 
 At the time of publishing (April 2026), the codebase was scanned using [Semgrep](https://semgrep.dev/), [Bandit](https://github.com/PyCQA/bandit), [Checkov](https://www.checkov.io/), [Gitleaks](https://github.com/gitleaks/gitleaks), [Grype](https://github.com/anchore/grype), and [Codeguru](https://aws.amazon.com/codeguru/) code security scanning tools. The following table outlines all security issues flagged as ERROR or CRITICAL with explanations. All critical and error issues have been reviewed and mitigated or confirmed as false positives as documented below.
+
 | Level   | Classification  | Source       | Rule ID                             | Cause                                                                                                  | Explanation                                                                                                                                                              |
 | ------- | --------------- | ------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Error   | False Positive  | Semgrep      | arbitrary-sleep — main.py, check_build_status.py | `time.sleep()` call detected; may indicate unintentional blocking | The `time.sleep()` calls in `main.py` are intentional polling delays used to wait for GPU memory cleanup and SageMaker/Batch job status transitions. The calls in `check_build_status.py` are intentional polling loops that wait for CodeBuild job completion. These are required operational patterns, not accidental blocking code. |
