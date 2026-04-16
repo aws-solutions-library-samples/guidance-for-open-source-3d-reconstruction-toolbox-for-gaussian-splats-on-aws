@@ -251,10 +251,10 @@ This library is licensed under the MIT-0 License. See the [LICENSE](./LICENSE) f
 
 ## Authors
 
-- [Eric Cornwell](https://www.linkedin.com/in/eric-cornwell-2249543b/), Sr. Spatial Compute SA, AWS
+- [Eric Cornwell](https://www.linkedin.com/in/eric-cornwell-2249543b/), Sr. Spatial SA, AWS
 
-- [Dario Macagnano](https://www.linkedin.com/in/dario-macagnano-6b7562b9/), Sr. Worldwide Visual Compute SA, AWS
+- [Dario Macagnano](https://www.linkedin.com/in/dario-macagnano-6b7562b9/), Sr. Physical AI SA, AWS
 
-- [Stanford Lee](https://www.linkedin.com/in/stanfordlee/), Technical Account Manager (Spatial Computing TFC), AWS
+- [Stanford Lee](https://www.linkedin.com/in/stanfordlee/), Technical Account Manager (Physical AI TFC), AWS
 
 - [Daniel Zilberman](https://www.linkedin.com/in/danzilberman/), Sr. Specialist SA, Prototyping & Scaling, AWS
