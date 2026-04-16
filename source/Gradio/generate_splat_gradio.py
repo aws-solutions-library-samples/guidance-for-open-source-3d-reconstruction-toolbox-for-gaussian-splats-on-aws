@@ -3273,22 +3273,24 @@ def create_combined_monitor_viewer_tab():
             # Download button in left panel
             def handle_download_or_favorite(filename, job_data, fav_path):
                 print(f"[download] filename={filename} job_data={job_data} fav_path={fav_path}")
-                # Check explicit fav_path first
-                if fav_path and os.path.exists(fav_path):
-                    import base64
-                    with open(fav_path, 'rb') as f:
-                        data = base64.b64encode(f.read()).decode('utf-8')
-                    dl_name = os.path.basename(fav_path)
-                    return json.dumps({"__download__": True, "data": data, "filename": dl_name, "mime": "application/octet-stream", "ts": __import__('time').time()})
+                favorites_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "favorites"))
+                # Check explicit fav_path first - validate it is within favorites_dir
+                if fav_path:
+                    safe_fav = os.path.realpath(fav_path)
+                    if safe_fav.startswith(favorites_dir + os.sep) and os.path.isfile(safe_fav):
+                        import base64
+                        with open(safe_fav, 'rb') as f:
+                            data = base64.b64encode(f.read()).decode('utf-8')
+                        dl_name = os.path.basename(safe_fav)
+                        return json.dumps({"__download__": True, "data": data, "filename": dl_name, "mime": "application/octet-stream", "ts": __import__('time').time()})
                 # Fallback: check if filename exists in local favorites directory
                 if filename:
-                    favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
-                    local_path = os.path.join(favorites_dir, os.path.basename(filename))
-                    if os.path.exists(local_path):
+                    safe_local = os.path.realpath(os.path.join(favorites_dir, os.path.basename(filename)))
+                    if safe_local.startswith(favorites_dir + os.sep) and os.path.isfile(safe_local):
                         import base64
-                        with open(local_path, 'rb') as f:
+                        with open(safe_local, 'rb') as f:
                             data = base64.b64encode(f.read()).decode('utf-8')
-                        return json.dumps({"__download__": True, "data": data, "filename": os.path.basename(filename), "mime": "application/octet-stream", "ts": __import__('time').time()})
+                        return json.dumps({"__download__": True, "data": data, "filename": os.path.basename(safe_local), "mime": "application/octet-stream", "ts": __import__('time').time()})
                 # Otherwise use S3 presigned URL
                 return handle_download([job_data[0], filename]) if filename and job_data else ""
 
@@ -4321,7 +4323,6 @@ if __name__ == "__main__":
     temp_3d_cache = os.path.join(tempfile.gettempdir(), "gradio_3d_cache")
     os.makedirs(temp_3d_cache, exist_ok=True)
     iface.launch(server_name="0.0.0.0", server_port=7861, share=False, allowed_paths=[favorites_dir, temp_3d_cache],
-                 max_file_size="100mb",
                  js=playcanvas_js, theme=gr.themes.Ocean(), css=_css,
                  head="""<script src="https://code.playcanvas.com/playcanvas-2.17.0.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
