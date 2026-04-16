@@ -98,8 +98,11 @@ class SharedState:
         self.video_stop_time = None
         self.preserve_scene_scale = "false"
         self.isp_3d = "none"
+        self.enable_depth_loss = "false"
         self.enable_fl_heuristic = "false"
-        self.fl_heuristic_value = 1.1
+        self.fl_heuristic_value = 1.2
+        self.enable_fl_metric = "false"
+        self.fl_metric_value = 24
 
 # Create a singleton instance
 shared_state = SharedState()
@@ -344,14 +347,17 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
             "enableEnhancedFeatureExtraction": enhanced_feature == "true",
             "matchingMethod": matching_method,
             "enableFlHeuristic": shared_state.enable_fl_heuristic == "true",
-            "flHeuristicValue": str(shared_state.fl_heuristic_value)
+            "flHeuristicValue": str(shared_state.fl_heuristic_value),
+            "enableFlMetric": shared_state.enable_fl_metric == "true",
+            "flMetricValue": str(shared_state.fl_metric_value)
         },
         "training": {
             "enable": training_enable == "true",
             "maxSteps": str(max_steps),
             "model": training_model,
             "preserveSceneScale": preserve_scene_scale == "true",
-            "3dIsp": shared_state.isp_3d
+            "3dIsp": shared_state.isp_3d,
+            "enableDepthLoss": shared_state.enable_depth_loss == "true"
         },
         "postProcessing": {
             "cropOutputBounds": crop_output_bounds == "true" if isinstance(crop_output_bounds, str) else crop_output_bounds,
@@ -480,14 +486,17 @@ def create_upload_aws_tab():
                                 "enableEnhancedFeatureExtraction": shared_state.enhanced_feature == "true",
                                 "matchingMethod": shared_state.matching_method,
                                 "enableFlHeuristic": shared_state.enable_fl_heuristic == "true",
-                                "flHeuristicValue": str(shared_state.fl_heuristic_value)
+                                "flHeuristicValue": str(shared_state.fl_heuristic_value),
+                                "enableFlMetric": shared_state.enable_fl_metric == "true",
+                                "flMetricValue": str(shared_state.fl_metric_value)
                             },
                             "training": {
                                 "enable": shared_state.training_enable == "true",
                                 "maxSteps": str(shared_state.max_steps),
                                 "model": shared_state.model,
                                 "preserveSceneScale": shared_state.preserve_scene_scale == "true",
-                                "3dIsp": shared_state.isp_3d
+                                "3dIsp": shared_state.isp_3d,
+                                "enableDepthLoss": shared_state.enable_depth_loss == "true"
                             },
                             "postProcessing": {
                                 "cropOutputBounds": shared_state.crop_output_bounds == "true",
@@ -754,10 +763,22 @@ def create_advanced_settings_tab():
                 )
                 fl_heuristic_value = gr.Number(
                     label="Focal Length Heuristic Value",
-                    value=1.1,
+                    value=1.2,
                     minimum=0.1,
                     maximum=10.0,
-                    info="Focal length heuristic multiplier (default: 1.1)"
+                    info="Focal length heuristic multiplier (default: 1.2)"
+                )
+                enable_fl_metric = gr.Radio(
+                    label="Enable Metric Focal Length",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Use a fixed pixel focal length for reconstruction (overrides heuristic if both enabled)"
+                )
+                fl_metric_value = gr.Number(
+                    label="Metric Focal Length Value (mm)",
+                    value=24,
+                    minimum=1,
+                    info="Fixed focal length in mm to pass to COLMAP (default: 24)"
                 )
             with gr.Column():
                 gr.Markdown("### Pose Priors-Colmap")
@@ -824,6 +845,12 @@ def create_advanced_settings_tab():
                     ],
                     value="none",
                     info="Image signal processing for splatfacto, gsplat multi-GPU, and 3DGRUT. Not applicable to nerfacto."
+                )
+                enable_depth_loss = gr.Radio(
+                    label="Enable Depth Loss",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Use sparse colmap depth supervision (gsplat). Overrides model choice. Enable when lidar data is provided."
                 )
         with gr.Row():
             with gr.Column():
@@ -912,7 +939,9 @@ def create_advanced_settings_tab():
                      shared_state.remove_bg, shared_state.remove_objects,
                      shared_state.object_removal_action, shared_state.objects_to_remove, shared_state.source_coordinate, shared_state.pose_world_to_cam,
                      shared_state.log_verbosity, shared_state.mask_threshold, shared_state.ply_coords, shared_state.spz_coords, shared_state.sog_coords, shared_state.usdz_coords, shared_state.preserve_scene_scale, shared_state.isp_3d,
-                     shared_state.enable_fl_heuristic, shared_state.fl_heuristic_value) = args
+                     shared_state.enable_fl_heuristic, shared_state.fl_heuristic_value,
+                     shared_state.enable_fl_metric, shared_state.fl_metric_value,
+                     shared_state.enable_depth_loss) = args
                     return "Advanced settings updated"
 
                 # Get all advanced settings components after they're defined
@@ -925,7 +954,9 @@ def create_advanced_settings_tab():
                     spherical_enable, remove_bg, remove_objects,
                     object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam,
                     log_verbosity, mask_threshold, ply_coords, spz_coords, sog_coords, usdz_coords, preserve_scene_scale, isp_3d,
-                    enable_fl_heuristic, fl_heuristic_value
+                    enable_fl_heuristic, fl_heuristic_value,
+                    enable_fl_metric, fl_metric_value,
+                    enable_depth_loss
                 ]
                 
                 def save_configuration(config_name, *settings):
@@ -970,7 +1001,10 @@ def create_advanced_settings_tab():
                         'preserve_scene_scale': settings[34],
                         'isp_3d': settings[35],
                         'enable_fl_heuristic': settings[36],
-                        'fl_heuristic_value': settings[37]
+                        'fl_heuristic_value': settings[37],
+                        'enable_fl_metric': settings[38],
+                        'fl_metric_value': settings[39],
+                        'enable_depth_loss': settings[40]
                     }
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -1042,6 +1076,9 @@ def create_advanced_settings_tab():
                         shared_state.isp_3d = config_data.get('isp_3d', 'none')
                         shared_state.enable_fl_heuristic = config_data.get('enable_fl_heuristic', 'false')
                         shared_state.fl_heuristic_value = config_data.get('fl_heuristic_value', 1.1)
+                        shared_state.enable_fl_metric = config_data.get('enable_fl_metric', 'false')
+                        shared_state.fl_metric_value = config_data.get('fl_metric_value', 24)
+                        shared_state.enable_depth_loss = config_data.get('enable_depth_loss', 'false')
                         
                         return [
                             f"Configuration '{config_name}' loaded successfully",
@@ -1082,10 +1119,13 @@ def create_advanced_settings_tab():
                             config_data.get('preserve_scene_scale', 'false'),
                             config_data.get('isp_3d', 'none'),
                             config_data.get('enable_fl_heuristic', 'false'),
-                            config_data.get('fl_heuristic_value', 1.1)
+                            config_data.get('fl_heuristic_value', 1.2),
+                            config_data.get('enable_fl_metric', 'false'),
+                            config_data.get('fl_metric_value', 24),
+                            config_data.get('enable_depth_loss', 'false')
                         ]
                     except Exception as e:
-                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(37)]
+                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(40)]
                 
                 # Wire up save/load buttons
                 save_config_btn.click(
@@ -1361,7 +1401,7 @@ def handle_view_multi(selected_row):
         
         # Download splat files server-side to avoid browser CORS restrictions on S3 presigned URLs
         if filename.lower().endswith(('.sog', '.ply')):
-            import requests, base64
+            import requests, base64, zipfile, io, math
             bucket_name = shared_state.s3_bucket
             output_prefix = shared_state.s3_output or "workflow-output"
             job_id = selected_row[0]
@@ -1371,21 +1411,93 @@ def handle_view_multi(selected_row):
             cached_data = getattr(shared_state, 'current_model_data', None)
             if current_key == file_key and cached_data:
                 file_data = cached_data
+                raw_content = None
             else:
                 presigned_url = generate_presigned_url(bucket_name, file_key)
                 if not presigned_url:
                     return (gr.update(value=None), "", gr.update(value=""), "Error generating URL", gr.update(value=None), "", gr.update(value=""))
                 try:
                     response = requests.get(presigned_url)
-                    file_data = base64.b64encode(response.content).decode('utf-8')
+                    raw_content = response.content
+                    file_data = base64.b64encode(raw_content).decode('utf-8')
                 except Exception as e:
                     return (gr.update(value=None), "", gr.update(value=""), f"Error: {e}", gr.update(value=None), "", gr.update(value=""))
                 shared_state.current_model_key = file_key
                 shared_state.current_model_data = file_data
-            return (gr.update(value=None), "", gr.update(value=json.dumps({"data": file_data, "filename": filename, "ts": __import__('time').time()})), f"Loading {filename}...", gr.update(value=None), "", gr.update(value=""))
+            # Parse file server-side to get scene bounds for camera setup
+            camera_params = {}
+            try:
+                import struct
+                content = raw_content if raw_content else base64.b64decode(file_data)
+                if filename.lower().endswith('.sog'):
+                    with zipfile.ZipFile(io.BytesIO(content)) as z:
+                        if 'meta.json' in z.namelist():
+                            meta = json.loads(z.read('meta.json'))
+                            mins = meta['means']['mins']
+                            maxs = meta['means']['maxs']
+                            center = [(mins[i]+maxs[i])/2 for i in range(3)]
+                            half = [(maxs[i]-mins[i])/2 for i in range(3)]
+                            scale = math.sqrt(sum(h*h for h in half))
+                            camera_params = {
+                                'cx': center[0], 'cy': center[1], 'cz': center[2],
+                                'distance': scale * 2.5,
+                                'nearClip': max(0.0001, scale * 0.0001),
+                                'farClip': max(1000, scale * 200)
+                            }
+                elif filename.lower().endswith('.ply'):
+                    buf = io.BytesIO(content)
+                    props, num_verts, binary_little = [], 0, True
+                    in_vert = False
+                    for _ in range(200):
+                        line = buf.readline().decode('ascii', errors='ignore').strip()
+                        if line.startswith('element vertex'):
+                            num_verts = int(line.split()[-1]); in_vert = True
+                        elif line.startswith('element') and in_vert:
+                            in_vert = False
+                        elif line.startswith('property') and in_vert:
+                            parts = line.split(); props.append((parts[1], parts[2]))
+                        elif line == 'format ascii 1.0':
+                            binary_little = None
+                        elif line == 'end_header':
+                            break
+                    if binary_little is not None and num_verts > 0:
+                        type_sizes = {'float':4,'double':8,'int':4,'uint':4,'short':2,'ushort':2,'char':1,'uchar':1,'int8':1,'uint8':1,'int16':2,'uint16':2,'int32':4,'uint32':4,'float32':4,'float64':8}
+                        off, row_size, xyz_off = 0, 0, {}
+                        for pt, pn in props:
+                            sz = type_sizes.get(pt, 4)
+                            if pn in ('x','y','z'): xyz_off[pn] = (off, 'f' if 'float' in pt else 'd')
+                            off += sz
+                        row_size = off
+                        if len(xyz_off) == 3:
+                            data_bytes = buf.read()
+                            step = max(1, num_verts // 5000)
+                            xs, ys, zs = [], [], []
+                            fmt = '<' if binary_little else '>'
+                            for i in range(0, num_verts, step):
+                                base = i * row_size
+                                if base + row_size > len(data_bytes): break
+                                xs.append(struct.unpack_from(fmt + xyz_off['x'][1], data_bytes, base + xyz_off['x'][0])[0])
+                                ys.append(struct.unpack_from(fmt + xyz_off['y'][1], data_bytes, base + xyz_off['y'][0])[0])
+                                zs.append(struct.unpack_from(fmt + xyz_off['z'][1], data_bytes, base + xyz_off['z'][0])[0])
+                            if xs:
+                                cx, cy, cz = (min(xs)+max(xs))/2, (min(ys)+max(ys))/2, (min(zs)+max(zs))/2
+                                scale = math.sqrt(((max(xs)-min(xs))/2)**2 + ((max(ys)-min(ys))/2)**2 + ((max(zs)-min(zs))/2)**2)
+                                scale = max(scale, 0.1)
+                                camera_params = {
+                                    'cx': cx, 'cy': cy, 'cz': cz,
+                                    'distance': scale * 2.5,
+                                    'nearClip': max(0.0001, scale * 0.0001),
+                                    'farClip': max(1000, scale * 200)
+                                }
+            except Exception:
+                pass
+            payload = {"data": file_data, "filename": filename, "ts": __import__('time').time()}
+            if camera_params:
+                payload['camera'] = camera_params
+            return (gr.update(value=None), "", gr.update(value=json.dumps(payload)), f"Loading {filename}...", gr.update(value=None), "", gr.update(value=""))
 
         elif filename.lower().endswith('.spz'):
-            import requests, base64
+            import requests, base64, gzip, struct, io, math
             bucket_name = shared_state.s3_bucket
             output_prefix = shared_state.s3_output or "workflow-output"
             job_id = selected_row[0]
@@ -1394,19 +1506,51 @@ def handle_view_multi(selected_row):
             cached_data = getattr(shared_state, 'current_model_data', None)
             if current_key == file_key and cached_data:
                 file_data = cached_data
+                raw_content = None
             else:
                 presigned_url = generate_presigned_url(bucket_name, file_key)
                 if not presigned_url:
                     return (gr.update(value=None), "", gr.update(value=""), "Error generating URL", gr.update(value=None), "", gr.update(value=""))
                 try:
                     response = requests.get(presigned_url)
-                    file_data = base64.b64encode(response.content).decode('utf-8')
+                    raw_content = response.content
+                    file_data = base64.b64encode(raw_content).decode('utf-8')
                 except Exception as e:
                     return (gr.update(value=None), "", gr.update(value=""), f"Error: {e}", gr.update(value=None), "", gr.update(value=""))
                 shared_state.current_model_key = file_key
                 shared_state.current_model_data = file_data
-            payload = json.dumps({"data": file_data, "filename": filename, "ts": __import__('time').time()})
-            return (gr.update(value=None), "", gr.update(value=""), gr.update(value=""), gr.update(value=None), "", gr.update(value=payload))
+            camera_params = {}
+            try:
+                content = raw_content if raw_content else base64.b64decode(file_data)
+                data = gzip.decompress(content)
+                num_points = struct.unpack_from('<I', data, 8)[0]
+                frac_bits = data[13]
+                scale = 1.0 / (1 << frac_bits)
+                def _r24(d, o):
+                    v = d[o] | (d[o+1] << 8) | (d[o+2] << 16)
+                    return v - 0x1000000 if v >= 0x800000 else v
+                step = max(1, num_points // 2000)
+                xs, ys, zs = [], [], []
+                for i in range(0, num_points, step):
+                    b = 20 + i * 9
+                    if b + 9 > len(data): break
+                    xs.append(_r24(data, b) * scale)
+                    ys.append(_r24(data, b+3) * scale)
+                    zs.append(_r24(data, b+6) * scale)
+                if xs:
+                    cx = (min(xs)+max(xs))/2; cy = (min(ys)+max(ys))/2; cz = (min(zs)+max(zs))/2
+                    hx=(max(xs)-min(xs))/2; hy=(max(ys)-min(ys))/2; hz=(max(zs)-min(zs))/2
+                    sc = max(hx, hy, hz, 0.1)
+                    print(f'[spz] frac_bits={frac_bits} scale={scale} max_half={sc:.4f} dist={sc*2.0:.4f}')
+                    camera_params = {'cx': cx, 'cy': cy, 'cz': cz, 'distance': sc * 3.0,
+                                     'nearClip': max(0.0001, sc * 0.0001), 'farClip': max(1000, sc * 200),
+                                     'fractionalBits': int(frac_bits)}
+            except Exception as e:
+                print(f'[spz] camera parse error: {e}')
+            payload = {"data": file_data, "filename": filename, "ts": __import__('time').time()}
+            if camera_params:
+                payload['camera'] = camera_params
+            return (gr.update(value=None), "", gr.update(value=""), gr.update(value=""), gr.update(value=None), "", gr.update(value=json.dumps(payload)))
 
         elif filename.lower().endswith('.mp4'):
             bucket_name = shared_state.s3_bucket
@@ -2420,7 +2564,7 @@ def create_combined_monitor_viewer_tab():
             # Phase progress and config in expandable sections
             with gr.Accordion("📈 Pipeline Progress", open=True) as phase_accordion:
                 phase_progress_display = gr.HTML(
-                    value="<div style='border: 3px solid #666; border-radius: 8px; padding: 15px; background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); box-shadow: 0 4px 6px rgba(0,0,0,0.1);'><h3 style='margin: 0 0 15px 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 8px;'>📊 Job Progress</h3><div style='color: #ccc;'>Select a job to view phase progress</div></div>",
+                    value="<div class='job-progress-container'><h3 class='job-progress-title'>📊 Job Progress</h3><div class='job-progress-text'>Select a job to view phase progress</div></div>",
                     elem_id="phase_progress_display"
                 )
             
@@ -2533,10 +2677,10 @@ def create_combined_monitor_viewer_tab():
                 """Refresh job monitoring data"""
                 try:
                     jobs_data = get_job_progress_data()
-                    return jobs_data, "<div style='border: 3px solid #666; border-radius: 8px; padding: 15px; background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); box-shadow: 0 4px 6px rgba(0,0,0,0.1);'><h3 style='margin: 0 0 15px 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 8px;'>📊 Job Progress</h3><div style='color: #ccc;'>Select a job to view phase progress</div></div>", "<div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #e8e8e8; color: #333;'>Select a job to view configuration</div>"
+                    return jobs_data, "<div class='job-progress-container'><h3 class='job-progress-title'>📊 Job Progress</h3><div class='job-progress-text'>Select a job to view phase progress</div></div>", "<div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #e8e8e8; color: #333;'>Select a job to view configuration</div>"
                 except Exception as e:
                     print(f"Error refreshing jobs: {e}")
-                    return [], "<div style='border: 3px solid #666; border-radius: 8px; padding: 15px; background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); box-shadow: 0 4px 6px rgba(0,0,0,0.1);'><h3 style='margin: 0 0 15px 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 8px;'>📊 Job Progress</h3><div style='color: #ccc;'>Error loading jobs</div></div>", "<div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #e8e8e8; color: #333;'>Error loading jobs</div>"
+                    return [], "<div class='job-progress-container'><h3 class='job-progress-title'>📊 Job Progress</h3><div class='job-progress-text'>Error loading jobs</div></div>", "<div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #e8e8e8; color: #333;'>Error loading jobs</div>"
             
             def get_phase_progress_html(job_id):
                 """Generate HTML for phase progress visualization"""
@@ -2546,7 +2690,7 @@ def create_combined_monitor_viewer_tab():
                     response = table.get_item(Key={'uuid': _validate_uuid(job_id)})
                     
                     if 'Item' not in response:
-                        return "<div style='border: 3px solid #666; border-radius: 8px; padding: 15px; background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); box-shadow: 0 4px 6px rgba(0,0,0,0.1);'><h3 style='margin: 0 0 15px 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 8px;'>📊 Job Progress</h3><div style='color: #ccc;'>No phase data available</div></div>"
+                        return "<div class='job-progress-container'><h3 class='job-progress-title'>📊 Job Progress</h3><div class='job-progress-text'>No phase data available</div></div>"
                     
                     item = response['Item']
                     job_status = str(item.get('uuidStatus', '')).lower()
@@ -2614,12 +2758,12 @@ def create_combined_monitor_viewer_tab():
                     
                     # For older jobs without phase times, check if job is complete
                     if not any_phase_started and job_status in ['complete', 'completed']:
-                        return f"<div style='border: 3px solid #666; border-radius: 8px; padding: 15px; background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); box-shadow: 0 4px 6px rgba(0,0,0,0.1);'><h3 style='margin: 0 0 15px 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 8px;'>📊 Job Progress</h3><div style='color: #ccc; text-align: center; padding: 20px;'>✅ Job completed (legacy format - no phase timing data)</div></div>"
+                        return f"<div class='job-progress-container'><h3 class='job-progress-title'>📊 Job Progress</h3><div class='job-progress-text' style='text-align: center; padding: 20px;'>✅ Job completed (legacy format - no phase timing data)</div></div>"
                     
                     if not any_phase_started:
                         if job_status in ['failed', 'error']:
-                            return f"<div style='border: 3px solid #666; border-radius: 8px; padding: 15px; background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); box-shadow: 0 4px 6px rgba(0,0,0,0.1);'><h3 style='margin: 0 0 15px 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 8px;'>📊 Job Progress</h3><div style='color: #ff6b6b; text-align: center; padding: 20px;'>❌ Job failed before processing started</div></div>"
-                        return f"<div style='border: 3px solid #666; border-radius: 8px; padding: 15px; background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); box-shadow: 0 4px 6px rgba(0,0,0,0.1);'><h3 style='margin: 0 0 15px 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 8px;'>📊 Job Progress</h3><div style='color: #ccc; text-align: center; padding: 20px;'>⏳ Job pending - waiting to start</div></div>"
+                            return f"<div class='job-progress-container'><h3 class='job-progress-title'>📊 Job Progress</h3><div class='job-progress-error' style='text-align: center; padding: 20px;'>❌ Job failed before processing started</div></div>"
+                        return f"<div class='job-progress-container'><h3 class='job-progress-title'>📊 Job Progress</h3><div class='job-progress-text' style='text-align: center; padding: 20px;'>⏳ Job pending - waiting to start</div></div>"
                     
                     for name, elapsed in phases:
                         # Skip reconstruction phase if disabled
@@ -2638,7 +2782,7 @@ def create_combined_monitor_viewer_tab():
                         
                         time_str = f"{elapsed}s" if elapsed is not None else "-"
                         width_pct = '100%' if status == 'complete' else '50%' if status == 'in-progress' else '0%'
-                        bars.append(f"<div style='margin: 8px 0;'><div style='display: flex; align-items: center;'><div style='width: 150px; font-weight: 500; color: #fff;'>{name}</div><div style='flex: 1; background: #555; height: 24px; border-radius: 4px; overflow: hidden; margin: 0 10px;'><div style='background: {color}; height: 100%; width: {width_pct}; transition: width 0.3s;'></div></div><div style='width: 80px; text-align: right; color: #fff;'>{time_str}</div></div></div>")
+                        bars.append(f"<div style='margin: 8px 0;'><div style='display: flex; align-items: center;'><div class='job-progress-text' style='width: 150px; font-weight: 500;'>{name}</div><div class='job-progress-bar-track' style='flex: 1; height: 24px; border-radius: 4px; overflow: hidden; margin: 0 10px;'><div style='background: {color}; height: 100%; width: {width_pct}; transition: width 0.3s;'></div></div><div class='job-progress-text' style='width: 80px; text-align: right;'>{time_str}</div></div></div>")
                     
                     if all_complete:
                         h = int(total_time//3600)
@@ -2651,12 +2795,12 @@ def create_combined_monitor_viewer_tab():
                             time_parts.append(f"{m}min")
                         if s > 0 or not time_parts:
                             time_parts.append(f"{s}s")
-                        total_html = f"<div style='margin-top: 15px; padding-top: 15px; border-top: 1px solid #666; color: #fff; font-weight: bold; text-align: right;'>Total Elapsed Time: {' '.join(time_parts)}</div>"
+                        total_html = f"<div style='margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border-color-primary); font-weight: bold; text-align: right;'>Total Elapsed Time: {' '.join(time_parts)}</div>"
                     else:
                         total_html = ""
-                    return f"<div style='border: 3px solid #666; border-radius: 8px; padding: 15px; background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); box-shadow: 0 4px 6px rgba(0,0,0,0.1);'><h3 style='margin: 0 0 15px 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 8px;'>📊 Job Progress</h3>{''.join(bars)}{total_html}</div>"
+                    return f"<div class='job-progress-container'><h3 class='job-progress-title'>📊 Job Progress</h3>{''.join(bars)}{total_html}</div>"
                 except Exception as e:
-                    return f"<div style='border: 3px solid #666; border-radius: 8px; padding: 15px; background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); box-shadow: 0 4px 6px rgba(0,0,0,0.1);'><h3 style='margin: 0 0 15px 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 8px;'>📊 Job Progress</h3><div style='color: #ccc;'>Error loading phase data: {str(e)}</div></div>"
+                    return f"<div class='job-progress-container'><h3 class='job-progress-title'>📊 Job Progress</h3><div class='job-progress-text'>Error loading phase data: {str(e)}</div></div>"
             
             def on_job_select(evt: gr.SelectData, data):
                 """Handle job selection to show configuration and enable refine button"""
@@ -2697,9 +2841,9 @@ def create_combined_monitor_viewer_tab():
                     return f"<div style='color: #666;'>Error: {str(e)}</div>", f"<div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #e8e8e8; color: #333;'>Error: {str(e)}</div>", None, gr.update(interactive=False)
             
             # Hidden components for viewer modal
-            sog_file_data = gr.Textbox(visible=False)
+            sog_file_data = gr.Textbox(visible=False, max_lines=1)
             current_filename = gr.Textbox(visible=False)
-            download_iframe = gr.HTML(visible=True)
+            download_iframe = gr.HTML(visible=False)
             show_files_signal = gr.Textbox(value="", visible=False, elem_id="show-files-signal")
             # Dummy output to replace files_modal in outputs (since hoisted modals can't be updated by Gradio)
             files_modal_dummy = gr.Textbox(visible=False)
@@ -2763,7 +2907,7 @@ def create_combined_monitor_viewer_tab():
                 costs_html = calculate_job_costs_from_jobs(jobs_data)
                 return (
                     jobs_data,
-                    "<div style='border: 3px solid #666; border-radius: 8px; padding: 15px; background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); box-shadow: 0 4px 6px rgba(0,0,0,0.1);'><h3 style='margin: 0 0 15px 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 8px;'>📊 Job Progress</h3><div style='color: #ccc;'>Select a job to view phase progress</div></div>",
+                    "<div class='job-progress-container'><h3 class='job-progress-title'>📊 Job Progress</h3><div class='job-progress-text'>Select a job to view phase progress</div></div>",
                     "<div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #e8e8e8; color: #333;'>Select a job to view configuration</div>",
                     costs_html
                 )
@@ -2828,11 +2972,17 @@ def create_combined_monitor_viewer_tab():
                     phase_html = get_phase_progress_html(job_id)
                     metadata_html = get_job_metadata(job_id)
                     
-                    # Generate thumbnail URL
+                    # Generate thumbnail URL only if file exists in S3
                     bucket_name = shared_state.s3_bucket
                     output_prefix = shared_state.s3_output or "workflow-output"
                     thumbnail_key = f"{output_prefix}/{job_id}/render_thumbnail.png"
-                    thumbnail_url = generate_presigned_url(bucket_name, thumbnail_key)
+                    thumbnail_url = None
+                    try:
+                        _s3 = boto3.client('s3')
+                        _s3.head_object(Bucket=bucket_name, Key=thumbnail_key)
+                        thumbnail_url = generate_presigned_url(bucket_name, thumbnail_key)
+                    except Exception:
+                        pass  # No thumbnail for this job (e.g. depth loss jobs)
                     
                     print(f"Phase HTML length: {len(phase_html)}, Metadata HTML length: {len(metadata_html)}")
                     
@@ -2974,43 +3124,38 @@ def create_combined_monitor_viewer_tab():
                 """Handle file selection - automatically open viewer with file"""
                 try:
                     if job_data is None:
-                        return tuple([None] + [gr.update()] * 2 + [gr.update()] * 8)
+                        return tuple([None] + [gr.update()] * 2 + [gr.update()] * 8 + [None])
                     
                     if hasattr(data, 'empty'):
                         if data.empty:
-                            return tuple([None] + [gr.update()] * 2 + [gr.update()] * 8)
+                            return tuple([None] + [gr.update()] * 2 + [gr.update()] * 8 + [None])
                         data_list = data.values.tolist()
                     elif isinstance(data, list):
                         if len(data) == 0:
-                            return tuple([None] + [gr.update()] * 10)
+                            return tuple([None] + [gr.update()] * 10 + [None])
                         data_list = data
                     else:
-                        return tuple([None] + [gr.update()] * 10)
+                        return tuple([None] + [gr.update()] * 10 + [None])
                     
                     row_idx = evt.index[0]
                     if row_idx >= len(data_list):
-                        return tuple([None] + [gr.update()] * 10)
+                        return tuple([None] + [gr.update()] * 10 + [None])
                     
                     selected_file = data_list[row_idx]
                     filename = selected_file[0]
                     file_data = [job_data[0], filename]
                     
-                    # Get all files for this job
                     job_id = job_data[0]
                     job_files = get_job_output_files(job_id)
                     file_choices = [f.get('filename', '') for f in job_files]
                     
-                    # Load the selected file
                     selected_row = [job_id, filename]
                     result = handle_view_multi(selected_row)
                     
-                    # JS handles modal show/hide - just return data updates
-                    # Set both choices and value so the dropdown reflects the selected file.
-                    # load_selected_file guards against re-downloading when data is already cached.
                     return (
                         file_data,
-                        gr.update(),  # files_modal - JS handles hide
-                        gr.update(),  # viewer_modal - JS handles show
+                        gr.update(),
+                        gr.update(),
                         gr.update(choices=file_choices, value=filename),
                         result[0],
                         result[1],
@@ -3019,22 +3164,24 @@ def create_combined_monitor_viewer_tab():
                         result[4],
                         result[5],
                         result[6],
-                        filename
+                        filename,
+                        None  # clear current_favorite_path
                     )
                 except Exception as e:
                     print(f"Error in file selection: {e}")
                     import traceback
                     traceback.print_exc()
-                    return tuple([None] + [gr.update()] * 11)
+                    return tuple([None] + [gr.update()] * 11 + [None])
             
             # Two dummy textboxes to replace files_modal and viewer_modal in outputs
             files_modal_dummy2 = gr.Textbox(visible=False)
             viewer_modal_dummy = gr.Textbox(visible=False)
+            current_favorite_path = gr.State(None)
             
             files_table.select(
                 fn=on_file_select_and_view,
                 inputs=[files_table, selected_job_data],
-                outputs=[selected_file_data, files_modal_dummy2, viewer_modal_dummy, file_selector, viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, spz_viewer, current_filename],
+                outputs=[selected_file_data, files_modal_dummy2, viewer_modal_dummy, file_selector, viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, spz_viewer, current_filename, current_favorite_path],
                 js="""(...args) => {
                     // Hide files modal and show viewer modal via style.display
                     const filesEl = document.getElementById('files-modal-content');
@@ -3042,7 +3189,10 @@ def create_combined_monitor_viewer_tab():
                     if(filesEl) filesEl.style.display = 'none';
                     if(viewerEl) {
                         viewerEl.style.display = 'flex';
-                        setTimeout(() => window.dispatchEvent(new Event('resize')), 100);
+                        setTimeout(() => {
+                            window.dispatchEvent(new Event('resize'));
+                            if(window._spzEngine) { try { window._spzEngine.resize(); } catch(e) {} }
+                        }, 100);
                     }
                     return args;
                 }"""
@@ -3051,7 +3201,7 @@ def create_combined_monitor_viewer_tab():
             # View button opens viewer modal from files modal with all job files
             def open_viewer_from_files_modal(file_data, job_data):
                 if not file_data or not job_data:
-                    return tuple([gr.update(elem_classes=["hide"])] * 2 + [gr.update(elem_classes=["hide"])] * 2 + [gr.update() for _ in range(8)])
+                    return tuple([gr.update(elem_classes=["hide"])] * 2 + [gr.update(elem_classes=["hide"])] * 2 + [gr.update() for _ in range(8)] + [None])
                 
                 job_id = job_data[0]
                 filename = file_data[1]
@@ -3063,43 +3213,41 @@ def create_combined_monitor_viewer_tab():
                 result = handle_view_multi(selected_row)
                 
                 return (
-                    gr.update(elem_classes=["hide"]),  # Close files modal
+                    gr.update(elem_classes=["hide"]),  # Close files modal -> selected_file_data... wrong
                     gr.update(elem_classes=[]),   # Open viewer modal
-                    gr.update(choices=file_choices, value=filename),
-                    result[0],
-                    result[1],
-                    result[2],
-                    result[3],
-                    result[4],
-                    result[5],
-                    result[6],
-                    filename
+                    gr.update(choices=file_choices, value=filename),  # file_selector
+                    result[0],   # viewer
+                    result[1],   # viewer_status
+                    result[2],   # sog_file_data
+                    result[3],   # sog_status
+                    result[4],   # video_viewer
+                    result[5],   # video_status
+                    result[6],   # spz_viewer
+                    filename,    # current_filename
+                    None         # current_favorite_path
                 )
             
             # File selector change loads the selected file AND updates selected_file_data
             def load_selected_file(filename, job_data):
                 if not filename or not job_data:
-                    return gr.update(), "", "", "", gr.update(), "", gr.update(), "", None
+                    return gr.update(), gr.update(), "", "", "", gr.update(), "", gr.update(), "", None, None
                 job_id = job_data[0]
                 output_prefix = shared_state.s3_output or "workflow-output"
                 file_key = f"{output_prefix}/{job_id}/{filename}"
                 current_key = getattr(shared_state, 'current_model_key', None)
-                # If this file was just loaded (by files_table click or a prior selector change),
-                # return no-ops so the viewer is not triggered a second time.
                 if current_key == file_key:
-                    return (gr.update(), gr.update(), gr.update(), gr.update(),
-                            gr.update(), gr.update(), gr.update(), filename, [job_id, filename])
-                # New file — clear cache and load
+                    return (gr.update(), gr.update(), gr.update(), gr.update(value=None), gr.update(),
+                            gr.update(), gr.update(), gr.update(value=None), filename, [job_id, filename], None)
                 shared_state.current_model_key = None
                 shared_state.current_model_data = None
                 selected_row = [job_id, filename]
                 result = handle_view_multi(selected_row)
-                return result[0], result[1], result[2], result[3], result[4], result[5], result[6], filename, selected_row
+                return gr.update(value=filename), result[0], result[1], result[2], result[3], result[4], result[5], result[6], filename, selected_row, None
             
             file_selector.change(
                 fn=load_selected_file,
                 inputs=[file_selector, selected_job_data],
-                outputs=[viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, spz_viewer, current_filename, selected_file_data]
+                outputs=[file_selector, viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, spz_viewer, current_filename, selected_file_data, current_favorite_path]
             )
 
             spz_viewer.change(
@@ -3109,13 +3257,13 @@ def create_combined_monitor_viewer_tab():
                 js="""async (payload) => {
                     if(!payload) return;
                     let parsed; try { parsed = JSON.parse(payload); } catch(e) { return; }
-                    const {data: fileData, filename: fileName} = parsed;
+                    const {data: fileData, filename: fileName, camera: cameraParams} = parsed;
                     if(!fileData || !fileName) return;
-                    window.spzData = {fileData, fileName};
+                    window.spzData = {fileData, fileName, cameraParams};
                     let attempts = 0;
                     const tryLoad = () => {
                         if(window.createSPZViewer) {
-                            window.createSPZViewer(fileData, fileName, 'S3 file');
+                            window.createSPZViewer(fileData, fileName, cameraParams);
                         } else if(attempts < 20) { attempts++; setTimeout(tryLoad, 250); }
                     };
                     setTimeout(tryLoad, 300);
@@ -3123,9 +3271,30 @@ def create_combined_monitor_viewer_tab():
             )
 
             # Download button in left panel
+            def handle_download_or_favorite(filename, job_data, fav_path):
+                print(f"[download] filename={filename} job_data={job_data} fav_path={fav_path}")
+                # Check explicit fav_path first
+                if fav_path and os.path.exists(fav_path):
+                    import base64
+                    with open(fav_path, 'rb') as f:
+                        data = base64.b64encode(f.read()).decode('utf-8')
+                    dl_name = os.path.basename(fav_path)
+                    return json.dumps({"__download__": True, "data": data, "filename": dl_name, "mime": "application/octet-stream", "ts": __import__('time').time()})
+                # Fallback: check if filename exists in local favorites directory
+                if filename:
+                    favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
+                    local_path = os.path.join(favorites_dir, os.path.basename(filename))
+                    if os.path.exists(local_path):
+                        import base64
+                        with open(local_path, 'rb') as f:
+                            data = base64.b64encode(f.read()).decode('utf-8')
+                        return json.dumps({"__download__": True, "data": data, "filename": os.path.basename(filename), "mime": "application/octet-stream", "ts": __import__('time').time()})
+                # Otherwise use S3 presigned URL
+                return handle_download([job_data[0], filename]) if filename and job_data else ""
+
             download_file_btn.click(
-                fn=lambda filename, job_data: handle_download([job_data[0], filename]) if filename and job_data else "",
-                inputs=[file_selector, selected_job_data],
+                fn=handle_download_or_favorite,
+                inputs=[file_selector, selected_job_data, current_favorite_path],
                 outputs=[download_iframe]
             )
             download_iframe.change(
@@ -3133,7 +3302,24 @@ def create_combined_monitor_viewer_tab():
                 inputs=[download_iframe],
                 outputs=None,
                 js="""(url) => {
-                    if (url) { const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); document.body.removeChild(a); }
+                    if (!url) return;
+                    try {
+                        const parsed = JSON.parse(url);
+                        if (parsed.__download__) {
+                            const bytes = Uint8Array.from(atob(parsed.data), c => c.charCodeAt(0));
+                            const blob = new Blob([bytes], {type: parsed.mime});
+                            const a = document.createElement('a');
+                            a.href = URL.createObjectURL(blob);
+                            a.download = parsed.filename;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(a.href);
+                            return;
+                        }
+                    } catch(e) {}
+                    // S3 presigned URL path
+                    const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); document.body.removeChild(a);
                 }"""
             )
             
@@ -3183,42 +3369,70 @@ def create_combined_monitor_viewer_tab():
             
             # Connect favorite buttons to viewer modal
             def open_favorite_in_modal(path, name):
+                import base64, zipfile, io, math, gzip, struct
                 favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
                 if not os.path.realpath(path).startswith(os.path.realpath(favorites_dir) + os.sep):
-                    return (gr.update(), gr.update(), gr.update(), gr.update(), "", gr.update(), gr.update(), "", "", "")
+                    return (gr.update(), gr.update(), gr.update(), gr.update(), "", gr.update(), gr.update(), "", "", "", None)
+                with open(path, 'rb') as f:
+                    raw = f.read()
+                file_data = base64.b64encode(raw).decode('utf-8')
+                camera_params = {}
                 if name.lower().endswith('.sog'):
-                    import base64
-                    with open(path, 'rb') as f:
-                        file_data = base64.b64encode(f.read()).decode('utf-8')
-                    payload = json.dumps({"data": file_data, "filename": name, "ts": __import__('time').time()})
+                    try:
+                        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                            if 'meta.json' in z.namelist():
+                                meta = json.loads(z.read('meta.json'))
+                                mins = meta['means']['mins']; maxs = meta['means']['maxs']
+                                center = [(mins[i]+maxs[i])/2 for i in range(3)]
+                                half = [(maxs[i]-mins[i])/2 for i in range(3)]
+                                scale = math.sqrt(sum(h*h for h in half))
+                                camera_params = {'cx': center[0], 'cy': center[1], 'cz': center[2],
+                                                 'distance': scale * 2.5, 'nearClip': max(0.0001, scale * 0.0001), 'farClip': max(1000, scale * 200)}
+                    except Exception as e:
+                        print(f'[favorites] SOG camera parse error: {e}')
+                    payload = {"data": file_data, "filename": name, "ts": __import__('time').time()}
+                    if camera_params: payload['camera'] = camera_params
                     return (
                         gr.update(elem_classes=[]),
                         gr.update(choices=[name], value=name),
-                        gr.update(value=None),
-                        "",
-                        payload,
-                        gr.update(),
-                        gr.update(value=None),
-                        "",
-                        name,
-                        ""
+                        gr.update(value=None), "",
+                        json.dumps(payload),
+                        gr.update(), gr.update(value=None), "",
+                        name, "", path
                     )
                 elif name.lower().endswith('.spz'):
-                    import base64
-                    with open(path, 'rb') as f:
-                        file_data = base64.b64encode(f.read()).decode('utf-8')
-                    payload = json.dumps({"data": file_data, "filename": name, "ts": __import__('time').time()})
+                    try:
+                        data = gzip.decompress(raw)
+                        num_points = struct.unpack_from('<I', data, 8)[0]
+                        frac_bits = data[13]
+                        sc = 1.0 / (1 << frac_bits)
+                        def _r24(d, o):
+                            v = d[o] | (d[o+1] << 8) | (d[o+2] << 16)
+                            return v - 0x1000000 if v >= 0x800000 else v
+                        step = max(1, num_points // 2000)
+                        xs, ys, zs = [], [], []
+                        for i in range(0, num_points, step):
+                            b = 20 + i * 9
+                            if b + 9 > len(data): break
+                            xs.append(_r24(data, b) * sc); ys.append(_r24(data, b+3) * sc); zs.append(_r24(data, b+6) * sc)
+                        if xs:
+                            cx = (min(xs)+max(xs))/2; cy = (min(ys)+max(ys))/2; cz = (min(zs)+max(zs))/2
+                            hx=(max(xs)-min(xs))/2; hy=(max(ys)-min(ys))/2; hz=(max(zs)-min(zs))/2
+                            radius = max(hx, hy, hz, 0.1)
+                            camera_params = {'cx': cx, 'cy': cy, 'cz': cz, 'distance': radius * 3.0,
+                                             'nearClip': max(0.0001, radius * 0.0001), 'farClip': max(1000, radius * 200),
+                                             'fractionalBits': int(frac_bits)}
+                            print(f'[favorites] SPZ camera: frac_bits={frac_bits} max_half={radius:.3f} dist={radius*2.0:.3f}')
+                    except Exception as e:
+                        print(f'[favorites] SPZ camera parse error: {e}')
+                    payload = {"data": file_data, "filename": name, "ts": __import__('time').time()}
+                    if camera_params: payload['camera'] = camera_params
                     return (
                         gr.update(elem_classes=[]),
                         gr.update(choices=[name], value=name),
-                        gr.update(value=None),
-                        "",
-                        "",
-                        gr.update(),
-                        gr.update(value=None),
-                        "",
-                        name,
-                        payload
+                        gr.update(value=None), "", "",
+                        gr.update(), gr.update(value=None), "",
+                        name, json.dumps(payload), path
                     )
                 else:
                     return (
@@ -3231,7 +3445,8 @@ def create_combined_monitor_viewer_tab():
                         gr.update(value=None),
                         "",
                         name,
-                        ""
+                        "",
+                        path
                     )
             
             # Dummy for favorites output (can't output to gr.Column modals in Gradio 6)
@@ -3241,8 +3456,8 @@ def create_combined_monitor_viewer_tab():
                 btn.click(
                     fn=lambda p=path, n=name: open_favorite_in_modal(p, n),
                     inputs=[],
-                    outputs=[viewer_modal_dummy2, file_selector, viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, current_filename, spz_viewer],
-                    js="""() => { const el = document.getElementById('viewer-modal-content'); if(el) el.style.display = 'flex'; }"""
+                    outputs=[viewer_modal_dummy2, file_selector, viewer, viewer_status, sog_file_data, sog_status, video_viewer, video_status, current_filename, spz_viewer, current_favorite_path],
+                    js="""() => { const el = document.getElementById('viewer-modal-content'); if(el) { el.style.display = 'flex'; setTimeout(() => { if(window._spzEngine) { try { window._spzEngine.resize(); } catch(e) {} } }, 150); } }"""
                 )
             
             # Add tab switching when current_filename changes - route all splat files to PlayCanvas
@@ -3279,17 +3494,16 @@ def create_combined_monitor_viewer_tab():
                 js="""async (payload) => {
                     if(!payload) return;
                     let parsed; try { parsed = JSON.parse(payload); } catch(e) { return; }
-                    const {data: fileData, filename: fileName} = parsed;
+                    const {data: fileData, filename: fileName, camera: cameraParams} = parsed;
                     if(!fileData || !fileName) return;
                     const fname = fileName.toLowerCase();
                     if(!fname.endsWith('.sog') && !fname.endsWith('.ply')) return;
-                    window.sogData = {fileData, fileName, fileSize: 'S3 file'};
+                    window.sogData = {fileData, fileName, fileSize: 'S3 file', cameraParams};
                     window.sogLoaded = false;
                     let attempts = 0;
                     const tryLoad = () => {
-                        console.log('[SPZ/SOG] tryLoad attempt', attempts, 'fname:', fname, 'createSPZViewer:', !!window.createSPZViewer, 'createSOGViewer:', !!window.createSOGViewer);
                         if(window.createSOGViewer) {
-                            window.createSOGViewer(fileData, fileName, 'S3 file');
+                            window.createSOGViewer(fileData, fileName, 'S3 file', cameraParams);
                             window.sogLoaded = true;
                         } else if(attempts < 20) { attempts++; setTimeout(tryLoad, 250); }
                     };
@@ -3389,10 +3603,17 @@ async () => {
     }
     console.log('PlayCanvas SDK ready, version:', window.pc.version || 'unknown');
     
-    globalThis.createSOGViewer = (fileData, fileName, fileSize) => {
+    globalThis.createSOGViewer = (fileData, fileName, fileSize, cameraParams) => {
+        console.log('[SOG] createSOGViewer called, fileName=', fileName, 'cameraParams=', JSON.stringify(cameraParams));
         // Try monitor tab container first, then fall back to library tab container
         const container = document.getElementById('sog-container-monitor') || document.getElementById('sog-container');
         if (!container) return;
+        
+        // Destroy any existing PlayCanvas app to free WebGL context
+        if (window._sogApp) {
+            try { window._sogApp.destroy(); } catch(e) {}
+            window._sogApp = null;
+        }
         
         // Force container AND its parent tab panel to be visible
         container.style.width = container.offsetWidth > 0 ? container.offsetWidth + 'px' : '800px';
@@ -3459,13 +3680,14 @@ async () => {
         app.graphicsDevice.setResolution(canvas.width, canvas.height);
         
         app.start();
+        window._sogApp = app;  // Store reference for cleanup on next load
         
         const camera = new pc.Entity('Camera');
         camera.addComponent('camera', {
             clearColor: new pc.Color(0.1, 0.1, 0.1, 1.0),
             fov: 75,
-            nearClip: 0.1,
-            farClip: 1000
+            nearClip: 0.5,
+            farClip: 100000
         });
         camera.setPosition(0, 2, 5);
         app.root.addChild(camera);
@@ -3487,6 +3709,7 @@ async () => {
         let cameraDistance = 10;
         let cameraYaw = 0;
         let cameraPitch = 0.3;
+        let sceneScale = 1.0;  // updated after splat loads
         const target = new pc.Vec3(0, 0, 0);
 
         const updateCameraPosition = () => {
@@ -3495,6 +3718,10 @@ async () => {
             const z = target.z + cameraDistance * Math.cos(cameraYaw) * Math.cos(cameraPitch);
             camera.setPosition(x, y, z);
             camera.lookAt(target.x, target.y, target.z);
+            // Scale near/far clip with scene to avoid clipping on large scenes
+            const camComp = camera.camera;
+            camComp.nearClip = Math.max(0.001, cameraDistance * 0.0001);
+            camComp.farClip = Math.max(10000, cameraDistance * 100);
         };
 
         canvas.addEventListener('mousedown', (e) => {
@@ -3540,28 +3767,69 @@ async () => {
         canvas.addEventListener('wheel', (e) => {
             const zoomSpeed = 0.001;
             const zoomDelta = e.deltaY * zoomSpeed * cameraDistance;
-            cameraDistance = Math.max(0.001, Math.min(100, cameraDistance + zoomDelta));
+            // No hard cap - allow zoom proportional to scene scale
+            cameraDistance = Math.max(sceneScale * 0.0001, cameraDistance + zoomDelta);
             updateCameraPosition();
             e.preventDefault();
         });
 
         canvas.addEventListener('contextmenu', (e) => e.preventDefault());
         updateCameraPosition();
+
+        // Apply server-computed camera params (parsed from SOG meta.json server-side)
+        // This runs after all variables are defined, giving correct view immediately
+        if (cameraParams && cameraParams.distance) {
+            sceneScale = cameraParams.distance / 2.5;
+            cameraDistance = cameraParams.distance;
+            target.set(cameraParams.cx || 0, cameraParams.cy || 0, cameraParams.cz || 0);
+            camera.camera.nearClip = cameraParams.nearClip || 0.001;
+            camera.camera.farClip = cameraParams.farClip || 10000;
+            updateCameraPosition();
+            console.log('[SOG] Camera from server: dist=', cameraDistance, 'center=', cameraParams.cx, cameraParams.cy, cameraParams.cz);
+        }
         
         // Try to load actual SOG file
         try {
             let url;
+            let bytes;
             if (fileData.startsWith('blob:') || fileData.startsWith('http')) {
                 url = fileData;
             } else {
                 const binaryString = atob(fileData);
-                const bytes = new Uint8Array(binaryString.length);
+                bytes = new Uint8Array(binaryString.length);
                 for (let i = 0; i < binaryString.length; i++) {
                     bytes[i] = binaryString.charCodeAt(i);
                 }
                 const blob = new Blob([bytes], { type: 'application/octet-stream' });
                 url = URL.createObjectURL(blob);
             }
+
+            // Parse SOG meta.json to get scene bounds BEFORE loading into PlayCanvas
+            // SOG is a ZIP file - extract meta.json to set correct camera distance immediately
+            try {
+                const JSZip = window.JSZip;
+                if (JSZip && bytes) {
+                    JSZip.loadAsync(bytes).then(zip => {
+                        const metaFile = zip.file('meta.json');
+                        if (metaFile) {
+                            metaFile.async('string').then(metaStr => {
+                                const meta = JSON.parse(metaStr);
+                                if (meta.means && meta.means.mins && meta.means.maxs) {
+                                    const mins = meta.means.mins;
+                                    const maxs = meta.means.maxs;
+                                    const cx = (mins[0]+maxs[0])/2, cy = (mins[1]+maxs[1])/2, cz = (mins[2]+maxs[2])/2;
+                                    const hx = (maxs[0]-mins[0])/2, hy = (maxs[1]-mins[1])/2, hz = (maxs[2]-mins[2])/2;
+                                    sceneScale = Math.sqrt(hx*hx + hy*hy + hz*hz);
+                                    target.set(cx, cy, cz);
+                                    cameraDistance = sceneScale * 2.5;
+                                    updateCameraPosition();
+                                    console.log('[SOG] Meta fitted: scale=', sceneScale, 'center=', cx, cy, cz);
+                                }
+                            });
+                        }
+                    });
+                }
+            } catch(metaErr) { console.warn('[SOG] meta.json parse failed:', metaErr); }
             
             const asset = new pc.Asset(fileName, 'gsplat', {
                 url: url,
@@ -3574,19 +3842,43 @@ async () => {
                     asset: asset
                 });
                 app.root.addChild(entity);
+                // Camera distance will be set correctly by meta.json parsing above
                 
-                // Focus camera on splat bounding box center
-                app.once('update', () => {
-                    const gsplatComponent = entity.gsplat;
-                    if (gsplatComponent && gsplatComponent.instance) {
-                        const aabb = gsplatComponent.instance.meshInstance && gsplatComponent.instance.meshInstance.aabb;
-                        if (aabb) {
-                            target.copy(aabb.center);
-                            cameraDistance = aabb.halfExtents.length() * 2.5;
-                            updateCameraPosition();
+                // Poll until the gsplat AABB is available, then auto-fit camera
+                let fitAttempts = 0;
+                const tryFitCamera = () => {
+                    fitAttempts++;
+                    let fitted = false;
+                    try {
+                        // Collect all mesh instances in the scene
+                        const meshInstances = [];
+                        app.root.forEach(node => {
+                            const model = node.model;
+                            if (model && model.meshInstances) meshInstances.push(...model.meshInstances);
+                            const gsplat = node.gsplat;
+                            if (gsplat && gsplat.instance && gsplat.instance.meshInstance) {
+                                meshInstances.push(gsplat.instance.meshInstance);
+                            }
+                        });
+                        if (meshInstances.length > 0) {
+                            // Compute combined AABB
+                            const combined = meshInstances[0].aabb.clone();
+                            for (let i = 1; i < meshInstances.length; i++) {
+                                combined.add(meshInstances[i].aabb);
+                            }
+                            if (combined.halfExtents.length() > 0) {
+                                target.copy(combined.center);
+                                sceneScale = combined.halfExtents.length();
+                                cameraDistance = sceneScale * 2.5;
+                                updateCameraPosition();
+                                console.log('[SOG] Fitted: center=', combined.center.toString(), 'scale=', sceneScale);
+                                fitted = true;
+                            }
                         }
-                    }
-                });
+                    } catch(e) { console.warn('[SOG] fit error:', e); }
+                    if (!fitted && fitAttempts < 60) setTimeout(tryFitCamera, 100);
+                };
+                setTimeout(tryFitCamera, 300);
             });
             
             asset.on('error', (err) => {
@@ -3628,6 +3920,29 @@ def create_interface():
             overflow-x: auto !important;
     '''
 _css = """
+        /* Job Progress container - theme-aware */
+        .job-progress-container {
+            border: 3px solid var(--border-color-primary);
+            border-radius: 8px;
+            padding: 15px;
+            background: var(--background-fill-secondary);
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .job-progress-title {
+            margin: 0 0 15px 0;
+            color: var(--body-text-color);
+            border-bottom: 2px solid var(--border-color-primary);
+            padding-bottom: 8px;
+        }
+        .job-progress-text {
+            color: var(--body-text-color-subdued, var(--body-text-color));
+        }
+        .job-progress-error {
+            color: #ff6b6b;
+        }
+        .job-progress-bar-track {
+            background: var(--border-color-primary);
+        }
         /* Modal popup styles */
         #refine-modal-overlay {
             pointer-events: none !important;
@@ -3638,12 +3953,12 @@ _css = """
             left: 50% !important;
             transform: translate(-50%, -50%) !important;
             z-index: 20000 !important;
-            background: #1e1e1e !important;
-            color: #e0e0e0 !important;
+            background: var(--background-fill-primary) !important;
+            color: var(--body-text-color) !important;
             padding: 20px !important;
             border-radius: 8px !important;
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.5), 0 4px 20px rgba(0,0,0,0.5) !important;
-            border: 1px solid #444 !important;
+            border: 1px solid var(--border-color-primary) !important;
             width: 600px !important;
             max-height: 80vh !important;
             overflow-x: visible !important;
@@ -3672,7 +3987,7 @@ _css = """
         #refine-modal-content .gap,
         #refine-modal-content .form,
         #refine-modal-content .wrap {
-            border-color: #444 !important;
+            border-color: var(--border-color-primary) !important;
             outline: none !important;
         }
         /* Ensure radio/slider inputs match the dark theme */
@@ -3683,24 +3998,24 @@ _css = """
         #refine-modal-content ul[role="listbox"] {
             position: fixed !important;
             z-index: 99999 !important;
-            background: #2a2a2a !important;
-            border: 1px solid #555 !important;
-            color: #e0e0e0 !important;
+            background: var(--background-fill-secondary) !important;
+            border: 1px solid var(--border-color-primary) !important;
+            color: var(--body-text-color) !important;
             max-height: 200px !important;
             overflow-y: auto !important;
         }
         #refine-modal-content ul[role="listbox"] li {
-            color: #e0e0e0 !important;
-            background: #2a2a2a !important;
+            color: var(--body-text-color) !important;
+            background: var(--background-fill-secondary) !important;
         }
         #refine-modal-content ul[role="listbox"] li:hover,
         #refine-modal-content ul[role="listbox"] li[aria-selected="true"] {
-            background: #3a3a5a !important;
+            background: var(--color-accent-soft) !important;
         }
         /* Dark scrollbars on the modal itself and all children (Firefox + Chrome) */
         #refine-modal-content,
         #refine-modal-content * {
-            scrollbar-color: #555 #1e1e1e;
+            scrollbar-color: var(--border-color-primary) var(--background-fill-primary);
             scrollbar-width: thin;
         }
         #refine-modal-content::-webkit-scrollbar,
@@ -3710,11 +4025,11 @@ _css = """
         }
         #refine-modal-content::-webkit-scrollbar-track,
         #refine-modal-content *::-webkit-scrollbar-track {
-            background: #1e1e1e !important;
+            background: var(--background-fill-primary) !important;
         }
         #refine-modal-content::-webkit-scrollbar-thumb,
         #refine-modal-content *::-webkit-scrollbar-thumb {
-            background: #555 !important;
+            background: var(--border-color-primary) !important;
             border-radius: 4px;
         }
         
@@ -3728,12 +4043,12 @@ _css = """
             left: 50% !important;
             transform: translate(-50%, -50%) !important;
             z-index: 1000 !important;
-            background: #1e1e1e !important;
-            color: #e0e0e0 !important;
+            background: var(--background-fill-primary) !important;
+            color: var(--body-text-color) !important;
             padding: 20px !important;
             border-radius: 8px !important;
             box-shadow: 0 0 0 5px #000, 0 4px 20px rgba(0,0,0,0.5) !important;
-            border: 1px solid #444 !important;
+            border: 1px solid var(--border-color-primary) !important;
             width: 400px !important;
             pointer-events: auto !important;
         }
@@ -3771,12 +4086,12 @@ _css = """
             left: 50% !important;
             transform: translate(-50%, -50%) !important;
             z-index: 10000 !important;
-            background: #1e1e1e !important;
-            color: #e0e0e0 !important;
+            background: var(--background-fill-primary) !important;
+            color: var(--body-text-color) !important;
             padding: 20px !important;
             border-radius: 8px !important;
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.5), 0 4px 20px rgba(0,0,0,0.5) !important;
-            border: 1px solid #444 !important;
+            border: 1px solid var(--border-color-primary) !important;
             width: 700px !important;
             max-height: 80vh !important;
             overflow-y: auto !important;
@@ -3791,12 +4106,12 @@ _css = """
             left: 50% !important;
             transform: translate(-50%, -50%) !important;
             z-index: 1000 !important;
-            background: #1e1e1e !important;
-            color: #e0e0e0 !important;
+            background: var(--background-fill-primary) !important;
+            color: var(--body-text-color) !important;
             padding: 0px !important;
             border-radius: 8px !important;
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.5), 0 4px 20px rgba(0,0,0,0.5) !important;
-            border: 1px solid #444 !important;
+            border: 1px solid var(--border-color-primary) !important;
             width: 90vw !important;
             max-width: 1200px !important;
             max-height: 90vh !important;
@@ -3813,17 +4128,17 @@ _css = """
         #viewer-modal-content > div,
         #viewer-modal-content .block,
         #viewer-modal-content .gap {
-            background: #1e1e1e !important;
-            color: #e0e0e0 !important;
+            background: var(--background-fill-primary) !important;
+            color: var(--body-text-color) !important;
         }
         #viewer-modal-content::-webkit-scrollbar {
             width: 8px;
         }
         #viewer-modal-content::-webkit-scrollbar-track {
-            background: #1e1e1e !important;
+            background: var(--background-fill-primary) !important;
         }
         #viewer-modal-content::-webkit-scrollbar-thumb {
-            background: #444 !important;
+            background: var(--border-color-primary) !important;
             border-radius: 4px;
         }
         .close-button {
@@ -3858,7 +4173,7 @@ _css = """
         #viewer-container {
             width: 100%;
             height: 600px;
-            background: #1a1a1a;
+            background: var(--background-fill-primary);
             position: relative;
             margin-top: 20px;
         }
@@ -3936,7 +4251,7 @@ def create_interface():
                             elem_classes=["theme-image-light"],
                             interactive=False,
                             sources=None,
-                            buttons=None
+                            buttons=[]
                         )
                         dark_logo = gr.Image(
                             "../../assets/images/PoweredByAWS_horiz_RGB_1c_White.png",
@@ -4006,17 +4321,37 @@ if __name__ == "__main__":
     temp_3d_cache = os.path.join(tempfile.gettempdir(), "gradio_3d_cache")
     os.makedirs(temp_3d_cache, exist_ok=True)
     iface.launch(server_name="0.0.0.0", server_port=7861, share=False, allowed_paths=[favorites_dir, temp_3d_cache],
+                 max_file_size="100mb",
                  js=playcanvas_js, theme=gr.themes.Ocean(), css=_css,
                  head="""<script src="https://code.playcanvas.com/playcanvas-2.17.0.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
 // createSOGViewer defined in <head> so it's in the true global scope.
 // In Gradio 6, the js= param on gr.Blocks runs in a sandboxed AsyncFunction scope
 // where window/globalThis assignments don't persist to .change()/.then() JS callbacks.
 // But <head> scripts run in the real global scope, so this function IS accessible everywhere.
-window.createSOGViewer = function(fileData, fileName, fileSize) {
+window.createSOGViewer = function(fileData, fileName, fileSize, cameraParams) {
+    // Debounce: ignore duplicate calls within 1s (Gradio fires table.select twice)
+    var now = Date.now();
+    if (window._sogLastCall && (now - window._sogLastCall) < 5000 && window._sogLastFile === fileName) {
+        console.log('[SOG] debounced duplicate call, ignoring');
+        return;
+    }
+    window._sogLastCall = now;
+    window._sogLastFile = fileName;
     if (!window.pc) { console.error('PlayCanvas not loaded'); return; }
     var container = document.getElementById('sog-container-monitor') || document.getElementById('sog-container');
     if (!container) { console.error('No sog-container found'); return; }
+
+    // Destroy previous app before replacing canvas
+    if (window._sogApp) {
+        try {
+            window._sogApp.autoRender = false;
+            window._sogApp.off('update');
+            window._sogApp.destroy();
+        } catch(e) {}
+        window._sogApp = null;
+    }
 
     // Force container visible
     container.style.display = 'block';
@@ -4028,7 +4363,6 @@ window.createSOGViewer = function(fileData, fileName, fileSize) {
 
     var W = container.offsetWidth || 800;
     var H = 700;
-    // Set explicit width/height attributes on canvas BEFORE creating pc.Application
     container.innerHTML = '<canvas id="pc-canvas" width="' + W + '" height="' + H + '" style="width:' + W + 'px;height:' + H + 'px;display:block;background:#1a1a1a;"></canvas>';
     var canvas = document.getElementById('pc-canvas');
 
@@ -4041,11 +4375,12 @@ window.createSOGViewer = function(fileData, fileName, fileSize) {
     app.setCanvasFillMode(pc.FILLMODE_NONE);
     app.setCanvasResolution(pc.RESOLUTION_AUTO);
     app.start();
+    window._sogApp = app;
     app.resizeCanvas(W, H);
 
     // Camera
     var camera = new pc.Entity('Camera');
-    camera.addComponent('camera', { clearColor: new pc.Color(0.1,0.1,0.1,1), fov: 75, nearClip: 0.1, farClip: 1000 });
+    camera.addComponent('camera', { clearColor: new pc.Color(0.1,0.1,0.1,1), fov: 75, nearClip: 0.001, farClip: 100000 });
     camera.setPosition(0, 2, 5);
     app.root.addChild(camera);
 
@@ -4056,7 +4391,7 @@ window.createSOGViewer = function(fileData, fileName, fileSize) {
     app.root.addChild(light);
 
     // Orbit controls
-    var yaw = 0, pitch = 0.3, dist = 10;
+    var yaw = 0, pitch = 0.3, dist = 10, sceneScale = 1;
     var target = new pc.Vec3(0,0,0);
     var updateCam = function() {
         camera.setPosition(
@@ -4065,7 +4400,19 @@ window.createSOGViewer = function(fileData, fileName, fileSize) {
             target.z + dist * Math.cos(yaw) * Math.cos(pitch)
         );
         camera.lookAt(target);
+        camera.camera.nearClip = Math.max(0.0001, dist * 0.0001);
+        camera.camera.farClip = Math.max(10000, dist * 100);
     };
+
+    // Apply server-computed camera params immediately
+    console.log('[SOG] createSOGViewer called, cameraParams=', JSON.stringify(cameraParams));
+    if (cameraParams && cameraParams.distance) {
+        sceneScale = cameraParams.distance / 2.5;
+        dist = cameraParams.distance;
+        target.set(cameraParams.cx || 0, cameraParams.cy || 0, cameraParams.cz || 0);
+        console.log('[SOG] Camera from server: dist=', dist, 'center=', cameraParams.cx, cameraParams.cy, cameraParams.cz);
+    }
+
     var dragging = false, panning = false, lx = 0, ly = 0;
     canvas.addEventListener('mousedown', function(e) { dragging = true; panning = e.button === 2; lx = e.clientX; ly = e.clientY; e.preventDefault(); });
     canvas.addEventListener('mouseup', function() { dragging = false; panning = false; });
@@ -4084,12 +4431,16 @@ window.createSOGViewer = function(fileData, fileName, fileSize) {
         }
         updateCam(); lx = e.clientX; ly = e.clientY; e.preventDefault();
     });
-    canvas.addEventListener('wheel', function(e) { dist = Math.max(0.01, Math.min(100, dist + e.deltaY * 0.001 * dist)); updateCam(); e.preventDefault(); });
+    canvas.addEventListener('wheel', function(e) {
+        dist = Math.max(sceneScale * 0.001, dist + e.deltaY * 0.001 * dist);
+        updateCam(); e.preventDefault();
+    });
     canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
     updateCam();
 
     // Resize handler
     window.addEventListener('resize', function() {
+        if (window._sogApp !== app) return;
         var rect = container.getBoundingClientRect();
         if (rect.width > 0 && rect.height > 0) app.resizeCanvas(rect.width, H);
     });
@@ -4111,17 +4462,23 @@ window.createSOGViewer = function(fileData, fileName, fileSize) {
             var entity = new pc.Entity('GaussianSplat');
             entity.addComponent('gsplat', { asset: asset });
             app.root.addChild(entity);
-            app.once('update', function() {
-                var gsplatComponent = entity.gsplat;
-                if (gsplatComponent && gsplatComponent.instance) {
-                    var aabb = gsplatComponent.instance.meshInstance && gsplatComponent.instance.meshInstance.aabb;
-                    if (aabb) {
+            // Poll for AABB as fallback if no server params
+            if (!cameraParams || !cameraParams.distance) {
+                var attempts = 0;
+                var tryFit = function() {
+                    attempts++;
+                    var gsplatComp = entity.gsplat;
+                    var mi = gsplatComp && gsplatComp.instance && gsplatComp.instance.meshInstance;
+                    var aabb = mi && mi.aabb;
+                    if (aabb && aabb.halfExtents.length() > 0) {
                         target.copy(aabb.center);
-                        dist = aabb.halfExtents.length() * 2.5;
+                        sceneScale = aabb.halfExtents.length();
+                        dist = sceneScale * 2.5;
                         updateCam();
-                    }
-                }
-            });
+                    } else if (attempts < 60) { setTimeout(tryFit, 100); }
+                };
+                setTimeout(tryFit, 300);
+            }
             console.log('GSplat loaded successfully');
         });
         asset.on('error', function(err) { console.error('GSplat error:', err); });
@@ -4129,20 +4486,54 @@ window.createSOGViewer = function(fileData, fileName, fileSize) {
         app.assets.load(asset);
     } catch (error) { console.error('Error loading GSplat:', error); }
 };
-window.createSPZViewer = async function(fileData, fileName) {
+window.createSPZViewer = async function(fileData, fileName, cameraParams) {
+    // Debounce: ignore duplicate calls for same file within 5s (file_selector.change fires after on_file_select_and_view)
+    var now = Date.now();
+    if (window._spzLastCall && (now - window._spzLastCall) < 5000 && window._spzLastFile === fileName) {
+        console.log('[SPZ] debounced duplicate call for', fileName, 'ignoring');
+        return;
+    }
+    window._spzLastCall = now;
+    window._spzLastFile = fileName;
     var container = document.getElementById('spz-container-monitor') || document.getElementById('sog-container-monitor') || document.getElementById('spz-container') || document.getElementById('sog-container');
     if (!container) return;
-    container.innerHTML = '<canvas id="spz-canvas" style="width:100%;height:700px;"></canvas>';
+    // Destroy any existing PlayCanvas app sharing this container
+    if (window._sogApp) {
+        try { window._sogApp.autoRender = false; window._sogApp.off('update'); window._sogApp.destroy(); } catch(e) {}
+        window._sogApp = null;
+    }
+    // Destroy any existing Babylon engine
+    if (window._spzEngine) {
+        try { window._spzEngine.dispose(); } catch(e) {}
+        window._spzEngine = null;
+    }
+    // Wait for container to have non-zero width
+    var waitForLayout = function(cb) {
+        var tries = 0;
+        var check = function() {
+            var w = container.offsetWidth;
+            if (w > 10) { cb(w); }
+            else if (tries++ < 60) { setTimeout(check, 50); }
+            else { cb(800); }
+        };
+        check();
+    };
+    waitForLayout(function(W) {
+    container.innerHTML = '<canvas id="spz-canvas" style="width:' + W + 'px;height:700px;display:block;"></canvas>';
     var canvas = document.getElementById('spz-canvas');
-    canvas.width = (container.offsetWidth || 800) * (window.devicePixelRatio || 1);
-    canvas.height = 700 * (window.devicePixelRatio || 1);
-    canvas.style.width = (container.offsetWidth || 800) + 'px';
+    var dpr = window.devicePixelRatio || 1;
+    canvas.width = W * dpr;
+    canvas.height = 700 * dpr;
+    canvas.style.width = W + 'px';
     canvas.style.height = '700px';
     function loadAndRender() {
         var engine = new BABYLON.Engine(canvas, true);
+        window._spzEngine = engine;
         var scene = new BABYLON.Scene(engine);
         scene.clearColor = new BABYLON.Color4(0.1, 0.1, 0.1, 1);
-        var camera = new BABYLON.ArcRotateCamera('cam', -Math.PI/2, Math.PI/3, 5, BABYLON.Vector3.Zero(), scene);
+        var initTarget = (cameraParams && cameraParams.cx != null) ? new BABYLON.Vector3(cameraParams.cx, cameraParams.cy, cameraParams.cz) : BABYLON.Vector3.Zero();
+        var initRadius = (cameraParams && cameraParams.distance) ? cameraParams.distance : 5000;
+        var camera = new BABYLON.ArcRotateCamera('cam', 0, Math.PI/6, initRadius, initTarget, scene);
         camera.attachControl(canvas, true);
         new BABYLON.HemisphericLight('light', new BABYLON.Vector3(0,1,0), scene);
         var blobUrl;
@@ -4153,57 +4544,102 @@ window.createSPZViewer = async function(fileData, fileName) {
             var blob = new Blob([bytes], {type: 'application/octet-stream'});
             blobUrl = URL.createObjectURL(blob);
         }
+        function applyControls(cam) {
+            cam.lowerRadiusLimit = 0.001;
+            cam.panningInertia = 0.9;
+            cam.inputs.removeByType('ArcRotateCameraMouseWheelInput');
+            canvas.addEventListener('wheel', function(e) {
+                e.preventDefault();
+                cam.radius = Math.max(cam.lowerRadiusLimit, cam.radius * (1 + e.deltaY * 0.0005));
+            }, { passive: false });
+            cam.inputs.removeByType('ArcRotateCameraPointersInput');
+            var pointers = new BABYLON.ArcRotateCameraPointersInput();
+            pointers.buttons = [0, 1, 2];
+            cam.inputs.add(pointers);
+            var isPanning = false, lastX = 0, lastY = 0;
+            canvas.addEventListener('mousedown', function(e) {
+                if (e.button === 1 || (e.button === 0 && e.shiftKey)) { isPanning = true; lastX = e.clientX; lastY = e.clientY; e.preventDefault(); }
+            });
+            canvas.addEventListener('mousemove', function(e) {
+                if (!isPanning) return;
+                var dx = e.clientX - lastX, dy = e.clientY - lastY;
+                lastX = e.clientX; lastY = e.clientY;
+                var s = cam.radius * 0.001;
+                var right = BABYLON.Vector3.TransformNormal(new BABYLON.Vector3(1,0,0), cam.getViewMatrix().clone().invert());
+                var up = BABYLON.Vector3.TransformNormal(new BABYLON.Vector3(0,1,0), cam.getViewMatrix().clone().invert());
+                cam.target.addInPlace(right.scale(-dx * s));
+                cam.target.addInPlace(up.scale(dy * s));
+            });
+            window.addEventListener('mouseup', function(e) { if (e.button === 1 || e.button === 0) isPanning = false; });
+        }
         BABYLON.SceneLoader.Append('', blobUrl, scene, function() {
-            scene.createDefaultCameraOrLight(true, true, true);
-            // Re-apply zoom settings after createDefaultCameraOrLight replaces the camera
-            var cam = scene.activeCamera;
-            if (cam) {
-                cam.lowerRadiusLimit = 0.01;
-                cam.panningInertia = 0.9;
-                // Proportional zoom: each scroll tick = fixed % of current distance
-                cam.inputs.removeByType('ArcRotateCameraMouseWheelInput');
-                canvas.addEventListener('wheel', function(e) {
-                    e.preventDefault();
-                    cam.radius = Math.max(cam.lowerRadiusLimit || 0.01,
-                        cam.radius * (1 + e.deltaY * 0.0005));
-                }, { passive: false });
-                // Proportional panning: pan speed scales with radius so it feels
-                // consistent whether zoomed in close or far away
-                cam.inputs.removeByType('ArcRotateCameraPointersInput');
-                var pointers = new BABYLON.ArcRotateCameraPointersInput();
-                pointers.buttons = [0, 1, 2];
-                cam.inputs.add(pointers);
-                var isPanning = false;
-                var lastX = 0, lastY = 0;
-                canvas.addEventListener('mousedown', function(e) {
-                    if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
-                        isPanning = true;
-                        lastX = e.clientX; lastY = e.clientY;
-                        e.preventDefault();
-                    }
-                });
-                canvas.addEventListener('mousemove', function(e) {
-                    if (!isPanning) return;
-                    var dx = e.clientX - lastX;
-                    var dy = e.clientY - lastY;
-                    lastX = e.clientX; lastY = e.clientY;
-                    // Scale pan by radius so it's proportional at any zoom level
-                    var scale = cam.radius * 0.001;
-                    var right = BABYLON.Vector3.TransformNormal(
-                        new BABYLON.Vector3(1, 0, 0),
-                        cam.getViewMatrix().clone().invert());
-                    var up = BABYLON.Vector3.TransformNormal(
-                        new BABYLON.Vector3(0, 1, 0),
-                        cam.getViewMatrix().clone().invert());
-                    cam.target.addInPlace(right.scale(-dx * scale));
-                    cam.target.addInPlace(up.scale(dy * scale));
-                });
-                window.addEventListener('mouseup', function(e) {
-                    if (e.button === 1 || e.button === 0) isPanning = false;
-                });
-            }
             if (!fileData.startsWith('blob:') && !fileData.startsWith('http')) URL.revokeObjectURL(blobUrl);
-        }, null, null, '.spz');
+            console.log('[SPZ] SceneLoader success, meshes:', scene.meshes.length, 'particleSystems:', scene.particleSystems.length);
+            scene.meshes.forEach(function(m, i) {
+                try {
+                    var bi = m.getBoundingInfo();
+                    var mn = bi.boundingBox.minimumWorld, mx = bi.boundingBox.maximumWorld;
+                    console.log('[SPZ] mesh['+i+'] bounds: min=('+mn.x.toFixed(3)+','+mn.y.toFixed(3)+','+mn.z.toFixed(3)+') max=('+mx.x.toFixed(3)+','+mx.y.toFixed(3)+','+mx.z.toFixed(3)+')');
+                } catch(e) {}
+            });
+            var cam = scene.activeCamera;
+            if (!cam) { scene.createDefaultCameraOrLight(true, true, true); cam = scene.activeCamera; }
+            // Always fit camera to actual Babylon bounding box - server params give wrong scale
+            var fitAttempts = 0;
+            var doFit = function() {
+                fitAttempts++;
+                var totalMin = null, totalMax = null;
+                scene.meshes.forEach(function(m) {
+                    if (!m.isEnabled() || !m.getBoundingInfo) return;
+                    try {
+                        var bi = m.getBoundingInfo();
+                        var mn = bi.boundingBox.minimumWorld, mx = bi.boundingBox.maximumWorld;
+                        if (mn.x === 0 && mx.x === 0 && mn.y === 0 && mx.y === 0 && mn.z === 0 && mx.z === 0) return;
+                        if (!totalMin) { totalMin = mn.clone(); totalMax = mx.clone(); }
+                        else { totalMin = BABYLON.Vector3.Minimize(totalMin, mn); totalMax = BABYLON.Vector3.Maximize(totalMax, mx); }
+                    } catch(e) {}
+                });
+                if (totalMin && totalMax) {
+                    // Detect if bbox is pre-scale (large, ~±2048) or already rendered-scale (small, ~±0.5)
+                    // Babylon SPZ loader applies fractionalBits scale internally for preserve_scene_scale=false
+                    // but for preserve_scene_scale=true the bbox is in pre-scale int24 space
+                    var rawMaxHalf = Math.max((totalMax.x-totalMin.x)/2, (totalMax.y-totalMin.y)/2, (totalMax.z-totalMin.z)/2);
+                    var fbScale = (cameraParams && cameraParams.fractionalBits && rawMaxHalf > 10) ? (1 << cameraParams.fractionalBits) : 1;
+                    var center = BABYLON.Vector3.Center(totalMin, totalMax).scale(1 / fbScale);
+                    var hx = (totalMax.x - totalMin.x) / 2 / fbScale;
+                    var hy = (totalMax.y - totalMin.y) / 2 / fbScale;
+                    var hz = (totalMax.z - totalMin.z) / 2 / fbScale;
+                    var maxHalf = Math.max(hx, hy, hz, 0.001);
+                    var dist = maxHalf * 6.0;
+                    console.log('[SPZ] bbox fit (rawMaxHalf='+rawMaxHalf.toFixed(3)+' fbScale='+fbScale+'): center=', center.x, center.y, center.z, 'maxHalf=', maxHalf, 'dist=', dist);
+                    // createDefaultCameraOrLight fits to pre-scale bbox; divide by fbScale to get rendered coords
+                    scene.createDefaultCameraOrLight(true, true, true);
+                    cam = scene.activeCamera;
+                    // Divide target and radius by fbScale to convert pre-scale -> rendered space
+                    // Then multiply radius by zoom factor for comfortable initial view
+                    var scaledRadius = (cam.radius / fbScale) * 3.0;
+                    cam.target = (fbScale > 1) ? cam.target.scale(1 / fbScale) : cam.target;
+                    cam.radius = scaledRadius;
+                    cam.lowerRadiusLimit = scaledRadius * 0.0001;
+                    cam.minZ = scaledRadius * 0.0001;
+                    cam.maxZ = scaledRadius * 200;
+                    applyControls(cam);
+                    console.log('[SPZ] after fit: cam.radius=', cam.radius, 'cam.target=', cam.target.x.toFixed(3), cam.target.y.toFixed(3), cam.target.z.toFixed(3), 'cam.pos=', cam.position.x.toFixed(3), cam.position.y.toFixed(3), cam.position.z.toFixed(3));
+                } else if (cameraParams && cameraParams.distance) {
+                    // Fallback to server params if bbox never becomes valid
+                    cam.radius = cameraParams.distance;
+                    cam.alpha = -Math.PI / 2;
+                    cam.beta = Math.PI / 3;
+                    cam.target = new BABYLON.Vector3(cameraParams.cx || 0, cameraParams.cy || 0, cameraParams.cz || 0);
+                    cam.lowerRadiusLimit = cameraParams.distance * 0.0001;
+                    cam.minZ = cameraParams.distance * 0.0001;
+                    cam.maxZ = cameraParams.distance * 200;
+                    applyControls(cam);
+                    console.log('[SPZ] fallback to server params: radius=', cameraParams.distance);
+                }
+            };
+            doFit(); // run immediately - no delay needed, bbox is available at SceneLoader success
+        }, function(scene, msg, ex) { console.error('[SPZ] SceneLoader error:', msg, ex); }, null, '.spz');
         engine.runRenderLoop(function() { scene.render(); });
         window.addEventListener('resize', function() { engine.resize(); });
     }
@@ -4216,6 +4652,7 @@ window.createSPZViewer = async function(fileData, fileName) {
             s2.onload = loadAndRender;
         };
     } else { loadAndRender(); }
+    }); // end waitForLayout
 };
 
 // Fix refine modal dropdowns: modal has transform which makes position:fixed children

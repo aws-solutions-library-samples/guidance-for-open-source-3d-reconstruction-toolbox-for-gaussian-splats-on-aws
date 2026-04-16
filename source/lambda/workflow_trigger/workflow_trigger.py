@@ -213,6 +213,8 @@ def lambda_handler(event, context):
                     "matchingMethod": str(json_content["reconstruction"]["matchingMethod"]),
                     "enableFlHeuristic": str(json_content["reconstruction"].get("enableFlHeuristic", "false")),
                     "flHeuristicValue": str(json_content["reconstruction"].get("flHeuristicValue", "1.1")),
+                    "enableFlMetric": str(json_content["reconstruction"].get("enableFlMetric", "false")),
+                    "flMetricValue": str(json_content["reconstruction"].get("flMetricValue", "24")),
                     "runTrain": str(json_content["training"]["enable"]),
                     "model": str(json_content["training"]["model"]),
                     "maxSteps": str(json_content["training"]["maxSteps"]),
@@ -235,7 +237,9 @@ def lambda_handler(event, context):
                     "removeObject": str(json_content["segmentation"]["objectRemoval"]["enable"]),
                     "objectRemovalAction": str(json_content["segmentation"]["objectRemoval"]["action"]),
                     "objectRemovalObjects": str(json_content["segmentation"]["objectRemoval"]["objects"]),
-                    "preserveSceneScale": str(json_content["training"].get("preserveSceneScale", "false"))
+                    "preserveSceneScale": str(json_content["training"].get("preserveSceneScale", "false")),
+                    "enableDepthLoss": str(json_content["training"].get("enableDepthLoss", "false")),
+                    "enableVideoExport": str(json_content["postProcessing"].get("enableVideoExport", "true"))
                 }
 
                 try:
@@ -293,6 +297,8 @@ def lambda_handler(event, context):
                     "MATCHING_METHOD": str(json_content["reconstruction"]["matchingMethod"]),
                     "ENABLE_FL_HEURISTIC": str(json_content["reconstruction"].get("enableFlHeuristic", "false")),
                     "FL_HEURISTIC_VALUE": str(json_content["reconstruction"].get("flHeuristicValue", "1.1")),
+                    "ENABLE_FL_METRIC": str(json_content["reconstruction"].get("enableFlMetric", "false")),
+                    "FL_METRIC_VALUE": str(json_content["reconstruction"].get("flMetricValue", "24")),
                     "RUN_TRAIN": str(json_content["training"]["enable"]),
                     "MODEL": str(json_content["training"]["model"]),
                     "MAX_STEPS": str(json_content["training"]["maxSteps"]),
@@ -315,7 +321,9 @@ def lambda_handler(event, context):
                     "REMOVE_OBJECT": str(json_content["segmentation"]["objectRemoval"]["enable"]),
                     "OBJECT_REMOVAL_ACTION": str(json_content["segmentation"]["objectRemoval"]["action"]),
                     "OBJECT_REMOVAL_OBJECTS": str(json_content["segmentation"]["objectRemoval"]["objects"]),
-                    "PRESERVE_SCENE_SCALE": str(json_content["training"].get("preserveSceneScale", "false"))
+                    "PRESERVE_SCENE_SCALE": str(json_content["training"].get("preserveSceneScale", "false")),
+                    "ENABLE_DEPTH_LOSS": str(json_content["training"].get("enableDepthLoss", "false")),
+                    "ENABLE_VIDEO_EXPORT": str(json_content["postProcessing"].get("enableVideoExport", "true"))
                 },
                 "sns": {
                     "topicArn": os.environ["SNS_TOPIC_ARN"],

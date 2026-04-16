@@ -49,14 +49,17 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             "enableEnhancedFeatureExtraction": false,
             "matchingMethod": "sequential",
             "enableFlHeuristic": false,
-            "flHeuristicValue": "1.1"
+            "flHeuristicValue": "1.1",
+            "enableFlMetric": false,
+            "flMetricValue": "24"
         },
         "training": {
             "enable": true,
             "maxSteps": "30000",
             "model": "splatfacto",
             "preserveSceneScale": false,
-            "3dIsp": "bilagrid"
+            "3dIsp": "bilagrid",
+            "enableDepthLoss": false
         },
         "postProcessing": {
             "cropOutputBounds": true,
@@ -65,6 +68,7 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             "enableSpz": true,
             "enableSog": true,
             "enableUsdz": false,
+            "enableVideoExport": true,
             "plyCoords": "rhyu",
             "spzCoords": "rhyu",
             "sogCoords": "rhyu",
@@ -135,10 +139,11 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
         - vocab (best for large datasets that are not sequentially bound)
         - exhaustive (only use this method if dataset struggles to converge with other methods)
     - **Enable focal length heuristic:** (boolean), whether to enable focal length estimate to help normalize the scene scale if focal length is unknown. This uses the formula `focal_length = fl_heur_val*max(x_res, y_res)`
-    - **Focal length heuristic value:** (string), coefficient used in focal length heuristic (default: 1.2). 
-    - **Pose priors:** in order to speed up reconstruction, camera poses associated with the images can be used as input. In particular, this feature accepts a `.zip` archive folder that has the same schema as [NerfCapture](https://github.com/jc211/NeRFCapture/tree/main){:target="_blank"} or can be a `.zip` archive folder that contains images and sparse directories with [Colmap model text files](https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses){:target="_blank"}.
+    - **Focal length heuristic value:** (string), coefficient used in focal length heuristic (default: 1.2).
+    - **Enable focal length metric:** (boolean), whether to use a known metric focal length in pixels directly instead of estimating it. Takes priority over the heuristic if both are enabled.
+    - **Focal length metric value:** (string), the known focal length in pixels to use when `enableFlMetric` is true (default: 24). in order to speed up reconstruction, camera poses associated with the images can be used as input. In particular, this feature accepts a `.zip` archive folder that has the same schema as [NerfCapture](https://github.com/jc211/NeRFCapture/tree/main){:target="_blank"} or can be a `.zip` archive folder that contains images and sparse directories with [Colmap model text files](https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses){:target="_blank"}.
 
-        > *At this time, depth images are not used in the splat process.*
+        > *Note: The primary use case for `enableDepthLoss` is when providing a LiDAR-derived point cloud via `usePosePriorColmapModelFiles`. The LiDAR point cloud is projected as sparse depth supervision during training, anchoring Gaussians to accurate metric geometry. It also works with standard colmap reconstructions as a weaker depth signal. Depth image files are not required.*
 
         > ***Note:** All image files must be sequentially named and padded (e.g. 001.png, 002.png, etc.)*
 
@@ -261,6 +266,7 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             - **3dgrt:** used for 3D Gaussian Ray Tracing and Fast Tracing of Particle Scenes. Great for highly detailed scenes at the cost of processing power and time
     - **Preserve scene scale:** (boolean), whether to preserve the reconstruction scale during gaussian splat training
     - **3D image signal processing:** (string), technique to use for scene signal processing. Current options are bilagrid (bilateral grid), ppisp (physically plausible image signal processing)
+    - **Enable depth loss:** (boolean), whether to enable sparse depth supervision during training. The primary use case is when a LiDAR-derived point cloud is provided as pose prior input (via `usePosePriorColmapModelFiles`), giving the trainer accurate metric depth to anchor the Gaussians. It also works with standard colmap point cloud projections as a weaker depth signal. When enabled, overrides the model choice and uses gsplat's `simple_trainer` with depth loss. Requires a colmap reconstruction. Improves geometric accuracy especially for scenes with strong depth cues. Video export and nerfstudio metrics are not available when this is enabled.
 
 - **Post Processing:**
     - **Crop output bounds:** (boolean), whether to crop gaussians that are outliers.
@@ -269,6 +275,7 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
     - **Enable spz output:** (boolean), whether to output a compressed .spz file.
     - **Enable sog output:** (boolean), whether to output a compressed .sog file.
     - **Enable usdz output:** (boolean), whether to output a compressed .usdz file.
+    - **Enable video export:** (boolean), whether to render and export a trajectory flythrough video (.mp4) and thumbnail (.png) of the trained splat.
     - **Ply Coordinates:** (string), the coordinate system to transform the .ply to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
     - **Spz Coordinates:** (string), the coordinate system to transform the .spz to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
     - **Sog Coordinates:** (string), the coordinate system to transform the .sog to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)

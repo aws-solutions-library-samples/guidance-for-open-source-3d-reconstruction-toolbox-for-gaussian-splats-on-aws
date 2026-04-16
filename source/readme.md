@@ -25,6 +25,12 @@ The job metadata JSON file must follow this structure:
     "reconstruction": {
         "enable": true,
         "softwareName": "glomap",
+        "enableEnhancedFeatureExtraction": false,
+        "matchingMethod": "sequential",
+        "enableFlHeuristic": false,
+        "flHeuristicValue": "1.2",
+        "enableFlMetric": false,
+        "flMetricValue": "24",
         "posePriors": {
             "usePosePriorColmapModelFiles": false,
             "usePosePriorTransformJson": {
@@ -32,21 +38,24 @@ The job metadata JSON file must follow this structure:
                 "sourceCoordinateName": "arkit",
                 "poseIsWorldToCam": true
             }
-        },
-        "enableEnhancedFeatureExtraction": false,
-        "matchingMethod": "sequential"
+        }
     },
     "training": {
         "enable": true,
         "maxSteps": "15000",
-        "model": "splatfacto"
+        "model": "splatfacto",
+        "3dIsp": "none",
+        "preserveSceneScale": false,
+        "enableDepthLoss": false
     },
     "postProcessing": {
         "cropOutputBounds": false,
         "cropMode": "environment",
+        "cleanSplat": false,
         "enableSpz": true,
         "enableSog": true,
         "enableUsdz": true,
+        "enableVideoExport": true,
         "plyCoords": "rhyu",
         "spzCoords": "rhyu",
         "sogCoords": "rhyu",

@@ -71,6 +71,8 @@
             {"Name": "MATCHING_METHOD", "Value.$": "$.envVars.MATCHING_METHOD"},
             {"Name": "ENABLE_FL_HEURISTIC", "Value.$": "$.envVars.ENABLE_FL_HEURISTIC"},
             {"Name": "FL_HEURISTIC_VALUE", "Value.$": "$.envVars.FL_HEURISTIC_VALUE"},
+            {"Name": "ENABLE_FL_METRIC", "Value.$": "$.envVars.ENABLE_FL_METRIC"},
+            {"Name": "FL_METRIC_VALUE", "Value.$": "$.envVars.FL_METRIC_VALUE"},
             {"Name": "RUN_TRAIN", "Value.$": "$.envVars.RUN_TRAIN"},
             {"Name": "MODEL", "Value.$": "$.envVars.MODEL"},
             {"Name": "MAX_STEPS", "Value.$": "$.envVars.MAX_STEPS"},
@@ -94,6 +96,8 @@
             {"Name": "OBJECT_REMOVAL_ACTION", "Value.$": "$.envVars.OBJECT_REMOVAL_ACTION"},
             {"Name": "OBJECT_REMOVAL_OBJECTS", "Value.$": "$.envVars.OBJECT_REMOVAL_OBJECTS"},
             {"Name": "PRESERVE_SCENE_SCALE", "Value.$": "$.envVars.PRESERVE_SCENE_SCALE"},
+            {"Name": "ENABLE_DEPTH_LOSS", "Value.$": "$.envVars.ENABLE_DEPTH_LOSS"},
+            {"Name": "ENABLE_VIDEO_EXPORT", "Value.$": "$.envVars.ENABLE_VIDEO_EXPORT"},
             {"Name": "DDB_TABLE_NAME", "Value.$": "$.stateMachine.ddbTableName"},
             {"Name": "AWS_DEFAULT_REGION", "Value.$": "$.stateMachine.awsRegion"}
           ]
@@ -198,6 +202,8 @@
           "MATCHING_METHOD.$": "$.envVars.MATCHING_METHOD",
           "ENABLE_FL_HEURISTIC.$": "$.envVars.ENABLE_FL_HEURISTIC",
           "FL_HEURISTIC_VALUE.$": "$.envVars.FL_HEURISTIC_VALUE",
+          "ENABLE_FL_METRIC.$": "$.envVars.ENABLE_FL_METRIC",
+          "FL_METRIC_VALUE.$": "$.envVars.FL_METRIC_VALUE",
           "RUN_TRAIN.$": "$.envVars.RUN_TRAIN",
           "MODEL.$": "$.envVars.MODEL",
           "MAX_STEPS.$": "$.envVars.MAX_STEPS",
@@ -221,6 +227,8 @@
           "OBJECT_REMOVAL_ACTION.$": "$.envVars.OBJECT_REMOVAL_ACTION",
           "OBJECT_REMOVAL_OBJECTS.$": "$.envVars.OBJECT_REMOVAL_OBJECTS",
           "PRESERVE_SCENE_SCALE.$": "$.envVars.PRESERVE_SCENE_SCALE",
+          "ENABLE_DEPTH_LOSS.$": "$.envVars.ENABLE_DEPTH_LOSS",
+          "ENABLE_VIDEO_EXPORT.$": "$.envVars.ENABLE_VIDEO_EXPORT",
           "DDB_TABLE_NAME.$": "$.stateMachine.ddbTableName",
           "AWS_DEFAULT_REGION.$": "$.stateMachine.awsRegion"
         }

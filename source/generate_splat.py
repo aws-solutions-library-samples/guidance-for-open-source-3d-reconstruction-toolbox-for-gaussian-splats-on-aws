@@ -52,14 +52,20 @@ instance_type = "ml.g6.4xlarge"
 # Options Selections:
 # instance_type: "ml.g5.4xlarge" or "ml.g5.8xlarge" or "ml.g5.12xlarge (multi-gpu)"
 # logVerbosity: debug, info, error
-# sfm.softwareName: "colmap" or "glomap"
-# sfm.matchingMethod: "sequential", "spatial", "vocab", "exhaustive"
-# sfm.sourceCoordinateName" "arkit" or "arcore" or "opengl" or "opencv" or "ros"
-# training.model: "splatfacto" or "splatfacto-big" or "splatfacto-w-light" or "splatfacto-mcmc" or "nerfacto"
+# reconstruction.softwareName: "colmap" or "glomap" or "hloc" or "map_anything"
+# reconstruction.matchingMethod: "sequential", "spatial", "vocab", "exhaustive"
+# reconstruction.sourceCoordinateName: "arkit" or "arcore" or "opengl" or "opencv" or "ros"
+# reconstruction.enableFlHeuristic: "true" or "false" (estimate focal length as multiplier * max(w,h))
+# reconstruction.flHeuristicValue: e.g. "1.2" (coefficient for focal length heuristic)
+# reconstruction.enableFlMetric: "true" or "false" (use known focal length in pixels directly)
+# reconstruction.flMetricValue: e.g. "24" (known focal length in pixels)
+# training.model: "splatfacto" or "splatfacto-big" or "splatfacto-w-light" or "splatfacto-mcmc" or "3dgrt" or "3dgut" or "nerfacto"
+# training.3dIsp: "none" or "bilagrid" or "ppisp"
+# training.preserveSceneScale: "true" or "false"
+# training.enableDepthLoss: "true" or "false"
+# postProcessing.cropMode: "environment" or "rigid_object"
+# postProcessing.enableVideoExport: "true" or "false"
 # sphericalCamera.cubeFacesToRemove: "['back', 'down', 'front', 'left', 'right', 'up']" or "['']"
-# sphericalCamera.optimizeSequentialFrameOrder: "true" or "false"
-# segmentation.backgroundRemovalModel: "object" or "human"
-# training.rotateSplat: 'true' or 'false' (rotate output splat for gradio viewer)
 
 file_contents = {
     "uuid": str(unique_uuid),
@@ -83,6 +89,10 @@ file_contents = {
         "softwareName": "glomap",
         "enableEnhancedFeatureExtraction": "false",
         "matchingMethod": "sequential",
+        "enableFlHeuristic": "false",
+        "flHeuristicValue": "1.2",
+        "enableFlMetric": "false",
+        "flMetricValue": "24",
         "posePriors": {
             "usePosePriorColmapModelFiles": "false",
             "usePosePriorTransformJson": {
@@ -95,14 +105,19 @@ file_contents = {
     "training": {
         "enable": "true",
         "maxSteps": "15000",
-        "model": "splatfacto"
+        "model": "splatfacto",
+        "3dIsp": "none",
+        "preserveSceneScale": "false",
+        "enableDepthLoss": "false"
     },
     "postProcessing": {
         "cropOutputBounds": "false",
         "cropMode": "environment",
+        "cleanSplat": "false",
         "enableSpz": "true",
         "enableSog": "true",
         "enableUsdz": "true",
+        "enableVideoExport": "true",
         "plyCoords": "rhyu",
         "spzCoords": "rhyu",
         "sogCoords": "rhyu",

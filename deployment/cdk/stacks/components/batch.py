@@ -251,7 +251,7 @@ chmod 775 /mnt/workspace
                     {
                         "deviceName": "/dev/xvda",
                         "ebs": {
-                            "volumeSize": 100,
+                            "volumeSize": 200,
                             "volumeType": "gp3",
                             "encrypted": True,
                             "deleteOnTermination": True

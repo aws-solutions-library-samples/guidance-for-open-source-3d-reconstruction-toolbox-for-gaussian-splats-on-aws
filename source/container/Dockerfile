@@ -251,6 +251,7 @@ RUN git clone https://github.com/nerfstudio-project/gsplat.git --recursive \
     && git reset --hard ${GSPLAT_HASH} \
     && sed -i '/os.environ\["MASTER_ADDR"\] = "localhost"/s/^/# /' gsplat/distributed.py \
     && sed -i '/os.environ\["MASTER_PORT"\] = str(_find_free_port())/s/^/# /' gsplat/distributed.py \
+    && sed -i 's/point_indices = self\.parser\.point_indices\[image_name\]/point_indices = self.parser.point_indices.get(image_name, np.array([], dtype=np.int32))/' examples/datasets/colmap.py \
     && python setup.py build_ext --inplace \
     && python setup.py develop \
     && pip install --no-build-isolation -r examples/requirements.txt \
@@ -493,6 +494,7 @@ COPY ./src/pipeline/utils.py                                                    
 COPY ./src/pipeline/reconstruction/extract_poses_imgs.py                            ${CODE_PATH}/reconstruction
 COPY ./src/pipeline/reconstruction/process_pose_transforms.py                       ${CODE_PATH}/reconstruction
 COPY ./src/pipeline/reconstruction/update_camera_model.py                           ${CODE_PATH}/reconstruction
+COPY ./src/pipeline/reconstruction/convert_cameras_to_pinhole.py                    ${CODE_PATH}/reconstruction
 COPY ./src/pipeline/reconstruction/run_map_anything.py                              ${CODE_PATH}/reconstruction
 COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py                            ${CODE_PATH}/training
 COPY ./src/pipeline/training/run_gsplat_trainer.sh                                  ${CODE_PATH}/training
@@ -518,6 +520,7 @@ COPY ./src/pipeline/post_processing/extract_video_thumbnail.py                  
 COPY ./src/pipeline/post_processing/images_to_video.py                              ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/create_derivative_plys.py                       ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/convert_ply_to_sog.py                           ${CODE_PATH}/post_processing
+COPY ./src/pipeline/post_processing/create_collision_mesh.py                        ${CODE_PATH}/post_processing
 
 # Verify installed versions match expected versions
 RUN echo "=== VERSION VERIFICATION ===" \

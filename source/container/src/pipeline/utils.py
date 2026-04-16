@@ -982,7 +982,7 @@ def update_dynamodb_metrics(uuid, table_name, comp_group_elapsed_time=None, metr
         
         if update_parts:
             table.update_item(
-                Key={'uuid': uuid},
+                Key={os.environ.get('DDB_KEY_NAME', 'uuid'): uuid},
                 UpdateExpression='SET ' + ', '.join(update_parts),
                 ExpressionAttributeValues=expression_values
             )
@@ -1026,7 +1026,7 @@ def update_component_phase_completion(uuid, table_name, phase_name, elapsed_time
             attr_name = phase_lower + 'ElapsedTime'
         
         table.update_item(
-            Key={'uuid': uuid},
+            Key={os.environ.get('DDB_KEY_NAME', 'uuid'): uuid},
             UpdateExpression='SET #phase = :time, lastUpdatedPhase = :phase_name',
             ExpressionAttributeNames={'#phase': attr_name},
             ExpressionAttributeValues={

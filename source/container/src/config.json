@@ -36,13 +36,16 @@
     "OBJECT_REMOVAL_OBJECTS": "['human']",
     "PLY_COORDS": "rhyu",
     "ENABLE_SPZ": "True",
-    "SPZ_COORDS": "rhyu",
+    "SPZ_COORDS": "lhyu",
     "ENABLE_SOG": "True",
     "SOG_COORDS": "rhyu",
     "ENABLE_USDZ": "true",
     "USDZ_COORDS": "rhyu",
     "ENABLE_VIDEO_EXPORT": "True",
     "PRESERVE_SCENE_SCALE": "false",
+    "ENABLE_DEPTH_LOSS": "false",
     "ENABLE_FL_HEURISTIC": "false",
-    "FL_HEURISTIC_VALUE": "1.1"
+    "FL_HEURISTIC_VALUE": "1.2",
+    "ENABLE_FL_METRIC": "false",
+    "FL_METRIC_VALUE": "24"
 }

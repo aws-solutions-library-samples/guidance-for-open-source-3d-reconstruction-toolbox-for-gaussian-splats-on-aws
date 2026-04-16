@@ -146,6 +146,7 @@ if __name__ == "__main__":
         REFINE_STEPS_3DGRUT = max(12000, int(config['MAX_STEPS']))
         ENABLE_MULTI_GPU = "false"
         LOCAL_DEBUG = os.environ.get('LOCAL_DEBUG', config.get('LOCAL_DEBUG', 'false')).lower() == 'true'
+        ENABLE_DEPTH_LOSS = config.get('ENABLE_DEPTH_LOSS', 'false').lower() == 'true'
 
         # Check if video or zip of images given
         VIDEO = validate_input_media(config['FILENAME'])
@@ -388,6 +389,7 @@ if __name__ == "__main__":
     spz_ply_path = os.path.join(output_path, "spz.ply")
     usdz_ply_path = os.path.join(output_path, "usdz.ply")
     sog_ply_path = os.path.join(output_path, "sog.ply")
+    collision_mesh_path = os.path.join(output_path, "collision_mesh.ply")
 
     # For spherical, will have 6 views per 360 image using cube faces so will be 6x images
     config['MAX_NUM_IMAGES'] = str(int(config['MAX_NUM_IMAGES']))
@@ -512,8 +514,8 @@ if __name__ == "__main__":
                 shutil.move(src, dst)
             log.info(f"Moved reconstruction data from {zip_path} to dataset root")
         
-        # Ensure colmap/sparse structure exists for NerfStudio (not needed for 3DGRUT)
-        if colmap_zip_found and config['MODEL'] not in ('3dgrt', '3dgut'):
+        # Ensure colmap/sparse structure exists for NerfStudio (not needed for 3DGRUT or depth loss)
+        if colmap_zip_found and config['MODEL'] not in ('3dgrt', '3dgut') and not ENABLE_DEPTH_LOSS:
             if not os.path.exists(os.path.join(config['DATASET_PATH'], 'colmap', 'sparse')):
                 if os.path.exists(os.path.join(config['DATASET_PATH'], 'sparse')):
                     colmap_dir = os.path.join(config['DATASET_PATH'], 'colmap')
@@ -1400,8 +1402,20 @@ if __name__ == "__main__":
                             requires_gpu=False
                         )
                 # IMAGE UNDISTORTER
-                # Run undistorter for multi-GPU or when using 3DGRUT with pose priors (to convert SIMPLE_RADIAL to PINHOLE)
-                if ENABLE_MULTI_GPU == "true" or (config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt") and \
+                # Run undistorter for multi-GPU or when using 3DGRUT with pose priors
+                # For depth loss: convert cameras.bin to PINHOLE in-place instead —
+                # the undistorter renames images in images.bin which breaks point_indices
+                if ENABLE_DEPTH_LOSS and ENABLE_MULTI_GPU == "false":
+                    pipeline.create_component(
+                        name="Convert-Cameras-To-Pinhole",
+                        comp_type=ComponentType.RECONSTRUCTION,
+                        comp_environ=ComponentEnvironment.PYTHON,
+                        command="reconstruction/convert_cameras_to_pinhole.py",
+                        args=["-s", sparse_model_path],
+                        cwd=current_dir_path,
+                        requires_gpu=False
+                    )
+                elif ENABLE_MULTI_GPU == "true" or (config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt") and \
                     (config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'true' or config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true'):
                     args = [
                         "image_undistorter",
@@ -1537,8 +1551,58 @@ if __name__ == "__main__":
             if config['RECON_SOFTWARE_NAME'] == "glomap" or config['RECON_SOFTWARE_NAME'] == "colmap" or \
                 config['RECON_SOFTWARE_NAME'] == "map_anything" or config['RECON_SOFTWARE_NAME'] == "hloc":
                 data_model = "colmap"
+            # Single GPU gsplat with depth loss — override model choice and use gsplat simple_trainer
+            if ENABLE_DEPTH_LOSS and ENABLE_MULTI_GPU == "false":
+                if config['MODEL'] == "splatfacto-mcmc":
+                    model = "mcmc"
+                else:
+                    model = "default"
+                args = [
+                    model,
+                    "--max_steps", str(int(config['MAX_STEPS'])),
+                    "--result-dir", output_path,
+                    "--data_factor", "1",
+                    "--steps_scaler", "1.0",
+                    "--disable_viewer",
+                    "--eval_steps", str(int(config['MAX_STEPS'])),
+                    "--depth-loss",
+                    "--depth_lambda", "1e-3",
+                    "--data-dir", config['DATASET_PATH']
+                ]
+                if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
+                    args.extend(["--no-normalize-world-space", "--depth_lambda", "1e-4"])
+                pipeline.create_component(
+                    name="Train",
+                    comp_type=ComponentType.TRAINING,
+                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                    command="/opt/ml/code/training/run_gsplat_trainer.sh",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=True
+                )
+                ckpt_dir = os.path.join(output_path, "ckpts")
+                eval_args = [
+                    model,
+                    "--disable_viewer",
+                    "--data_factor", "1",
+                    "--depth-loss",
+                    "--data-dir", config['DATASET_PATH'],
+                    "--result-dir", output_path,
+                    "--ckpt", os.path.join(ckpt_dir, "ckpt_*.pt")
+                ]
+                if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
+                    eval_args.append("--no-normalize-world-space")
+                pipeline.create_component(
+                    name="GSplat-Metrics",
+                    comp_type=ComponentType.TRAINING,
+                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                    command="/opt/ml/code/training/run_gsplat_trainer.sh",
+                    args=eval_args,
+                    cwd=current_dir_path,
+                    requires_gpu=True
+                )
             # Single GPU gsplat
-            if ENABLE_MULTI_GPU == "false" and \
+            elif ENABLE_MULTI_GPU == "false" and \
                 config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
                 args = [
                     config['MODEL'],
@@ -1688,7 +1752,8 @@ if __name__ == "__main__":
                         data_model,
                         "--data", config['DATASET_PATH'],
                         "--downscale-factor", "1",
-                        "--auto-scale-poses", auto_scale_value
+                        "--auto-scale-poses", auto_scale_value#,
+                        #"--center-method", "poses" #poses,focus,none
                     ])
                 pipeline.create_component(
                     name="Train",
@@ -1712,6 +1777,7 @@ if __name__ == "__main__":
                 else:
                     model = "default"
                 isp_mode = config.get('THREED_ISP', 'none').lower()
+                depth_loss_flag = "--depth-loss" if ENABLE_DEPTH_LOSS else "--no-depth-loss"
                 args = [
                     model,
                     "--max_steps", str(int(config['MAX_STEPS'])),
@@ -1723,8 +1789,13 @@ if __name__ == "__main__":
                     #              # with NCCL all_reduce in multi-GPU distributed training.
                     #              # Re-enable once fixed: https://github.com/nerfstudio-project/gsplat/issues/910
                     "--eval_steps", str(int(config['MAX_STEPS'])),
+                    depth_loss_flag,
                     "--data-dir", config['DATASET_PATH']
                 ]
+                if ENABLE_DEPTH_LOSS:
+                    args.extend(["--depth_lambda", "1e-3"])
+                if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
+                    args.extend(["--no-normalize-world-space", "--depth_lambda", "1e-4"])
                 if isp_mode == "bilagrid" or isp_mode == "ppisp":
                     log.info(f"ISP mode '{isp_mode}' not supported with multi-GPU gsplat, skipping")
                 pipeline.create_component(
@@ -1742,10 +1813,13 @@ if __name__ == "__main__":
                     model,
                     "--disable_viewer",
                     "--data_factor", "1",
+                    depth_loss_flag,
                     "--data-dir", config['DATASET_PATH'],
                     "--result-dir", output_path,
                     "--ckpt", os.path.join(ckpt_dir, "ckpt_*.pt")
                 ]
+                if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
+                    eval_args.append("--no-normalize-world-space")
                 pipeline.create_component(
                     name="GSplat-Metrics",
                     comp_type=ComponentType.TRAINING,
@@ -1833,7 +1907,7 @@ if __name__ == "__main__":
     # Transform checkpoints splat training to .ply
     ##################################
     try:
-        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
+        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and not ENABLE_DEPTH_LOSS:
             if ENABLE_MULTI_GPU == "true":
                 ckpt_dir = os.path.join(output_path, "ckpts")
                 args = [
@@ -1951,13 +2025,33 @@ if __name__ == "__main__":
 
     ##################################
     # TRAINING COMPONENT:
+    # Export PLY from gsplat depth loss checkpoint
+    ##################################
+    try:
+        if ENABLE_DEPTH_LOSS and config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
+            ckpt_dir = os.path.join(output_path, "ckpts")
+            pipeline.create_component(
+                name="Nerfstudio-Export",
+                comp_type=ComponentType.TRAINING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="post_processing/gsplat_pt_to_ply.py",
+                args=[ckpt_dir, ply_path],
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue exporting PLY from gsplat depth loss checkpoint: {e}"
+        pipeline.report_error(770, error_message)
+
+    ##################################
+    # TRAINING COMPONENT:
     # Generate evaluation metrics
     ##################################
     try:
         # Nerfstudio models (non-multi-GPU)
         if ENABLE_MULTI_GPU == "false":
-            if config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
-                config['MODEL'] == "splatfacto-mcmc" or config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto-w-light":
+            if not ENABLE_DEPTH_LOSS and (config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
+                config['MODEL'] == "splatfacto-mcmc" or config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto-w-light"):
                 if resume_training_active:
                     # Resume training - use config from dataset directory for splatfacto models
                     if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
@@ -2016,8 +2110,8 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['ENABLE_VIDEO_EXPORT'] == "true" and ENABLE_MULTI_GPU == "false":
-            if config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-mcmc" or \
-                config['MODEL'] == "splatfacto-big" or config['MODEL'] == "splatfacto-w-light":
+            if not ENABLE_DEPTH_LOSS and (config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-mcmc" or \
+                config['MODEL'] == "splatfacto-big" or config['MODEL'] == "splatfacto-w-light"):
                 model = "splatfacto"
                 if config['MODEL'] == "splatfacto-w-light":
                     model = "splatfacto-w-light"
@@ -2290,22 +2384,30 @@ if __name__ == "__main__":
     try:
         if config['MODEL'] != "nerfacto":
             if config['MODEL'] not in ("3dgut", "3dgrt"):
-                rotation = '90,0,0'
-                args = [
-                    orig_ply_path,
-                    orig_ply_path, 
-                    f"--rotate={rotation}",
-                    '-w'
-                ]
-                pipeline.create_component(
-                    name="Ply-Rotation",
-                    comp_type=ComponentType.POST_PROCESSING,
-                    comp_environ=ComponentEnvironment.EXECUTABLE,
-                    command="splat-transform",
-                    args=args,
-                    cwd=current_dir_path,
-                    requires_gpu=False
-                )
+                preserve_scale = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
+                if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and preserve_scale:
+                    # gsplat with --no-normalize-world-space: raw COLMAP space
+                    # coord transform alone is sufficient, no additional rotation needed
+                    rotation = None
+                else:
+                    # nerfstudio OR normalized gsplat (align_principal_axes makes it OpenGL-like)
+                    rotation = '90,0,0'
+                if rotation:
+                    args = [
+                        orig_ply_path,
+                        orig_ply_path,
+                        f"--rotate={rotation}",
+                        '-w'
+                    ]
+                    pipeline.create_component(
+                        name="Ply-Rotation",
+                        comp_type=ComponentType.POST_PROCESSING,
+                        comp_environ=ComponentEnvironment.EXECUTABLE,
+                        command="splat-transform",
+                        args=args,
+                        cwd=current_dir_path,
+                        requires_gpu=False
+                    )
     except Exception as e:
         error_message = f"Issue rotating PLY: {e}"
         pipeline.report_error(785, error_message)
@@ -2371,22 +2473,27 @@ if __name__ == "__main__":
     try:
         if config['ENABLE_SOG'] == "true" and config['MODEL'] != "nerfacto":
             if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
-                rotation = '90,0,0'
-                args = [
-                    sog_ply_path,
-                    sog_ply_path,
-                    f"--rotate={rotation}",
-                    '-w'
-                ]
-                pipeline.create_component(
-                    name="Rotate-PLY-For-SOG",
-                    comp_type=ComponentType.POST_PROCESSING,
-                    comp_environ=ComponentEnvironment.EXECUTABLE,
-                    command="splat-transform",
-                    args=args,
-                    cwd=current_dir_path,
-                    requires_gpu=False
-                )
+                preserve_scale = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
+                if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and preserve_scale:
+                    rotation = None  # raw COLMAP: coord transform alone sufficient
+                else:
+                    rotation = '90,0,0'  # nerfstudio or normalized gsplat
+                if rotation:
+                    args = [
+                        sog_ply_path,
+                        sog_ply_path,
+                        f"--rotate={rotation}",
+                        '-w'
+                    ]
+                    pipeline.create_component(
+                        name="Rotate-PLY-For-SOG",
+                        comp_type=ComponentType.POST_PROCESSING,
+                        comp_environ=ComponentEnvironment.EXECUTABLE,
+                        command="splat-transform",
+                        args=args,
+                        cwd=current_dir_path,
+                        requires_gpu=False
+                    )
     except Exception as e:
         error_message = f"Issue rotating PLY: {e}"
         pipeline.report_error(785, error_message)
@@ -2493,6 +2600,45 @@ if __name__ == "__main__":
     except Exception as e:
         error_message = f"Issue converting ply to USDZ: {e}"
         pipeline.report_error(787, error_message)
+
+    ##################################
+    # POST-PROCESS COMPONENT:
+    # Add collision mesh to USDZ
+    ##################################
+    try:
+        if config['ENABLE_USDZ'] == "true" and config['MODEL'] != "nerfacto":
+            threedgrut_path = os.path.join(current_dir_path, "3dgrut")
+            os.environ['PYTHONPATH'] = f"{threedgrut_path}:{os.environ.get('PYTHONPATH', '')}"
+            # Step 1: generate convex hull triangle mesh from the splat point positions
+            pipeline.create_component(
+                name="Create-Collision-Mesh",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="post_processing/create_collision_mesh.py",
+                args=["-i", usdz_ply_path, "-o", collision_mesh_path],
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+            # Step 2: embed the mesh into the USDZ as invisible collision geometry
+            usdz_tmp_path = os.path.join(output_path, "splat_with_mesh.usdz")
+            pipeline.create_component(
+                name="USDZ-Add-Collision-Mesh",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="3dgrut/threedgrut/export/scripts/add_mesh_to_usdz.py",
+                args=[
+                    "--input_usdz", usdz_path,
+                    "--output_usdz", usdz_tmp_path,
+                    "--mesh_ply", collision_mesh_path,
+                    "--set_collision",
+                    "--set_invisible"
+                ],
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue adding collision mesh to USDZ: {e}"
+        pipeline.report_error(787, error_message)
     
     ##################################
     # POST-PROCESS COMPONENT:
@@ -2524,20 +2670,25 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
-            args = [
-                "-i", spz_ply_path,
-                "-o", spz_ply_path,
-                "--target", config['SPZ_COORDS']
-            ]
-            pipeline.create_component(
-                name="Transform-Coords-Sog",
-                comp_type=ComponentType.POST_PROCESSING,
-                comp_environ=ComponentEnvironment.PYTHON,
-                command="post_processing/coordinate_systems.py",
-                args=args,
-                cwd=current_dir_path,
-                requires_gpu=False
-            )
+            is_gsplat = ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS
+            preserve_scale = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
+            # For normalized gsplat, spz.ply is copied from orig.ply (already coord-transformed
+            # and rotated), so skip the coord transform step entirely.
+            if not (is_gsplat and not preserve_scale):
+                args = [
+                    "-i", spz_ply_path,
+                    "-o", spz_ply_path,
+                    "--target", config['SPZ_COORDS']
+                ]
+                pipeline.create_component(
+                    name="Transform-Coords-Sog",
+                    comp_type=ComponentType.POST_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="post_processing/coordinate_systems.py",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
     except Exception as e:
         error_message = f"Issue transforming coordinates: {e}"
         pipeline.report_error(783, error_message)
@@ -2549,24 +2700,36 @@ if __name__ == "__main__":
     try:
         if config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
             if config['MODEL'] not in ("3dgut", "3dgrt"):
-                rotation = '270,0,0'
+                is_lhyu = config.get('SPZ_COORDS', 'rhyu') == 'lhyu'
+                preserve_scale = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
+                if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and preserve_scale:
+                    # gsplat raw COLMAP space (--no-normalize-world-space)
+                    rotation = '-90,0,180' if is_lhyu else '-90,0,0'
+                elif ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS:
+                    # gsplat normalized: spz.ply copied from orig.ply (rhyu space)
+                    # Apply 180,0,0 to match the orientation Babylon.js SPZ expects
+                    rotation = '180,0,0'
+                else:
+                    # nerfstudio OpenGL-space
+                    rotation = '270,0,180' if is_lhyu else '270,0,0'
             else:
                 rotation = '180,0,0'
-            args = [
-                spz_ply_path,
-                spz_ply_path,
-                f"--rotate={rotation}",
-                '-w'
-            ]
-            pipeline.create_component(
-                name="Spz-Ply-Rotation",
-                comp_type=ComponentType.POST_PROCESSING,
-                comp_environ=ComponentEnvironment.EXECUTABLE,
-                command="splat-transform",
-                args=args,
-                cwd=current_dir_path,
-                requires_gpu=False
-            )
+            if rotation:
+                args = [
+                    spz_ply_path,
+                    spz_ply_path,
+                    f"--rotate={rotation}",
+                    '-w'
+                ]
+                pipeline.create_component(
+                    name="Spz-Ply-Rotation",
+                    comp_type=ComponentType.POST_PROCESSING,
+                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                    command="splat-transform",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
     except Exception as e:
         error_message = f"Issue rotating PLY: {e}"
         pipeline.report_error(785, error_message)
@@ -2818,9 +2981,34 @@ if __name__ == "__main__":
                             "--ImageReader.camera_model", camera_params['model'],
                             "--ImageReader.camera_params", camera_params['params_str']
                         ])
+                    elif config.get('ENABLE_FL_METRIC', 'false') == 'true':
+                        # Apply metric focal length: use the provided pixel value directly
+                        try:
+                            from PIL import Image as _PILImage
+                            img_files = [f for f in os.listdir(image_path)
+                                         if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                            if img_files:
+                                with _PILImage.open(os.path.join(image_path, img_files[0])) as _img:
+                                    _w, _h = _img.size
+                                focal = int(float(config.get('FL_METRIC_VALUE', '24')))
+                                cx, cy = _w // 2, _h // 2
+                                log.info(f"ENABLE_FL_METRIC: using focal={focal}px, cx={cx}, cy={cy} "
+                                         f"(image {_w}x{_h})")
+                                try:
+                                    idx = component.args.index("--ImageReader.camera_model")
+                                    component.args.pop(idx)
+                                    component.args.pop(idx)
+                                except ValueError:
+                                    pass
+                                component.args.extend([
+                                    "--ImageReader.camera_model", "SIMPLE_PINHOLE",
+                                    "--ImageReader.camera_params", f"{focal},{cx},{cy}"
+                                ])
+                        except Exception as _e:
+                            log.warning(f"ENABLE_FL_METRIC focal length failed, "
+                                        f"falling back to COLMAP defaults: {_e}")
                     elif config.get('ENABLE_FL_HEURISTIC', 'false') == 'true':
-                        # Apply focal length heuristic: f = 1.2 * max(width, height)
-                        # This preserves metric scale by anchoring intrinsics before SfM
+                        # Apply focal length heuristic: f = multiplier * max(width, height)
                         try:
                             from PIL import Image as _PILImage
                             img_files = [f for f in os.listdir(image_path)
@@ -2832,12 +3020,10 @@ if __name__ == "__main__":
                                 cx, cy = _w // 2, _h // 2
                                 log.info(f"ENABLE_FL_HEURISTIC: using focal={focal}, cx={cx}, cy={cy} "
                                          f"(image {_w}x{_h})")
-                                # Remove any --ImageReader.camera_model already added (e.g. PINHOLE for multi-GPU/3DGRUT)
-                                # to avoid colmap rejecting duplicate flags
                                 try:
                                     idx = component.args.index("--ImageReader.camera_model")
-                                    component.args.pop(idx)  # remove flag
-                                    component.args.pop(idx)  # remove its value
+                                    component.args.pop(idx)
+                                    component.args.pop(idx)
                                 except ValueError:
                                     pass
                                 component.args.extend([
@@ -2927,8 +3113,20 @@ if __name__ == "__main__":
                                 else:
                                     component.args.insert(index, "cpu")
                                 component.args.insert(index, "--pipeline.datamanager.cache-images")
+                            # Cap Gaussian count for splatfacto-mcmc on large datasets to prevent OOM
+                            # MCMC grows to max_gs_num (default 1M) which is too large for 22GB GPU
+                            # with disk cache + bilagrid active
+                            # Must be inserted before the colmap subcommand
+                            if config['MODEL'] == "splatfacto-mcmc":
+                                if "colmap" in component.args:
+                                    colmap_idx = component.args.index("colmap")
+                                    component.args.insert(colmap_idx, "500000")
+                                    component.args.insert(colmap_idx, "--pipeline.model.max-gs-num")
+                                else:
+                                    component.args.extend(["--pipeline.model.max-gs-num", "500000"])
+                                log.info(f"Capping splatfacto-mcmc max_gs_num=500000 for large dataset ({num_images} images)")
                     if ENABLE_MULTI_GPU == "false":
-                        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
+                        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and not ENABLE_DEPTH_LOSS:
                             if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
                                 config['RECON_SOFTWARE_NAME'] == "map_anything" or config['RECON_SOFTWARE_NAME'] == "hloc":
                                 # Ensure colmap/sparse structure exists for NerfStudio
@@ -3029,9 +3227,17 @@ if __name__ == "__main__":
                         os.path.join(output_path, "textured", "mesh.obj"),
                         os.path.join(output_path, "textured", f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.glb")
                     )
+                case "USDZ-Add-Collision-Mesh":
+                    usdz_tmp_path = os.path.join(output_path, "splat_with_mesh.usdz")
+                    pipeline.run_component(i)
+                    if os.path.exists(usdz_tmp_path):
+                        shutil.move(usdz_tmp_path, usdz_path)
+                        log.info(f"Replaced {usdz_path} with collision mesh version")
+                    else:
+                        log.warning(f"USDZ-Add-Collision-Mesh output not found at {usdz_tmp_path}, keeping original")
                 case "Extract-Video-Thumbnail":
                     # For multi-GPU, copy auto-generated video before extracting thumbnail
-                    if ENABLE_MULTI_GPU == "true" and config['ENABLE_VIDEO_EXPORT'] == "true":
+                    if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and config['ENABLE_VIDEO_EXPORT'] == "true":
                         videos_dir = os.path.join(output_path, "videos")
                         if os.path.exists(videos_dir):
                             video_files = sorted([f for f in os.listdir(videos_dir) if f.startswith('traj_') and f.endswith('.mp4')])
@@ -3039,7 +3245,7 @@ if __name__ == "__main__":
                                 src_video = os.path.join(videos_dir, video_files[-1])
                                 dst_video = os.path.join(output_path, "render.mp4")
                                 shutil.copy2(src_video, dst_video)
-                                log.info(f"Copied multi-GPU trajectory video from {src_video} to {dst_video}")
+                                log.info(f"Copied gsplat trajectory video from {src_video} to {dst_video}")
                             else:
                                 log.warning(f"No trajectory video found in {videos_dir}")
                         else:
@@ -3110,6 +3316,11 @@ if __name__ == "__main__":
                             log.info(f"Copied metrics.json to: {metrics_dest}")
                     else:
                         # Copy result over to where SM expects it
+                        if os.path.exists(EVAL_METRIC_PATH):
+                            metrics_dest = os.path.join(config['DATASET_PATH'], 'eval', 'metrics.json')
+                            os.makedirs(os.path.dirname(metrics_dest), exist_ok=True)
+                            shutil.copy2(EVAL_METRIC_PATH, metrics_dest)
+                            log.info(f"Copied metrics.json into dataset for archive: {metrics_dest}")
                         if not IS_BATCH:
                             log.info(f"Moving dataset to where SageMaker expects it...")
                             shutil.move(config['DATASET_PATH'], OUTPUT_DATASET_PATH)
@@ -3143,6 +3354,11 @@ if __name__ == "__main__":
                                     log.info(f"Copied config.yml to dataset: {dataset_config_path}")
                         # For Batch, always use DATASET_PATH as source since we copied files there
                         dataset_source = config['DATASET_PATH']
+                        if os.path.exists(EVAL_METRIC_PATH):
+                            metrics_dest = os.path.join(dataset_source, 'eval', 'metrics.json')
+                            os.makedirs(os.path.dirname(metrics_dest), exist_ok=True)
+                            shutil.copy2(EVAL_METRIC_PATH, metrics_dest)
+                            log.info(f"Copied metrics.json into dataset for Batch archive: {metrics_dest}")
                         cleanup_dataset(dataset_source)
                         # For Batch, create archive with dataset/train structure
                         create_tarball(dataset_source, OUTPUT_TAR_PATH, "dataset/train")
@@ -3263,6 +3479,16 @@ if __name__ == "__main__":
                         log.info("Archive already handled in LOCAL_DEBUG mode")
                     else:
                         pipeline.run_component(i)
+                case "Ply-Rotation":
+                    pipeline.run_component(i)
+                    # For normalized gsplat, orig.ply is now correctly oriented.
+                    # Copy it to spz.ply so SPZ starts from the same correct orientation
+                    # instead of the pre-rotation splat.ply copy.
+                    if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and \
+                            config.get('PRESERVE_SCENE_SCALE', 'false').lower() != 'true' and \
+                            config['ENABLE_SPZ'] == "true" and os.path.exists(orig_ply_path):
+                        shutil.copy2(orig_ply_path, spz_ply_path)
+                        log.info(f"Copied rotated orig.ply to spz.ply for gsplat SPZ")
                 case _: # Default case, run Component
                     pipeline.run_component(i)
         pipeline.session.status = Status.STOP
