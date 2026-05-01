@@ -77,6 +77,8 @@ module "infra" {
   s3_trigger_key = var.s3_trigger_key
   tf_random_suffix = random_string.tf_random_suffix.result
   maintain_s3_objects_on_stack_deletion = var.maintain_s3_objects_on_stack_deletion
+  lambda_reserved_concurrency = var.lambda_reserved_concurrency
+  batch_max_vcpus = var.batch_max_vcpus
   count = var.deployment_phase == "base" ? 1 : 0
 }
 

@@ -47,5 +47,6 @@
     "ENABLE_FL_HEURISTIC": "false",
     "FL_HEURISTIC_VALUE": "1.2",
     "ENABLE_FL_METRIC": "false",
-    "FL_METRIC_VALUE": "24"
+    "FL_METRIC_VALUE": "6.86",
+    "TASK_TOKEN": ""
 }

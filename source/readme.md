@@ -107,4 +107,8 @@ Using the AWS Management Console or AWS CLI, follow the instructions below:
     > *Note: each metadata file needs to have a unique UUID both on the filename and inside of the json file*
 4. Upon completion, SNS will send an email to the address provided in CDK/Terraform. A splat and training data will be exported to `{bucketName}/outputPrefix`
 > You can follow the progress in the AWS Console under `Step Functions->State Machine`
+
+> **Note (container changes):** Any change to `source/container/` (including `main.py`, `utils.py`, or component scripts) requires rebuilding and pushing the container image to ECR before resubmitting jobs. The infrastructure stack does not need to be redeployed for container-only changes.
+
+> **Note (Spot/Batch jobs):** When `useSpotInstance` is `true`, the Step Functions execution parks in the `SetDefaultJobDefinition` state until the container completes and sends a callback. This is expected behaviour — the state machine is not stalled. Progress can be monitored in the AWS Batch console or via CloudWatch Logs at `/aws/batch/job`.
 If you do not have the storage bucket name noted down, it can be found in the Terraform outputs.json file or CDK outputs file depending on your deployment method.

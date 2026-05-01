@@ -43,6 +43,7 @@ class BatchConstruct(Construct):
             container_role_arn: str,
             random_id: str,
             vpc=None,
+            max_vcpus: int = 64,
             **kwargs) -> None:
         super().__init__(scope, id, **kwargs)
         
@@ -71,11 +72,11 @@ class BatchConstruct(Construct):
         
         # Per-instance-type compute environments and queues
         self._instance_configs = {
-            "g5.4xlarge":  {"max_vcpus": 64},
-            "g5.8xlarge":  {"max_vcpus": 64},
-            "g5.12xlarge": {"max_vcpus": 96},
-            "g6.4xlarge":  {"max_vcpus": 64},
-            "g6.8xlarge":  {"max_vcpus": 64},
+            "g5.4xlarge":  {"max_vcpus": max_vcpus},
+            "g5.8xlarge":  {"max_vcpus": max_vcpus},
+            "g5.12xlarge": {"max_vcpus": max_vcpus},
+            "g6.4xlarge":  {"max_vcpus": max_vcpus},
+            "g6.8xlarge":  {"max_vcpus": max_vcpus},
         }
         self.spot_compute_envs = {}
         self.on_demand_compute_envs = {}
@@ -91,7 +92,7 @@ class BatchConstruct(Construct):
         # Default queue alias (g5.4xlarge) for backward compat
         self.job_queue = self.instance_queues["g5.4xlarge"]
 
-        self.g6e_spot_compute_env = self._create_g6e_spot_compute_environment()
+        self.g6e_spot_compute_env = self._create_g6e_spot_compute_environment(max_vcpus)
         self.g6e_job_queue = self._create_g6e_job_queue()
         
         # Create job definitions for different instance types
@@ -217,6 +218,19 @@ class BatchConstruct(Construct):
                 resources=["*"]
             )
         )
+
+        # Add Step Functions permissions for waitForTaskToken callback
+        self.task_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "states:SendTaskSuccess",
+                    "states:SendTaskFailure",
+                    "states:SendTaskHeartbeat"
+                ],
+                resources=["*"]
+            )
+        )
         
         instance_profile = iam.CfnInstanceProfile(
             self, "BatchInstanceProfile",
@@ -279,8 +293,6 @@ chmod 775 /mnt/workspace
 
     def _create_instance_compute_environment(self, instance_type: str, key: str, suffix: str, max_vcpus: int):
         """Create a compute environment locked to a single instance type"""
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         env_type = "SPOT" if suffix == "spot" else "EC2"
         alloc = "BEST_FIT" if suffix == "spot" else "BEST_FIT_PROGRESSIVE"
         props = {
@@ -300,7 +312,7 @@ chmod 775 /mnt/workspace
             props["bidPercentage"] = 50
         return batch.CfnComputeEnvironment(
             self, f"ComputeEnv{key}{suffix.capitalize()}",
-            compute_environment_name=f"{key}-{suffix}-{self.random_id}-{timestamp}",
+            compute_environment_name=f"{key}-{suffix}-{self.random_id}",
             type="MANAGED",
             state="ENABLED",
             service_role=self.batch_service_role.role_arn,
@@ -309,11 +321,9 @@ chmod 775 /mnt/workspace
 
     def _create_instance_job_queue(self, instance_type: str, key: str, spot_env, od_env):
         """Create a job queue backed by a single-instance-type compute environment"""
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         q = batch.CfnJobQueue(
             self, f"JobQueue{key}",
-            job_queue_name=f"{key}-queue-{self.random_id}-{timestamp}",
+            job_queue_name=f"{key}-queue-{self.random_id}",
             state="ENABLED",
             priority=1,
             compute_environment_order=[
@@ -325,14 +335,11 @@ chmod 775 /mnt/workspace
         q.add_dependency(od_env)
         return q
 
-    def _create_g6e_spot_compute_environment(self):
+    def _create_g6e_spot_compute_environment(self, max_vcpus: int = 64):
         """Create dedicated g6e spot compute environment"""
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        
         g6e_spot_env = batch.CfnComputeEnvironment(
             self, "G6eSpotComputeEnvironment",
-            compute_environment_name=f"G6eSpotComputeEnv-{self.random_id}-{timestamp}",
+            compute_environment_name=f"G6eSpotComputeEnv-{self.random_id}",
             type="MANAGED",
             state="ENABLED",
             service_role=self.batch_service_role.role_arn,
@@ -341,7 +348,7 @@ chmod 775 /mnt/workspace
                 "allocationStrategy": "BEST_FIT",
                 "bidPercentage": 50,
                 "minvCpus": 0,
-                "maxvCpus": 128,
+                "maxvCpus": max_vcpus,
                 "desiredvCpus": 0,
                 "instanceTypes": ["g6e.4xlarge"],
                 "ec2Configuration": [{
@@ -369,12 +376,9 @@ chmod 775 /mnt/workspace
 
     def _create_g6e_job_queue(self):
         """Create dedicated g6e job queue"""
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        
         g6e_job_queue = batch.CfnJobQueue(
             self, "G6eBatchJobQueue",
-            job_queue_name=f"G6eJobQueue-{self.random_id}-{timestamp}",
+            job_queue_name=f"G6eJobQueue-{self.random_id}",
             state="ENABLED",
             priority=1,
             compute_environment_order=[

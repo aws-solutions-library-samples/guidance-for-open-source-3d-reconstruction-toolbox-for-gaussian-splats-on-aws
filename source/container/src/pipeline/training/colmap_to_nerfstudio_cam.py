@@ -73,9 +73,11 @@ if os.path.isdir(path):
                     data = json.load(f)
                 for frame in data.get("frames", []):
                     img_name = os.path.basename(frame["file_path"])
-                    mask_file = os.path.join(masks_dir, img_name + ".png")
+                    mask_file = os.path.join(masks_dir, img_name)
                     if os.path.isfile(mask_file):
-                        frame["mask_path"] = f"masks/{img_name}.png"
+                        # Masks are renamed to NerfStudio convention before transforms.json is created
+                        # so mask filename matches image filename exactly: masks/scan_001_view02.png
+                        frame["mask_path"] = f"masks/{img_name}"
                 with open(transforms_path, "w") as f:
                     json.dump(data, f, indent=4)
                 print(f"Injected mask_path into transforms.json")

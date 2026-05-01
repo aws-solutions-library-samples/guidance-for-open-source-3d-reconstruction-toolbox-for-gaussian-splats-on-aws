@@ -35,19 +35,19 @@ ENV TORCH_VISION_VERSION="0.24.1"
 ENV CMAKE_VERSION="3.30.3"
 ENV NODE_VERSION="22"
 ENV EIGEN_VERSION="3.4"
-ENV COLMAP_VERSION="4.0.2"
-ENV SPLAT_TRANSFORM_VERSION="0.17.1"
-ENV MAPANYTHING_VERSION="1.1"
+ENV COLMAP_VERSION="4.0.4"
+ENV SPLAT_TRANSFORM_VERSION="2.0.2"
+ENV MAPANYTHING_VERSION="1.1.1"
 ENV SPZ_VERSION="2.1.0"
 ENV OPENEXR_VERSION="3.1.5"
 ENV OPENIMAGEIO_VERSION="2.5.13.0"
 
 # Pinned versions
-ENV CERES_HASH="0c70ed3a1a2d6ba47c06c7e8b3b040880bc474db"
+ENV CERES_HASH="806af056feb22a1236baca247b4f4b6e1ea911e5"
 ENV NERFSTUDIO_HASH="50e0e3c70c775e89333256213363badbf074f29d"
-ENV GSPLAT_HASH="a8d88d387f6e554b18153d309f5536696882de5c"
-ENV THREEDGRUT_HASH="e78d4a7800c76d3bb9354c6a4da5457c240b17de"
-ENV BGREMOVER_HASH="d88ef74457f0c2f1e0eab5b391ce8851b95e8d65"
+ENV GSPLAT_HASH="3d4f9027f36d70ac8e89536e14c247de377f74b5"
+ENV THREEDGRUT_HASH="9846a28babb2171802907017c44d3adaa927f4e4"
+ENV BGREMOVER_HASH="105c248fb5488808bf0eccd85df3c071bce16a03"
 ENV SAM2_HASH="2b90b9f5ceec907a1c18123530e92e794ad901a4"
 
 # Only build for supported GPU architectures
@@ -487,6 +487,8 @@ RUN mkdir -p ${CODE_PATH}/pre_processing/segmentation
 RUN mkdir -p ${CODE_PATH}/pre_processing/video
 RUN mkdir -p ${CODE_PATH}/post_processing
 
+COPY ./src/entrypoint.sh                                                            ${CODE_PATH}
+RUN chmod +x ${CODE_PATH}/entrypoint.sh
 COPY ./src/main.py                                                                  ${CODE_PATH}
 COPY ./src/config.json                                                              ${CODE_PATH}
 COPY ./src/pipeline/pipeline.py                                                     ${CODE_PATH}
@@ -533,7 +535,6 @@ RUN echo "=== VERSION VERIFICATION ===" \
     && echo "  Eigen: ${EIGEN_VERSION}" \
     && echo "  Ceres: ${CERES_VERSION}" \
     && echo "  COLMAP: ${COLMAP_VERSION}" \
-    && echo "  Glomap: ${GLOMAP_VERSION}" \
     && echo "" \
     && echo "Installed versions:" \
     && echo "  Python: $(python --version 2>&1 | cut -d' ' -f2)" \
@@ -544,7 +545,6 @@ RUN echo "=== VERSION VERIFICATION ===" \
     && echo "  COLMAP: $(colmap -h 2>/dev/null | head -1 | cut -d' ' -f2 || echo 'Not found')" \
     && echo "  PyColmap (base): $(python -c 'import pycolmap; print(pycolmap.__version__)' 2>/dev/null || echo 'Not found')" \
     && echo "  PyColmap (gsplat): $(PYTHONPATH=/opt/gsplat_pycolmap:$PYTHONPATH python -c 'import pycolmap; print(pycolmap.__version__)' 2>/dev/null || echo 'Not found')" \
-    && echo "  Glomap: $(glomap -h 2>/dev/null | head -1 | cut -d' ' -f2 || echo 'Not found')" \
     && echo "  NerfStudio: $(python -c 'import nerfstudio; print(getattr(nerfstudio, "__version__", "installed"))' 2>/dev/null || echo 'Not found')" \
     && echo "  GSplat: $(python -c 'import gsplat; print(gsplat.__version__)' 2>/dev/null || echo 'Not found')" \
     && echo "=== END VERSION VERIFICATION ==="

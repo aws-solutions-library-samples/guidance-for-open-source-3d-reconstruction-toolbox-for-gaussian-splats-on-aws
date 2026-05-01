@@ -437,7 +437,7 @@ def load_config(config_names: list, config_values: list)->dict:
     # Handles both SageMaker and AWS Batch environments
     """
     # Keys that should not be converted to lowercase
-    preserve_case_keys = {'DATASET_PATH', 'CODE_PATH', 'UUID', 'S3_INPUT', 'S3_OUTPUT', 'FILENAME', 'OBJECT_REMOVAL_OBJECTS', 'INSTANCE_TYPE'}
+    preserve_case_keys = {'DATASET_PATH', 'CODE_PATH', 'UUID', 'S3_INPUT', 'S3_OUTPUT', 'FILENAME', 'OBJECT_REMOVAL_OBJECTS', 'INSTANCE_TYPE', 'TASK_TOKEN'}
     
     # Detect environment and set appropriate paths
     is_batch = 'AWS_BATCH_JOB_ID' in os.environ
@@ -474,10 +474,13 @@ def load_config(config_names: list, config_values: list)->dict:
         if key not in preserve_case_keys:
             conf[key] = str(value).lower().strip()
     
-    # Debug: Print all config key-value pairs
+    # Debug: Print all config key-value pairs, masking sensitive tokens
     print("=== CONFIG DEBUG OUTPUT ===")
     for key, value in conf.items():
-        print(f"{key}: '{value}' (type: {type(value).__name__})")
+        if key == 'TASK_TOKEN' and value:
+            print(f"{key}: '[REDACTED]' (type: {type(value).__name__})")
+        else:
+            print(f"{key}: '{value}' (type: {type(value).__name__})")
     print("=== END CONFIG DEBUG ===")
     
     return conf
@@ -929,22 +932,68 @@ def print_container_version_info():
         print(f"  COLMAP: Not found ({e})")
     
     try:
-        result = subprocess.run(['glomap', '-h'], capture_output=True, text=True)
-        if result.returncode == 0 and 'GLOMAP' in result.stdout:
-            glomap_version = result.stdout.split('\n')[0].split()[1]
-            print(f"  Glomap: {glomap_version}")
-        else:
-            print("  Glomap: Not found")
-    except Exception as e:
-        print(f"  Glomap: Not found ({e})")
-    
-    try:
         print(f"  pycolmap: {pycolmap.__version__}")
     except Exception as e:
         print(f"  pycolmap: Not available ({e})")
     
     print("=== END VERSION INFORMATION ===")
     print()
+
+def send_task_heartbeat(task_token: str, log=None) -> None:
+    # Send a heartbeat to Step Functions to keep the waitForTaskToken state alive during
+    # long-running components. Must be called more frequently than HeartbeatSeconds (172800s).
+    # Swallows InvalidToken and TaskTimedOut silently — if the execution is gone, the
+    # container should finish naturally and the final SendTaskSuccess/Failure will also fail.
+    try:
+        region = os.environ.get('AWS_DEFAULT_REGION', os.environ.get('AWS_REGION', 'us-east-1'))
+        sfn_client = boto3.client('stepfunctions', region_name=region)
+        sfn_client.send_task_heartbeat(taskToken=task_token)
+        if log:
+            log.debug("Step Functions heartbeat sent")
+    except Exception:
+        pass
+
+
+def send_task_success(task_token: str, output: dict, log=None) -> None:
+    # Notify Step Functions that the Batch job completed successfully using the waitForTaskToken callback.
+    # Called at the end of the pipeline when IS_BATCH is True and a task token was provided.
+    # InvalidToken and AccessDeniedException are swallowed — the pipeline completed successfully
+    # regardless of whether the callback reaches Step Functions.
+    try:
+        import json
+        region = os.environ.get('AWS_DEFAULT_REGION', os.environ.get('AWS_REGION', 'us-east-1'))
+        sfn_client = boto3.client('stepfunctions', region_name=region)
+        sfn_client.send_task_success(
+            taskToken=task_token,
+            output=json.dumps(output)
+        )
+        if log:
+            log.info("Step Functions task success callback sent")
+    except Exception as e:
+        # Swallow all callback errors — the pipeline completed successfully.
+        # Common causes: InvalidToken (execution timed out/aborted),
+        # AccessDeniedException (IAM not yet deployed), network errors.
+        # These must not cause the container to exit with an error.
+        if log:
+            log.warning(f"Step Functions task success callback failed (pipeline still succeeded): {e}")
+
+def send_task_failure(task_token: str, error: str, cause: str, log=None) -> None:
+    # Notify Step Functions that the Batch job failed using the waitForTaskToken callback.
+    # Called in the pipeline exception handler when IS_BATCH is True and a task token was provided.
+    # InvalidToken is swallowed — it means Step Functions already timed out or moved on.
+    try:
+        region = os.environ.get('AWS_DEFAULT_REGION', os.environ.get('AWS_REGION', 'us-east-1'))
+        sfn_client = boto3.client('stepfunctions', region_name=region)
+        sfn_client.send_task_failure(
+            taskToken=task_token,
+            error=error[:256],
+            cause=cause[:32768]
+        )
+        if log:
+            log.info("Step Functions task failure callback sent")
+    except Exception as e:
+        if log:
+            log.warning(f"Failed to send Step Functions task failure: {e}")
 
 def update_dynamodb_metrics(uuid, table_name, comp_group_elapsed_time=None, metrics=None, log=None):
     """
@@ -1098,6 +1147,19 @@ def parse_gsplat_metrics_from_log(log_output, output_json_path):
             'psnr': float(psnr_match.group(1)),
             'ssim': float(ssim_match.group(1)),
             'lpips': float(lpips_match.group(1))
+        }
+        os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
+        with open(output_json_path, 'w') as f:
+            json.dump({'results': metrics}, f, indent=2)
+        return metrics
+
+    # Fallback: old trainer format "Eval PSNR: X.XX dB" (PSNR only)
+    eval_psnr_match = re.search(r'Eval PSNR:\s*([0-9.]+)', log_output)
+    if eval_psnr_match:
+        metrics = {
+            'psnr': float(eval_psnr_match.group(1)),
+            'ssim': 0.0,
+            'lpips': 0.0
         }
         os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
         with open(output_json_path, 'w') as f:

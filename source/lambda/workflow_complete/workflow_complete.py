@@ -18,8 +18,10 @@
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY
 
-""" A sample script to receive unique metadata file uploaded to S3 for gaussian splat creation
-and start the workflow """
+""" Lambda function invoked by the Step Functions state machine upon job completion (success or failure).
+Updates the DynamoDB job record with end timestamp and status, retrieves CloudWatch logs to identify
+errors, queries the Batch API for compute environment diagnostics when a job never started, and
+sends an SNS notification to the user with job timing, output file locations, or error details. """
 
 import os
 import re
@@ -663,14 +665,34 @@ def lambda_handler(event, context):
         # Check if this is a Batch job
         is_batch_job = event.get('result', {}).get('JobId') is not None or event.get('envVars', {}).get('COMPUTE_TYPE') == 'batch'
         
+        # Detect waitForTaskToken success: container sends {"status": "SUCCEEDED", "uuid": "..."}
+        task_token_success = event.get('result', {}).get('status') == 'SUCCEEDED'
+        
         # For successful Batch jobs, skip error checking
-        if is_batch_job and event.get('status') == 'SUCCESS' and event.get('result', {}).get('Status') == 'SUCCEEDED':
-            # Get timing information from Batch job
+        if is_batch_job and event.get('status') == 'SUCCESS' and (event.get('result', {}).get('Status') == 'SUCCEEDED' or task_token_success):
+            # Get timing information from Batch job result or Batch API
             batch_result = event.get('result', {})
             started_at = batch_result.get('StartedAt', 0)
             stopped_at = batch_result.get('StoppedAt', 0)
             submitted_at = batch_result.get('SubmittedAt', 0)
-            
+
+            # waitForTaskToken path: result has no timing fields — look up from Batch API via batchJobId in DynamoDB
+            if not started_at:
+                try:
+                    ddb_item = get_ddb_item_value(table, key).get('Item', {})
+                    batch_job_id = ddb_item.get('batchJobId')
+                    if batch_job_id and batch_job_id != 'pending':
+                        batch_client = boto3.client('batch')
+                        job_desc = batch_client.describe_jobs(jobs=[batch_job_id])
+                        jobs = job_desc.get('jobs', [])
+                        if jobs:
+                            started_at = jobs[0].get('startedAt', 0)
+                            stopped_at = jobs[0].get('stoppedAt', 0)
+                            submitted_at = jobs[0].get('createdAt', 0)
+                            print(f"Retrieved timing from Batch API: started={started_at}, stopped={stopped_at}")
+                except Exception as timing_err:
+                    print(f"Could not retrieve timing from Batch API: {timing_err}")
+
             # Calculate durations
             if started_at and stopped_at:
                 compute_time = int((stopped_at - started_at) / 1000)  # Convert ms to seconds
@@ -679,6 +701,7 @@ def lambda_handler(event, context):
                 compute_time_str = f"{compute_minutes}m {compute_seconds}s"
             else:
                 compute_time_str = "Unknown"
+                compute_time = 0
                 
             if submitted_at and started_at:
                 queue_time = int((started_at - submitted_at) / 1000)  # Convert ms to seconds
@@ -687,6 +710,17 @@ def lambda_handler(event, context):
                 queue_time_str = f"{queue_minutes}m {queue_seconds}s"
             else:
                 queue_time_str = "Unknown"
+                queue_time = 0
+
+            # Calculate total elapsed time
+            if compute_time_str != "Unknown" or queue_time_str != "Unknown":
+                total_seconds = (compute_time if compute_time_str != "Unknown" else 0) + \
+                                (queue_time if queue_time_str != "Unknown" else 0)
+                total_minutes = total_seconds // 60
+                total_secs = total_seconds % 60
+                total_time_str = f"{total_minutes}m {total_secs}s"
+            else:
+                total_time_str = "Unknown"
             
             # List output files from S3 and store in DynamoDB
             s3_client = boto3.client('s3')
@@ -760,7 +794,7 @@ File Processed Successfully: {_sanitize_text(event['envVars']['FILENAME'])}
 ⏱️ Timing Details:
 • Queue Time: {queue_time_str}
 • Compute Time: {compute_time_str}
-• Total Time: {queue_time_str} + {compute_time_str}
+• Total Time: {total_time_str}
 
 ------------------------------------------
 This is an automated message from the Splat Processing System"""
@@ -824,41 +858,84 @@ This is an automated message from the Splat Processing System"""
             container_logs = get_cloudwatch_logs(training_job_name)
         else:
             # For Batch jobs that reach here, they failed
-            # Extract log stream name from the error details if available
             log_stream_name = None
             print(f"Batch job failed. Error: {error}")
-            
+
+            # 1. Try to extract log stream from the error cause (old Batch .sync path)
             if error:
                 try:
-                    # Handle different error formats
-                    if isinstance(error, dict) and 'Cause' in error:
-                        cause_str = error['Cause']
-                    elif hasattr(error, 'get') and error.get('Cause'):
-                        cause_str = error.get('Cause')
-                    else:
-                        cause_str = str(error)
-                    
-                    print(f"Parsing cause for logs: {cause_str[:500]}...")
-                    
-                    # Parse the JSON cause
+                    cause_str = error.get('Cause', str(error)) if hasattr(error, 'get') else str(error)
                     if isinstance(cause_str, str) and cause_str.startswith('{'):
                         cause_data = json.loads(cause_str)
-                        # Look for log stream in different locations
                         if 'Container' in cause_data and 'LogStreamName' in cause_data['Container']:
                             log_stream_name = cause_data['Container']['LogStreamName']
                         elif 'Attempts' in cause_data and len(cause_data['Attempts']) > 0:
                             attempt = cause_data['Attempts'][0]
                             if 'Container' in attempt and 'LogStreamName' in attempt['Container']:
                                 log_stream_name = attempt['Container']['LogStreamName']
-                    
-                    print(f"Extracted log stream: {log_stream_name}")
                 except Exception as parse_error:
                     print(f"Error parsing batch error for logs: {parse_error}")
-            
-            # Try to get Batch job logs
+
+            # 2. waitForTaskToken path: look up batchJobId from DynamoDB then query Batch API
+            if not log_stream_name:
+                try:
+                    ddb_item = get_ddb_item_value(table, key).get('Item', {})
+                    batch_job_id = ddb_item.get('batchJobId')
+                    if batch_job_id and batch_job_id != 'pending':
+                        batch_client = boto3.client('batch')
+                        job_desc = batch_client.describe_jobs(jobs=[batch_job_id])
+                        jobs = job_desc.get('jobs', [])
+                        if jobs:
+                            job = jobs[0]
+                            log_stream_name = job.get('container', {}).get('logStreamName')
+                            print(f"Retrieved log stream from Batch API: {log_stream_name}")
+                            # If still no log stream, job never started — diagnose why
+                            if not log_stream_name:
+                                job_status = job.get('status', 'UNKNOWN')
+                                job_reason = job.get('statusReason', 'No reason provided')
+                                print(f"Batch job {batch_job_id} status={job_status}, reason={job_reason}")
+                                # Check compute environment and job queue health
+                                ce_diagnostics = []
+                                try:
+                                    queue_name = job.get('jobQueue', '')
+                                    queue_desc = batch_client.describe_job_queues(jobQueues=[queue_name])
+                                    for q in queue_desc.get('jobQueues', []):
+                                        q_state = q.get('state')
+                                        q_status = q.get('status')
+                                        q_reason = q.get('statusReason', '')
+                                        ce_diagnostics.append(f"Job Queue '{q.get('jobQueueName')}': state={q_state}, status={q_status}, reason={q_reason}")
+                                        for ce_order in q.get('computeEnvironmentOrder', []):
+                                            ce_name = ce_order.get('computeEnvironment', '')
+                                            ce_desc = batch_client.describe_compute_environments(computeEnvironments=[ce_name])
+                                            for ce in ce_desc.get('computeEnvironments', []):
+                                                ce_state = ce.get('state')
+                                                ce_status = ce.get('status')
+                                                ce_reason = ce.get('statusReason', '')
+                                                ce_diagnostics.append(f"Compute Environment '{ce.get('computeEnvironmentName')}': state={ce_state}, status={ce_status}, reason={ce_reason}")
+                                except Exception as ce_err:
+                                    ce_diagnostics.append(f"Could not query compute environment: {ce_err}")
+                                diag_str = '\n'.join(ce_diagnostics)
+                                print(f"Batch infrastructure diagnostics:\n{diag_str}")
+                                container_logs = {
+                                    'status': 'ERROR',
+                                    'message': (
+                                        f"Batch job never started (no container launched).\n"
+                                        f"Job ID: {batch_job_id}\n"
+                                        f"Job status: {job_status}\n"
+                                        f"Job reason: {job_reason}\n\n"
+                                        f"Infrastructure diagnostics:\n{diag_str}\n\n"
+                                        f"Common causes: compute environment INVALID after CDK update, "
+                                        f"insufficient Spot capacity, or vCPU quota exceeded."
+                                    )
+                                }
+                except Exception as batch_lookup_err:
+                    print(f"Could not retrieve log stream from Batch API: {batch_lookup_err}")
+
+            print(f"Log stream for error reporting: {log_stream_name}")
+
             if log_stream_name:
                 container_logs = get_cloudwatch_logs(training_job_name, is_batch_job=True, log_stream_name=log_stream_name)
-            else:
+            elif 'container_logs' not in dir():
                 container_logs = {'status': 'ERROR', 'message': 'Batch job failed - unable to retrieve logs (no log stream found)'}
             response = None
 
@@ -987,7 +1064,6 @@ This is an automated message from the Splat Processing System"""
             
             if error:
                 try:
-                    # Handle different error formats
                     if isinstance(error, dict) and 'Cause' in error:
                         cause_str = error['Cause']
                     elif hasattr(error, 'get') and error.get('Cause'):
@@ -997,10 +1073,8 @@ This is an automated message from the Splat Processing System"""
                     
                     print(f"Parsing cause string: {cause_str[:500]}...")
                     
-                    # Parse the JSON cause
                     if isinstance(cause_str, str) and cause_str.startswith('{'):
                         cause_data = json.loads(cause_str)
-                        # Look for log stream in different locations
                         if 'Container' in cause_data and 'LogStreamName' in cause_data['Container']:
                             log_stream_name = cause_data['Container']['LogStreamName']
                         elif 'Attempts' in cause_data and len(cause_data['Attempts']) > 0:
@@ -1012,10 +1086,62 @@ This is an automated message from the Splat Processing System"""
                 except Exception as parse_error:
                     print(f"Error parsing batch error details: {parse_error}")
             
-            # Try to get Batch job logs
+            # waitForTaskToken fallback: look up batchJobId from DynamoDB then Batch API
+            if not log_stream_name:
+                try:
+                    ddb_item = get_ddb_item_value(table, key).get('Item', {})
+                    batch_job_id = ddb_item.get('batchJobId')
+                    if batch_job_id and batch_job_id != 'pending':
+                        batch_client = boto3.client('batch')
+                        job_desc = batch_client.describe_jobs(jobs=[batch_job_id])
+                        jobs = job_desc.get('jobs', [])
+                        if jobs:
+                            job = jobs[0]
+                            log_stream_name = job.get('container', {}).get('logStreamName')
+                            print(f"Retrieved log stream from Batch API (except path): {log_stream_name}")
+                            if not log_stream_name:
+                                job_status = job.get('status', 'UNKNOWN')
+                                job_reason = job.get('statusReason', 'No reason provided')
+                                print(f"Batch job {batch_job_id} status={job_status}, reason={job_reason}")
+                                ce_diagnostics = []
+                                try:
+                                    queue_name = job.get('jobQueue', '')
+                                    queue_desc = batch_client.describe_job_queues(jobQueues=[queue_name])
+                                    for q in queue_desc.get('jobQueues', []):
+                                        q_state = q.get('state')
+                                        q_status = q.get('status')
+                                        q_reason = q.get('statusReason', '')
+                                        ce_diagnostics.append(f"Job Queue '{q.get('jobQueueName')}': state={q_state}, status={q_status}, reason={q_reason}")
+                                        for ce_order in q.get('computeEnvironmentOrder', []):
+                                            ce_name = ce_order.get('computeEnvironment', '')
+                                            ce_desc = batch_client.describe_compute_environments(computeEnvironments=[ce_name])
+                                            for ce in ce_desc.get('computeEnvironments', []):
+                                                ce_state = ce.get('state')
+                                                ce_status = ce.get('status')
+                                                ce_reason = ce.get('statusReason', '')
+                                                ce_diagnostics.append(f"Compute Environment '{ce.get('computeEnvironmentName')}': state={ce_state}, status={ce_status}, reason={ce_reason}")
+                                except Exception as ce_err:
+                                    ce_diagnostics.append(f"Could not query compute environment: {ce_err}")
+                                diag_str = '\n'.join(ce_diagnostics)
+                                print(f"Batch infrastructure diagnostics:\n{diag_str}")
+                                container_logs = {
+                                    'status': 'ERROR',
+                                    'message': (
+                                        f"Batch job never started (no container launched).\n"
+                                        f"Job ID: {batch_job_id}\n"
+                                        f"Job status: {job_status}\n"
+                                        f"Job reason: {job_reason}\n\n"
+                                        f"Infrastructure diagnostics:\n{diag_str}\n\n"
+                                        f"Common causes: compute environment INVALID after CDK update, "
+                                        f"insufficient Spot capacity, or vCPU quota exceeded."
+                                    )
+                                }
+                except Exception as batch_lookup_err:
+                    print(f"Could not retrieve log stream from Batch API: {batch_lookup_err}")
+            
             if log_stream_name:
                 container_logs = get_cloudwatch_logs(training_job_name, is_batch_job=True, log_stream_name=log_stream_name)
-            else:
+            elif 'container_logs' not in dir():
                 container_logs = {'status': 'ERROR', 'message': 'Batch job failed - unable to retrieve logs (no log stream found)'}
         else:
             container_logs = get_cloudwatch_logs(training_job_name)

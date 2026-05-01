@@ -6,5 +6,7 @@
     "s3TriggerKey": "workflow-input",
     "adminEmail": "",
     "maintainS3ObjectsOnStackDeletion": "true",
-    "enableCodeBuildContainerBuild": "true"
+    "enableCodeBuildContainerBuild": "true",
+    "lambdaReservedConcurrency": 10,
+    "batchMaxVcpus": 64
 }

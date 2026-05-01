@@ -75,3 +75,15 @@ variable "enable_code_build_container_build" {
   default     = "false"
   type        = string
 }
+
+variable "lambda_reserved_concurrency" {
+  description = "Reserved concurrent executions for each Lambda function. Set to -1 to use unreserved account concurrency. Increase for high-throughput deployments."
+  default     = 10
+  type        = number
+}
+
+variable "batch_max_vcpus" {
+  description = "Maximum vCPUs per Batch compute environment. Increase proportionally with expected concurrent jobs (each g5.4xlarge job consumes 16 vCPUs)."
+  default     = 64
+  type        = number
+}

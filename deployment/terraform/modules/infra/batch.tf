@@ -244,6 +244,26 @@ resource "aws_iam_role_policy" "batch_task_dynamodb_policy" {
   })
 }
 
+resource "aws_iam_role_policy" "batch_task_sfn_policy" {
+  name = "${var.project_prefix}-batch-task-sfn-policy-${var.tf_random_suffix}"
+  role = aws_iam_role.batch_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = [
+          "states:SendTaskSuccess",
+          "states:SendTaskFailure",
+          "states:SendTaskHeartbeat"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 # Spot fleet role
 resource "aws_iam_role" "spot_fleet_role" {
   name = "${var.project_prefix}-spot-fleet-role-${var.tf_random_suffix}"
@@ -282,17 +302,17 @@ resource "time_sleep" "iam_propagation" {
 # Spot compute environment
 locals {
   instance_configs = {
-    "g5-4xlarge"  = { instance_type = "g5.4xlarge",  max_vcpus = 64  }
-    "g5-8xlarge"  = { instance_type = "g5.8xlarge",  max_vcpus = 64  }
-    "g5-12xlarge" = { instance_type = "g5.12xlarge", max_vcpus = 96  }
-    "g6-4xlarge"  = { instance_type = "g6.4xlarge",  max_vcpus = 64  }
-    "g6-8xlarge"  = { instance_type = "g6.8xlarge",  max_vcpus = 64  }
+    "g5-4xlarge"  = { instance_type = "g5.4xlarge",  max_vcpus = var.batch_max_vcpus }
+    "g5-8xlarge"  = { instance_type = "g5.8xlarge",  max_vcpus = var.batch_max_vcpus }
+    "g5-12xlarge" = { instance_type = "g5.12xlarge", max_vcpus = var.batch_max_vcpus }
+    "g6-4xlarge"  = { instance_type = "g6.4xlarge",  max_vcpus = var.batch_max_vcpus }
+    "g6-8xlarge"  = { instance_type = "g6.8xlarge",  max_vcpus = var.batch_max_vcpus }
   }
 }
 
 resource "aws_batch_compute_environment" "spot_compute_env" {
   for_each     = local.instance_configs
-  name         = "${var.project_prefix}-${each.key}-spot-${var.tf_random_suffix}-${formatdate("YYYYMMDDhhmmss", timestamp())}"
+  name         = "${var.project_prefix}-${each.key}-spot-${var.tf_random_suffix}"
   type         = "MANAGED"
   state        = "ENABLED"
   service_role = aws_iam_role.batch_service_role.arn
@@ -314,6 +334,10 @@ resource "aws_batch_compute_environment" "spot_compute_env" {
       image_type = "ECS_AL2"
     }
 
+    ec2_configuration {
+      image_type = "ECS_AL2023_NVIDIA"
+    }
+
     subnets            = data.aws_subnets.default.ids
     security_group_ids = [aws_security_group.batch_security_group.id]
     instance_role      = aws_iam_instance_profile.batch_instance_profile.arn
@@ -329,7 +353,7 @@ resource "aws_batch_compute_environment" "spot_compute_env" {
 
 resource "aws_batch_compute_environment" "on_demand_compute_env" {
   for_each     = local.instance_configs
-  name         = "${var.project_prefix}-${each.key}-od-${var.tf_random_suffix}-${formatdate("YYYYMMDDhhmmss", timestamp())}"
+  name         = "${var.project_prefix}-${each.key}-od-${var.tf_random_suffix}"
   type         = "MANAGED"
   state        = "ENABLED"
   service_role = aws_iam_role.batch_service_role.arn
@@ -350,6 +374,10 @@ resource "aws_batch_compute_environment" "on_demand_compute_env" {
       image_type = "ECS_AL2"
     }
 
+    ec2_configuration {
+      image_type = "ECS_AL2023_NVIDIA"
+    }
+
     subnets            = data.aws_subnets.default.ids
     security_group_ids = [aws_security_group.batch_security_group.id]
     instance_role      = aws_iam_instance_profile.batch_instance_profile.arn
@@ -365,7 +393,7 @@ resource "aws_batch_compute_environment" "on_demand_compute_env" {
 
 resource "aws_batch_job_queue" "batch_job_queue" {
   for_each = local.instance_configs
-  name     = "${var.project_prefix}-${each.key}-queue-${var.tf_random_suffix}-${formatdate("YYYYMMDDhhmmss", timestamp())}"
+  name     = "${var.project_prefix}-${each.key}-queue-${var.tf_random_suffix}"
   state    = "ENABLED"
   priority = 1
 

@@ -18,8 +18,11 @@
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY
 
-""" A sample script to receive unique metadata file uploaded to S3 for gaussian splat creation
-and start the workflow """
+""" Lambda function triggered by an S3 PutObject event when a job JSON configuration file is
+uploaded. Validates the job configuration, creates or updates the DynamoDB job record, constructs
+the Step Functions input payload with all container environment variables and infrastructure
+parameters, and starts the Step Functions state machine execution to orchestrate the 3D
+reconstruction workflow. """
 
 import os
 import json
@@ -34,6 +37,17 @@ stepfunctions = boto3.client('stepfunctions')
 ssm_client = boto3.client('ssm')
 s3_client = boto3.client("s3")
 dynamodb = boto3.resource('dynamodb')
+
+# Cache SSM parameter value across Lambda invocations to avoid per-request SSM calls
+_state_machine_arn_cache = None
+
+def _get_state_machine_arn():
+    global _state_machine_arn_cache
+    if _state_machine_arn_cache is None:
+        param_name = os.environ['STATE_MACHINE_PARAM_NAME']
+        response = ssm_client.get_parameter(Name=param_name, WithDecryption=True)
+        _state_machine_arn_cache = response['Parameter']['Value']
+    return _state_machine_arn_cache
 
 def validate_config(config: dict):
     required_dict_props = {
@@ -117,10 +131,8 @@ def lambda_handler(event, context):
     bucket_name = event['Records'][0]['s3']['bucket']['name']
     key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'], encoding='utf-8')
 
-    # Get the State Machine ARN from the SSM Parameter Store
-    param_name = os.environ['STATE_MACHINE_PARAM_NAME']
-    response = ssm_client.get_parameter(Name=param_name, WithDecryption=True)
-    state_machine_arn = response['Parameter']['Value']
+    # Get the State Machine ARN from cache (populated from SSM on first invocation)
+    state_machine_arn = _get_state_machine_arn()
 
     table_name = os.environ['DDB_TABLE_NAME']
     table = dynamodb.Table(table_name)
@@ -261,8 +273,8 @@ def lambda_handler(event, context):
                     "instanceCount": 1,
                     "volumeSizeInGB": 30,
                     "ecrImageArn": os.environ["ECR_IMAGE_URI"],
-                    "containerEntryPoint": ["python"],
-                    "containerArgs": ["/opt/ml/code/main.py"],
+                    "containerEntryPoint": ["/bin/bash"],
+                    "containerArgs": ["/opt/ml/code/entrypoint.sh"],
                     "containerRoleArn": f"arn:aws:iam::{account_id}:role/{os.environ["CONTAINER_ROLE_NAME"]}",
                     "completeLambdaName": os.environ['LAMBDA_COMPLETE_NAME'],
                     "jobDefinitionSelectorLambdaName": os.environ.get('JOB_DEFINITION_SELECTOR_LAMBDA_NAME', ''),
@@ -323,7 +335,9 @@ def lambda_handler(event, context):
                     "OBJECT_REMOVAL_OBJECTS": str(json_content["segmentation"]["objectRemoval"]["objects"]),
                     "PRESERVE_SCENE_SCALE": str(json_content["training"].get("preserveSceneScale", "false")),
                     "ENABLE_DEPTH_LOSS": str(json_content["training"].get("enableDepthLoss", "false")),
-                    "ENABLE_VIDEO_EXPORT": str(json_content["postProcessing"].get("enableVideoExport", "true"))
+                    "ENABLE_VIDEO_EXPORT": str(json_content["postProcessing"].get("enableVideoExport", "true")),
+                    "DDB_TABLE_NAME": os.environ.get("DDB_TABLE_NAME", ""),
+                    "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-east-1"))
                 },
                 "sns": {
                     "topicArn": os.environ["SNS_TOPIC_ARN"],

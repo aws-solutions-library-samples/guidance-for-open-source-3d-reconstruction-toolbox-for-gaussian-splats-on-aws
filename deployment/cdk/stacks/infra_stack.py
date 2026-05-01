@@ -58,7 +58,8 @@ class GSWorkflowBaseStack(Stack):
         # Initialize Ids and Variables
         self.prefix = config_data['constructNamePrefix']
         self.s3_trigger_key = config_data['s3TriggerKey']
-        self.random_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        # Stable suffix read from cdk.context.json — generated once by app.py on first deploy.
+        self.random_id = self.node.get_context("deploymentSuffix")
         self.bucket_name = f"{self.prefix}-bucket-{self.random_id}"
         self.ecr_repo_name = f"{self.prefix}-ecr-repo-{self.random_id}"
         self.sfn_ssm_param_name = f"{self.prefix}-sfn-arn-{self.random_id}"
@@ -66,6 +67,8 @@ class GSWorkflowBaseStack(Stack):
         self.ddb_table_name = f"{self.prefix}-table-{self.random_id}"
         self.state_machine_name = f"{self.prefix}-sfn-{self.random_id}"
         self.maintain_s3_objects_on_stack_deletion = config_data['maintainS3ObjectsOnStackDeletion']
+        self.lambda_reserved_concurrency = int(config_data.get('lambdaReservedConcurrency', 10))
+        self.batch_max_vcpus = int(config_data.get('batchMaxVcpus', 64))
         self.current_path = os.path.dirname(os.path.realpath(__file__))
 
         CfnOutput(self, 'Region', value=config_data['region'])
@@ -104,7 +107,8 @@ class GSWorkflowBaseStack(Stack):
             env=env,
             ecr_repo_uri=self.ecr.repository.repository_uri,
             container_role_arn=self.ecr.container_role.role_arn,
-            random_id=self.random_id
+            random_id=self.random_id,
+            max_vcpus=self.batch_max_vcpus
         )
         CfnOutput(self, "BatchJobQueueArn", value=batch.job_queue.ref)
         
@@ -120,6 +124,7 @@ class GSWorkflowBaseStack(Stack):
             timeout=Duration.seconds(30),
             memory=128,
             storage=512,
+            reserved_concurrent_executions=self.lambda_reserved_concurrency,
             env_vars={
                 'BATCH_JOB_DEFINITION_SMALL': batch.job_definitions['g5.4xlarge'].ref,
                 'BATCH_JOB_DEFINITION_MEDIUM': batch.job_definitions['g5.4xlarge'].ref,
@@ -137,12 +142,35 @@ class GSWorkflowBaseStack(Stack):
                 'BATCH_JOB_QUEUE_G5_12XLARGE': batch.instance_queues['g5.12xlarge'].ref,
                 'BATCH_JOB_QUEUE_G6_4XLARGE': batch.instance_queues['g6.4xlarge'].ref,
                 'BATCH_JOB_QUEUE_G6_8XLARGE': batch.instance_queues['g6.8xlarge'].ref,
-                'BATCH_JOB_QUEUE_G6E': batch.g6e_job_queue.ref
+                'BATCH_JOB_QUEUE_G6E': batch.g6e_job_queue.ref,
+                'DDB_TABLE_NAME': self.ddb_table_name
             },
-            reserved_concurrent_executions=10,
             tracing=lambda_.Tracing.ACTIVE
         )
         CfnOutput(self, 'LambdaJobDefinitionSelectorFunctionName', value=lambda_job_definition_selector.lambda_function.function_name)
+
+        # Allow job_definition_selector to submit Batch jobs and send task callbacks
+        lambda_job_definition_selector.lambda_function.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["batch:SubmitJob", "batch:ListJobs"],
+                resources=["*"]
+            )
+        )
+        lambda_job_definition_selector.lambda_function.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["states:SendTaskSuccess", "states:SendTaskFailure", "states:SendTaskHeartbeat"],
+                resources=["*"]
+            )
+        )
+        lambda_job_definition_selector.lambda_function.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["dynamodb:UpdateItem"],
+                resources=[f"arn:aws:dynamodb:{env.region}:{env.account}:table/{self.ddb_table_name}"]
+            )
+        )
 
         sns_topic_arn = f"arn:aws:sns:{env.region}:{env.account}:{sns.sns_topic.topic_name}"
         sns_statement = iam.PolicyStatement(
@@ -191,7 +219,7 @@ class GSWorkflowBaseStack(Stack):
                 'DDB_TABLE_NAME': self.ddb_table_name,
                 'SNS_TOPIC_ARN': sns.sns_topic.topic_arn
             },
-            reserved_concurrent_executions=10,
+            reserved_concurrent_executions=self.lambda_reserved_concurrency,
             tracing=lambda_.Tracing.ACTIVE
         )
         CfnOutput(
@@ -212,6 +240,7 @@ class GSWorkflowBaseStack(Stack):
             timeout=Duration.seconds(30),
             memory=128,
             storage=512,
+            reserved_concurrent_executions=self.lambda_reserved_concurrency,
             env_vars= {
                 'STATE_MACHINE_PARAM_NAME': self.sfn_ssm_param_name,
                 'SNS_TOPIC_ARN': sns_topic_arn,
@@ -228,9 +257,7 @@ class GSWorkflowBaseStack(Stack):
                 'BATCH_JOB_QUEUE_G6E': batch.g6e_job_queue.ref,
                 'BATCH_JOB_DEFINITION': batch.job_definitions['g5.4xlarge'].ref,  # Default
                 'JOB_DEFINITION_SELECTOR_LAMBDA_NAME': lambda_job_definition_selector.lambda_function.function_arn,
-
                 },
-            reserved_concurrent_executions=10,
             tracing=lambda_.Tracing.ACTIVE
         )
         CfnOutput(

@@ -65,3 +65,15 @@ variable "maintain_s3_objects_on_stack_deletion" {
   default     = "true"
   type        = string
 }
+
+variable "lambda_reserved_concurrency" {
+  description = "Reserved concurrent executions for each Lambda function. Set to -1 for unreserved. Increase for high-throughput deployments."
+  default     = 10
+  type        = number
+}
+
+variable "batch_max_vcpus" {
+  description = "Maximum vCPUs per Batch compute environment. Each g5.4xlarge job consumes 16 vCPUs."
+  default     = 64
+  type        = number
+}

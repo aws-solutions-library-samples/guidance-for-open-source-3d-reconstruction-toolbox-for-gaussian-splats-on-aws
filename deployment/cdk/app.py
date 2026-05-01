@@ -23,11 +23,31 @@
 
 import os
 import json
+import random
+import string
 import aws_cdk as cdk
 from stacks.infra_stack import GSWorkflowBaseStack
 from stacks.post_deploy_stack import GSWorkflowPostDeployStack
 
 app = cdk.App()
+
+# Ensure a stable deployment suffix exists in cdk.context.json.
+# On first deploy this generates and persists the suffix so all subsequent
+# deploys use the same value and do not recreate resources.
+context_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "cdk.context.json")
+try:
+    with open(context_path, "r", encoding="utf-8") as f:
+        context_data = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    context_data = {}
+
+if "deploymentSuffix" not in context_data:
+    context_data["deploymentSuffix"] = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    with open(context_path, "w", encoding="utf-8") as f:
+        json.dump(context_data, f, indent=2)
+    print(f"Generated new deploymentSuffix: {context_data['deploymentSuffix']} — committed to cdk.context.json")
+
+app = cdk.App(context={"deploymentSuffix": context_data["deploymentSuffix"]})
 
 # Load the app configuration from the config.json file
 try:
@@ -52,6 +72,14 @@ select_all = False
 bundling_stacks = app.node.try_get_context("aws:cdk:bundling-stacks")
 is_destroy = app.node.try_get_context("destroy")
 bootstrap = app.node.try_get_context("bootstrap")
+
+# On destroy, clear the deploymentSuffix so the next deploy generates fresh
+# resource names and avoids collisions with retained S3 buckets.
+if is_destroy:
+    context_data.pop("deploymentSuffix", None)
+    with open(context_path, "w", encoding="utf-8") as f:
+        json.dump(context_data, f, indent=2)
+    print("Cleared deploymentSuffix from cdk.context.json — next deploy will generate fresh resource names")
 
 # Check if bundling_stacks exists and contains "**"
 if bundling_stacks and "**" in bundling_stacks:

@@ -97,7 +97,8 @@ from utils import (
     cleanup_dataset, cleanup_cuda_memory, validate_and_resize_images,
     setup_local_debug, copy_to_local_output, print_container_version_info,
     update_dynamodb_metrics, update_component_phase_completion,
-    parse_3dgrut_metrics_from_log, parse_gsplat_metrics_from_log
+    parse_3dgrut_metrics_from_log, parse_gsplat_metrics_from_log,
+    send_task_success, send_task_failure, send_task_heartbeat
 )
 
 if __name__ == "__main__":
@@ -140,12 +141,14 @@ if __name__ == "__main__":
         EVAL_METRIC_FOLDER = "/opt/ml/model/dataset/eval"
         EVAL_METRIC_PATH = "/opt/ml/model/dataset/eval/metrics.json"
         IS_BATCH = 'AWS_BATCH_JOB_ID' in os.environ
+        TASK_TOKEN = config.get('TASK_TOKEN', '')
         GPU_MAX_IMAGES = 500 # est at 4k
         MAP_ANYTHING_MAX_IMAGES = 100 # for memory efficient mode
         REFINE_STEPS_SPLATFACTO = max(24000, int(config['MAX_STEPS']))
         REFINE_STEPS_3DGRUT = max(12000, int(config['MAX_STEPS']))
         ENABLE_MULTI_GPU = "false"
         LOCAL_DEBUG = os.environ.get('LOCAL_DEBUG', config.get('LOCAL_DEBUG', 'false')).lower() == 'true'
+        ENABLE_TASK_TOKEN_CALLBACK = IS_BATCH and bool(TASK_TOKEN) and not LOCAL_DEBUG
         ENABLE_DEPTH_LOSS = config.get('ENABLE_DEPTH_LOSS', 'false').lower() == 'true'
 
         # Check if video or zip of images given
@@ -446,6 +449,7 @@ if __name__ == "__main__":
                 break
     
     colmap_zip_needs_conversion = False  # True when zip has sparse/ but no transforms.json
+    ZIP_HAS_MASKS = False  # True when zip contains a masks/ directory
     if colmap_zip_found:
         log.info(f"Processing COLMAP reconstruction: {config['FILENAME']}")
         zip_path = os.path.join(config['DATASET_PATH'], config['FILENAME'])
@@ -480,6 +484,11 @@ if __name__ == "__main__":
                 if has_sparse and not has_transforms:
                     colmap_zip_needs_conversion = True
                     log.info("No transforms.json in zip - Colmap-to-Nerfstudio conversion will be required")
+
+                # Detect masks directory in the zip
+                has_masks = os.path.exists(os.path.join(extract_source, 'masks'))
+                if has_masks:
+                    log.info("Masks directory detected in zip — will enable mask training")
                 
                 # Move contents to dataset directory
                 for item in os.listdir(extract_source):
@@ -491,6 +500,26 @@ if __name__ == "__main__":
                         else:
                             os.remove(dst)
                     shutil.move(src, dst)
+
+                if has_masks:
+                    ZIP_HAS_MASKS = True
+                    masks_dir = os.path.join(config['DATASET_PATH'], 'masks')
+                    # The zip contains masks in COLMAP convention: <image_filename>.png
+                    # e.g. scan_001_view02.png.png
+                    # NerfStudio --masks-path expects the image filename unchanged:
+                    # e.g. scan_001_view02.png
+                    # COLMAP feature extraction already ran before the zip was created,
+                    # so rename to NerfStudio convention by stripping the trailing .png.
+                    for mask_file in os.listdir(masks_dir):
+                        mask_stem, mask_ext = os.path.splitext(mask_file)
+                        inner_stem, inner_ext = os.path.splitext(mask_stem)
+                        # e.g. scan_001_view02.png.png -> strip outer .png -> scan_001_view02.png
+                        if inner_ext and inner_ext == mask_ext:
+                            os.rename(
+                                os.path.join(masks_dir, mask_file),
+                                os.path.join(masks_dir, mask_stem)
+                            )
+                    log.info(f"Masks renamed from COLMAP to NerfStudio convention in: {masks_dir}")
                 
                 # Clean up temp directory
                 if os.path.exists(temp_path):
@@ -513,6 +542,18 @@ if __name__ == "__main__":
                         os.remove(dst)
                 shutil.move(src, dst)
             log.info(f"Moved reconstruction data from {zip_path} to dataset root")
+            if os.path.exists(os.path.join(config['DATASET_PATH'], 'masks')):
+                ZIP_HAS_MASKS = True
+                masks_dir = os.path.join(config['DATASET_PATH'], 'masks')
+                for mask_file in os.listdir(masks_dir):
+                    mask_stem, mask_ext = os.path.splitext(mask_file)
+                    inner_stem, inner_ext = os.path.splitext(mask_stem)
+                    if inner_ext and inner_ext == mask_ext:
+                        os.rename(
+                            os.path.join(masks_dir, mask_file),
+                            os.path.join(masks_dir, mask_stem)
+                        )
+                log.info("Masks renamed from COLMAP to NerfStudio convention in directory input")
         
         # Ensure colmap/sparse structure exists for NerfStudio (not needed for 3DGRUT or depth loss)
         if colmap_zip_found and config['MODEL'] not in ('3dgrt', '3dgut') and not ENABLE_DEPTH_LOSS:
@@ -797,7 +838,8 @@ if __name__ == "__main__":
     ##################################
     if int(pipeline.config.num_gpus) > 1:
         ENABLE_MULTI_GPU = "true"
-        os.environ['MAX_JOBS'] = '4'
+        #os.environ['MAX_JOBS'] = '4'
+        log.info(f"Multi-GPU enabled: {pipeline.config.num_gpus} GPUs (gsplat distributed training)")
         # Read SageMaker resource config for multi-container setup
         resource_config_path = '/opt/ml/input/config/resourceconfig.json'
         if os.path.exists(resource_config_path):
@@ -843,7 +885,7 @@ if __name__ == "__main__":
             os.environ['MASTER_PORT'] = '29500'
             log.info(f"DEBUG: Single instance multi-GPU - set MASTER_ADDR=127.0.0.1, MASTER_PORT=29500 for {pipeline.config.num_gpus} GPUs")
     else:
-        log.info("DEBUG: Single GPU setup, no distributed training configuration needed")
+        log.info("Single GPU setup, no distributed training configuration needed")
 
     ##################################
     # PRE-PROCESS COMPONENT:
@@ -1415,7 +1457,8 @@ if __name__ == "__main__":
                         cwd=current_dir_path,
                         requires_gpu=False
                     )
-                elif ENABLE_MULTI_GPU == "true" or (config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt") and \
+                if ENABLE_MULTI_GPU == "true" or \
+                    (config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt") and \
                     (config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'true' or config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true'):
                     args = [
                         "image_undistorter",
@@ -1752,9 +1795,14 @@ if __name__ == "__main__":
                         data_model,
                         "--data", config['DATASET_PATH'],
                         "--downscale-factor", "1",
-                        "--auto-scale-poses", auto_scale_value#,
-                        #"--center-method", "poses" #poses,focus,none
+                        "--auto-scale-poses", auto_scale_value
                     ])
+                    if auto_scale_value == "True":
+                         args.extend(["--center-method", "poses"]) #poses,focus,none
+                    if ZIP_HAS_MASKS:
+                        masks_path = os.path.join(config['DATASET_PATH'], 'masks')
+                        args.extend(["--masks-path", masks_path])
+                        log.info(f"Enabling mask training from zip: {masks_path}")
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -1785,7 +1833,7 @@ if __name__ == "__main__":
                     "--data_factor", "1",
                     "--steps_scaler", str(steps_scaler),
                     "--disable_viewer",
-                    # "--packed",  # TODO: upstream gsplat bug - --packed causes cudaErrorIllegalAddress
+                    #"--packed",  # TODO: upstream gsplat bug - --packed causes cudaErrorIllegalAddress
                     #              # with NCCL all_reduce in multi-GPU distributed training.
                     #              # Re-enable once fixed: https://github.com/nerfstudio-project/gsplat/issues/910
                     "--eval_steps", str(int(config['MAX_STEPS'])),
@@ -2391,7 +2439,7 @@ if __name__ == "__main__":
                     rotation = None
                 else:
                     # nerfstudio OR normalized gsplat (align_principal_axes makes it OpenGL-like)
-                    rotation = '90,0,0'
+                    rotation = '270,0,0'
                 if rotation:
                     args = [
                         orig_ply_path,
@@ -2477,7 +2525,7 @@ if __name__ == "__main__":
                 if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and preserve_scale:
                     rotation = None  # raw COLMAP: coord transform alone sufficient
                 else:
-                    rotation = '90,0,0'  # nerfstudio or normalized gsplat
+                    rotation = '270,0,0'  # nerfstudio or normalized gsplat
                 if rotation:
                     args = [
                         sog_ply_path,
@@ -2711,7 +2759,7 @@ if __name__ == "__main__":
                     rotation = '180,0,0'
                 else:
                     # nerfstudio OpenGL-space
-                    rotation = '270,0,180' if is_lhyu else '270,0,0'
+                    rotation = '90,0,180' if is_lhyu else '270,0,0'
             else:
                 rotation = '180,0,0'
             if rotation:
@@ -2818,6 +2866,20 @@ if __name__ == "__main__":
         pipeline.session.status = Status.RUNNING
         log.info(f"Pipeline status changed to {pipeline.session.status}")
         start_time = int(time.time())
+
+        # Start background heartbeat thread for long-running Batch jobs.
+        # Fires every 6 hours so Step Functions never hits HeartbeatSeconds=172800.
+        # Only active when IS_BATCH=True, TASK_TOKEN is set, and not LOCAL_DEBUG.
+        if ENABLE_TASK_TOKEN_CALLBACK:
+            import threading as _threading
+            _heartbeat_stop = _threading.Event()
+            def _heartbeat_loop():
+                # Send a heartbeat every 6 hours until the pipeline finishes
+                while not _heartbeat_stop.wait(timeout=21600):
+                    send_task_heartbeat(TASK_TOKEN, log)
+            _heartbeat_thread = _threading.Thread(target=_heartbeat_loop, daemon=True)
+            _heartbeat_thread.start()
+            log.info("Heartbeat thread started (interval=6h, max=48h)")
 
         # Initialize phase tracking
         pipeline.session.comp_group_names = [member.name for member in ComponentType]
@@ -2982,7 +3044,11 @@ if __name__ == "__main__":
                             "--ImageReader.camera_params", camera_params['params_str']
                         ])
                     elif config.get('ENABLE_FL_METRIC', 'false') == 'true':
-                        # Apply metric focal length: use the provided pixel value directly
+                        # Convert metric focal length from mm to pixels using the 35mm-equivalent
+                        # formula: focal_px = (focal_mm / 36.0) * image_width_px
+                        # This avoids needing the physical sensor size and correctly accounts
+                        # for any image resizing (e.g. 4K downscale) since _w is read from
+                        # the actual image on disk after pre-processing.
                         try:
                             from PIL import Image as _PILImage
                             img_files = [f for f in os.listdir(image_path)
@@ -2990,10 +3056,11 @@ if __name__ == "__main__":
                             if img_files:
                                 with _PILImage.open(os.path.join(image_path, img_files[0])) as _img:
                                     _w, _h = _img.size
-                                focal = int(float(config.get('FL_METRIC_VALUE', '24')))
+                                fl_mm = float(config.get('FL_METRIC_VALUE', '24'))
+                                focal = round((fl_mm / 36.0) * _w)
                                 cx, cy = _w // 2, _h // 2
-                                log.info(f"ENABLE_FL_METRIC: using focal={focal}px, cx={cx}, cy={cy} "
-                                         f"(image {_w}x{_h})")
+                                log.info(f"ENABLE_FL_METRIC: fl={fl_mm}mm -> focal={focal}px "
+                                         f"(image {_w}x{_h}, formula: ({fl_mm}/36)*{_w})")
                                 try:
                                     idx = component.args.index("--ImageReader.camera_model")
                                     component.args.pop(idx)
@@ -3566,6 +3633,32 @@ if __name__ == "__main__":
                     log.debug("Skipping training metrics DynamoDB update - no table name configured")
             except Exception as e:
                 log.warning(f"Could not extract/update training metrics: {e}")
+
+        ##################################
+        # STEP FUNCTIONS TASK TOKEN CALLBACK
+        # Notify Step Functions of successful completion when using waitForTaskToken
+        # pattern. Skipped in LOCAL_DEBUG mode and when no token is present.
+        ##################################
+        if ENABLE_TASK_TOKEN_CALLBACK:
+            _heartbeat_stop.set()  # stop the heartbeat thread before calling back
+            send_task_success(
+                task_token=TASK_TOKEN,
+                output={"status": "SUCCEEDED", "uuid": config['UUID']},
+                log=log
+            )
     except Exception as e:
         error_message = f"General error running the pipeline: {e}"
         pipeline.report_error(795, error_message)
+        # Read token and debug flag directly from env in case the crash happened
+        # before TASK_TOKEN, LOCAL_DEBUG, or ENABLE_TASK_TOKEN_CALLBACK were assigned.
+        # LOCAL_DEBUG check prevents spurious SendTaskFailure calls during local runs.
+        _task_token = locals().get('TASK_TOKEN') or os.environ.get('TASK_TOKEN', '')
+        _local_debug = locals().get('LOCAL_DEBUG') or os.environ.get('LOCAL_DEBUG', 'false').lower() == 'true'
+        _is_batch = 'AWS_BATCH_JOB_ID' in os.environ
+        if _is_batch and bool(_task_token) and not _local_debug:
+            send_task_failure(
+                task_token=_task_token,
+                error="PipelineError",
+                cause=error_message,
+                log=locals().get('log')
+            )

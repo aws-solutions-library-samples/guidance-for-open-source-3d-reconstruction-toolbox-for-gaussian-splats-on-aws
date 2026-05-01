@@ -25,100 +25,34 @@
       ],
       "Default": "InvokeSageMakerWorkflow"
     },
-
     "SetDefaultJobDefinition": {
       "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "HeartbeatSeconds": 172800,
       "Parameters": {
         "FunctionName.$": "$.stateMachine.jobDefinitionSelectorLambdaName",
-        "Payload.$": "$"
-      },
-      "OutputPath": "$.Payload",
-      "Next": "InvokeBatchWorkflow"
-    },
-    "InvokeBatchWorkflow": {
-      "Type": "Task",
-      "InputPath": "$",
-      "ResultPath": "$.invokeWorkflow",
-      "Resource": "arn:aws:states:::batch:submitJob.sync",
-      "Parameters": {
-        "JobName.$": "$.envVars.UUID",
-        "JobQueue.$": "$.selectedBatchJobQueue",
-        "JobDefinition.$": "$.selectedBatchJobDefinition",
-        "ContainerOverrides": {
-          "Environment": [
-            {"Name": "UUID", "Value.$": "$.envVars.UUID"},
-            {"Name": "DATA_CHANNEL", "Value.$": "$.envVars.DATA_CHANNEL"},
-            {"Name": "MODEL_INPUT", "Value.$": "$.envVars.MODEL_INPUT"},
-            {"Name": "S3_INPUT", "Value.$": "$.envVars.S3_INPUT"},
-            {"Name": "S3_OUTPUT", "Value.$": "$.envVars.S3_OUTPUT"},
-            {"Name": "FILENAME", "Value.$": "$.envVars.FILENAME"},
-            {"Name": "INSTANCE_TYPE", "Value.$": "$.envVars.INSTANCE_TYPE"},
-            {"Name": "USE_SPOT_INSTANCE", "Value.$": "$.envVars.USE_SPOT_INSTANCE"},
-            {"Name": "COMPUTE_TYPE", "Value.$": "$.envVars.COMPUTE_TYPE"},
-            {"Name": "LOG_VERBOSITY", "Value.$": "$.envVars.LOG_VERBOSITY"},
-            {"Name": "MAX_NUM_IMAGES", "Value.$": "$.envVars.MAX_NUM_IMAGES"},
-            {"Name": "VIDEO_START_TIME", "Value.$": "$.envVars.VIDEO_START_TIME"},
-            {"Name": "VIDEO_STOP_TIME", "Value.$": "$.envVars.VIDEO_STOP_TIME"},
-            {"Name": "FILTER_BLURRY_IMAGES", "Value.$": "$.envVars.FILTER_BLURRY_IMAGES"},
-            {"Name": "RUN_RECON", "Value.$": "$.envVars.RUN_RECON"},
-            {"Name": "RECON_SOFTWARE_NAME", "Value.$": "$.envVars.RECON_SOFTWARE_NAME"},
-            {"Name": "USE_POSE_PRIOR_COLMAP_MODEL_FILES", "Value.$": "$.envVars.USE_POSE_PRIOR_COLMAP_MODEL_FILES"},
-            {"Name": "USE_POSE_PRIOR_TRANSFORM_JSON", "Value.$": "$.envVars.USE_POSE_PRIOR_TRANSFORM_JSON"},
-            {"Name": "SOURCE_COORD_NAME", "Value.$": "$.envVars.SOURCE_COORD_NAME"},
-            {"Name": "POSE_IS_WORLD_TO_CAM", "Value.$": "$.envVars.POSE_IS_WORLD_TO_CAM"},
-            {"Name": "ENABLE_ENHANCED_FEATURE_EXTRACTION", "Value.$": "$.envVars.ENABLE_ENHANCED_FEATURE_EXTRACTION"},
-            {"Name": "MATCHING_METHOD", "Value.$": "$.envVars.MATCHING_METHOD"},
-            {"Name": "ENABLE_FL_HEURISTIC", "Value.$": "$.envVars.ENABLE_FL_HEURISTIC"},
-            {"Name": "FL_HEURISTIC_VALUE", "Value.$": "$.envVars.FL_HEURISTIC_VALUE"},
-            {"Name": "ENABLE_FL_METRIC", "Value.$": "$.envVars.ENABLE_FL_METRIC"},
-            {"Name": "FL_METRIC_VALUE", "Value.$": "$.envVars.FL_METRIC_VALUE"},
-            {"Name": "RUN_TRAIN", "Value.$": "$.envVars.RUN_TRAIN"},
-            {"Name": "MODEL", "Value.$": "$.envVars.MODEL"},
-            {"Name": "MAX_STEPS", "Value.$": "$.envVars.MAX_STEPS"},
-            {"Name": "THREED_ISP", "Value.$": "$.envVars.THREED_ISP"},
-            {"Name": "ENABLE_SPZ", "Value.$": "$.envVars.ENABLE_SPZ"},
-            {"Name": "ENABLE_SOG", "Value.$": "$.envVars.ENABLE_SOG"},
-            {"Name": "ENABLE_USDZ", "Value.$": "$.envVars.ENABLE_USDZ"},
-            {"Name": "PLY_COORDS", "Value.$": "$.envVars.PLY_COORDS"},
-            {"Name": "SPZ_COORDS", "Value.$": "$.envVars.SPZ_COORDS"},
-            {"Name": "SOG_COORDS", "Value.$": "$.envVars.SOG_COORDS"},
-            {"Name": "USDZ_COORDS", "Value.$": "$.envVars.USDZ_COORDS"},
-            {"Name": "CROP_OUTPUT_BOUNDS", "Value.$": "$.envVars.CROP_OUTPUT_BOUNDS"},
-            {"Name": "CROP_MODE", "Value.$": "$.envVars.CROP_MODE"},
-            {"Name": "CLEAN_SPLAT", "Value.$": "$.envVars.CLEAN_SPLAT"},
-            {"Name": "SPHERICAL_CAMERA", "Value.$": "$.envVars.SPHERICAL_CAMERA"},
-            {"Name": "SPHERICAL_CUBE_FACES_TO_REMOVE", "Value.$": "$.envVars.SPHERICAL_CUBE_FACES_TO_REMOVE"},
-            {"Name": "REMOVE_BACKGROUND", "Value.$": "$.envVars.REMOVE_BACKGROUND"},
-            {"Name": "BACKGROUND_REMOVAL_MODEL", "Value.$": "$.envVars.BACKGROUND_REMOVAL_MODEL"},
-            {"Name": "MASK_THRESHOLD", "Value.$": "$.envVars.MASK_THRESHOLD"},
-            {"Name": "REMOVE_OBJECT", "Value.$": "$.envVars.REMOVE_OBJECT"},
-            {"Name": "OBJECT_REMOVAL_ACTION", "Value.$": "$.envVars.OBJECT_REMOVAL_ACTION"},
-            {"Name": "OBJECT_REMOVAL_OBJECTS", "Value.$": "$.envVars.OBJECT_REMOVAL_OBJECTS"},
-            {"Name": "PRESERVE_SCENE_SCALE", "Value.$": "$.envVars.PRESERVE_SCENE_SCALE"},
-            {"Name": "ENABLE_DEPTH_LOSS", "Value.$": "$.envVars.ENABLE_DEPTH_LOSS"},
-            {"Name": "ENABLE_VIDEO_EXPORT", "Value.$": "$.envVars.ENABLE_VIDEO_EXPORT"},
-            {"Name": "DDB_TABLE_NAME", "Value.$": "$.stateMachine.ddbTableName"},
-            {"Name": "AWS_DEFAULT_REGION", "Value.$": "$.stateMachine.awsRegion"}
-          ]
+        "Payload": {
+          "taskToken.$": "$$.Task.Token",
+          "event.$": "$"
         }
       },
+      "ResultPath": "$.invokeWorkflow",
       "Retry": [
+        {
+          "ErrorEquals": [
+            "States.HeartbeatTimeout"
+          ],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        },
         {
           "ErrorEquals": [
             "States.TaskFailed"
           ],
           "IntervalSeconds": 60,
-          "MaxAttempts": 0,
+          "MaxAttempts": 1,
           "BackoffRate": 2
-        },
-        {
-          "ErrorEquals": [
-            "States.Timeout"
-          ],
-          "IntervalSeconds": 1,
-          "MaxAttempts": 0,
-          "BackoffRate": 1
         }
       ],
       "Catch": [

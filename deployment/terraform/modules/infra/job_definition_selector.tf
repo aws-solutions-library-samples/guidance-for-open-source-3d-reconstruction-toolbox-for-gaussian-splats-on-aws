@@ -53,6 +53,7 @@ resource "aws_lambda_function" "job_definition_selector" {
       BATCH_JOB_QUEUE_G6_4XLARGE   = aws_batch_job_queue.batch_job_queue["g6-4xlarge"].arn
       BATCH_JOB_QUEUE_G6_8XLARGE   = aws_batch_job_queue.batch_job_queue["g6-8xlarge"].arn
       BATCH_JOB_QUEUE_G6E          = aws_batch_job_queue.g6e_job_queue.arn
+      DDB_TABLE_NAME               = aws_dynamodb_table.ddb_table.name
     }
   }
 
@@ -60,4 +61,31 @@ resource "aws_lambda_function" "job_definition_selector" {
     aws_iam_role.lambda_role,
     aws_iam_role_policy_attachment.attach_iam_policy_s3_role
   ]
+}
+
+# Allow job_definition_selector to submit Batch jobs and send task callbacks to Step Functions
+resource "aws_iam_role_policy" "job_definition_selector_batch_sfn_policy" {
+  name = "${var.project_prefix}-job-def-selector-batch-sfn-${var.tf_random_suffix}"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["batch:SubmitJob", "batch:ListJobs"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["states:SendTaskSuccess", "states:SendTaskFailure", "states:SendTaskHeartbeat"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:UpdateItem"]
+        Resource = "arn:aws:dynamodb:*:*:table/${aws_dynamodb_table.ddb_table.name}"
+      }
+    ]
+  })
 }

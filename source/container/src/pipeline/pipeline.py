@@ -218,21 +218,29 @@ class Pipeline:
             
         try:
             # Subprocess call is secure: uses list format (not shell=True) with validated arguments
-            result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit
-                cmd_args,
-                check=True,
-                cwd=self.components[index].cwd,
-                env=env,
-                capture_output=capture_output,
-                text=True if capture_output else False
-            )
-            
-            # Store output if captured
             if capture_output:
+                # Capture stdout for metrics parsing; pipe stderr to our stdout so it streams
+                # to CloudWatch live (avoids pipe buffer deadlock on long-running processes).
+                result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit
+                    cmd_args,
+                    check=True,
+                    cwd=self.components[index].cwd,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=None,
+                    text=True
+                )
                 self.components[index].output = result.stdout
                 self.session.log.info(result.stdout)
+            else:
+                result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit
+                    cmd_args,
+                    check=True,
+                    cwd=self.components[index].cwd,
+                    env=env
+                )
             
-            if result.stderr:
+            if not capture_output and result.stderr:
                 self.session.log.error(result.stderr)
         except subprocess.CalledProcessError as e:
             print(f"Command '{' '.join(e.cmd)}' failed with return code {e.returncode}")
@@ -240,10 +248,10 @@ class Pipeline:
                 print(f"Error message: {e.stderr.strip()}")
             if e.stdout is not None:
                 print(f"Output (if any): {e.stdout.strip()}")
-            sys.exit(1)
+            raise RuntimeError(f"Component failed with return code {e.returncode}")
         except Exception as e:
             self.session.log.error(f"An unexpected error occurred: {str(e)}")
-            sys.exit(1)
+            raise
 
     def report_error(self, response_code: int, message:str):
         """
