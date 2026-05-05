@@ -120,13 +120,13 @@ A collection of compressed splats can be found in the repo at [source/Gradio/fav
 
 ### Third-party tools
 
-- Git
-- Docker
-- Terraform (if choosing not to deploy infrastructure using CDK)
+- [Git](https://cli.github.com/)
+- [Docker](https://www.docker.com/)
+- [Terraform](https://developer.hashicorp.com/terraform/tutorials/aws-get-started/install-cli) (if choosing not to deploy infrastructure using CDK)
 
 ### AWS account requirements
 
-An active AWS Account with IAM user or role with elevated permissions to deploy resources is required to deploy this guidance, along with either a local computer with appropriate AWS credentials to deploy the CDK or Terraform solution, or utilize an AWS EC2 workstation to build and deploy the CDK or Terraform solution. Please refer to the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running the guidance.
+An active AWS Account with IAM user or role with elevated permissions to deploy resources is required to deploy this guidance, along with either a local computer with appropriate AWS credentials to deploy the CDK or Terraform guidance code, or an AWS EC2 workstation to build and deploy the CDK or Terraform guidance code. Please refer to the [Implementation Guide](https://aws-solutions-library-samples.github.io/compute/open-source-3d-reconstruction-toolbox-for-gaussian-splats-on-aws.html) for detailed instructions for deployment and running this guidance.
 
 - EC2 (if choosing not to deploy infrastructure from your local computer)
 - IAM roles with permissions
@@ -257,4 +257,4 @@ This library is licensed under the MIT-0 License. See the [LICENSE](./LICENSE) f
 
 - [Stanford Lee](https://www.linkedin.com/in/stanfordlee/), Technical Account Manager (Physical AI TFC), AWS
 
-- [Daniel Zilberman](https://www.linkedin.com/in/danzilberman/), Sr. Specialist SA, Prototyping & Scaling, AWS
+- [Daniel Zilberman](https://www.linkedin.com/in/danzilberman/), Sr. Specialist SA, Startups, AWS
