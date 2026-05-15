@@ -626,7 +626,7 @@ def create_advanced_settings_tab():
             return []
         return [f[:-5] for f in os.listdir(configs_dir) if f.endswith('.json')]
     
-    with gr.Tab("Advanced Settings"):
+    with gr.Tab("Advanced Settings") as advanced_tab:
         # Configuration Presets Section with visual separation
         with gr.Group():
             gr.HTML("<div style='border-bottom: 2px solid #e0e0e0; margin-bottom: 15px; padding-bottom: 10px;'><h3 style='margin: 0;'>⚙️ Configuration Presets</h3></div>")
@@ -1147,6 +1147,8 @@ def create_advanced_settings_tab():
                         inputs=advanced_components,
                         outputs=[gr.Textbox(label="Status", visible=False)]
                     )
+
+    return advanced_tab, load_config_dropdown
 
 def on_select(evt: gr.SelectData, data):
     """Handle row selection in the files table with improved error handling"""
@@ -4300,7 +4302,13 @@ def create_interface():
 
         with gr.Tabs():
             create_aws_configuration_tab()
-            create_advanced_settings_tab()
+            advanced_tab, load_config_dropdown = create_advanced_settings_tab()
+            def _refresh_configs():
+                configs_dir = os.path.join(os.path.dirname(__file__), "configs")
+                if not os.path.exists(configs_dir):
+                    return gr.update(choices=[])
+                return gr.update(choices=[f[:-5] for f in os.listdir(configs_dir) if f.endswith('.json')])
+            advanced_tab.select(fn=_refresh_configs, outputs=[load_config_dropdown])
             create_upload_aws_tab()
             create_combined_monitor_viewer_tab()
             create_debug_tab()
