@@ -95,6 +95,7 @@ from utils import (
     load_config, obj_to_glb, count_up_to, untar_gz, process_images,
     select_largest_colmap_model, create_tarball, has_alpha_channel,
     cleanup_dataset, cleanup_cuda_memory, validate_and_resize_images,
+    extract_images_from_zip_temp,
     setup_local_debug, copy_to_local_output, print_container_version_info,
     update_dynamodb_metrics, update_component_phase_completion,
     parse_3dgrut_metrics_from_log, parse_gsplat_metrics_from_log,
@@ -505,21 +506,43 @@ if __name__ == "__main__":
                     ZIP_HAS_MASKS = True
                     masks_dir = os.path.join(config['DATASET_PATH'], 'masks')
                     # The zip contains masks in COLMAP convention: <image_filename>.png
-                    # e.g. scan_001_view02.png.png
+                    # e.g. scan_001_view02.png.png (flat) or face_00/pano_002.png.png (panorama)
                     # NerfStudio --masks-path expects the image filename unchanged:
-                    # e.g. scan_001_view02.png
-                    # COLMAP feature extraction already ran before the zip was created,
-                    # so rename to NerfStudio convention by stripping the trailing .png.
-                    for mask_file in os.listdir(masks_dir):
-                        mask_stem, mask_ext = os.path.splitext(mask_file)
-                        inner_stem, inner_ext = os.path.splitext(mask_stem)
-                        # e.g. scan_001_view02.png.png -> strip outer .png -> scan_001_view02.png
-                        if inner_ext and inner_ext == mask_ext:
-                            os.rename(
-                                os.path.join(masks_dir, mask_file),
-                                os.path.join(masks_dir, mask_stem)
-                            )
+                    # e.g. scan_001_view02.png or face_00/pano_002.png
+                    # Walk the full masks tree to handle both flat and subdirectory layouts.
+                    for root, dirs, files in os.walk(masks_dir):
+                        for mask_file in files:
+                            mask_stem, mask_ext = os.path.splitext(mask_file)
+                            inner_stem, inner_ext = os.path.splitext(mask_stem)
+                            if inner_ext and inner_ext == mask_ext:
+                                os.rename(
+                                    os.path.join(root, mask_file),
+                                    os.path.join(root, mask_stem)
+                                )
                     log.info(f"Masks renamed from COLMAP to NerfStudio convention in: {masks_dir}")
+                    # If transforms.json already exists (no conversion needed), inject mask_path now
+                    # so gsplat can find the masks without relying on the Colmap-to-Nerfstudio step.
+                    transforms_path = os.path.join(config['DATASET_PATH'], 'transforms.json')
+                    if has_transforms and os.path.isfile(transforms_path):
+                        import json as _json
+                        with open(transforms_path, 'r') as _f:
+                            _data = _json.load(_f)
+                        _injected = 0
+                        for _frame in _data.get('frames', []):
+                            _img = _frame.get('file_path', '')
+                            if _img.startswith('images/'):
+                                _img = _img[len('images/'):]
+                            elif _img.startswith('./images/'):
+                                _img = _img[len('./images/'):]
+                            else:
+                                _img = os.path.basename(_img)
+                            _mask_file = os.path.join(masks_dir, _img)
+                            if os.path.isfile(_mask_file):
+                                _frame['mask_path'] = f'masks/{_img}'
+                                _injected += 1
+                        with open(transforms_path, 'w') as _f:
+                            _json.dump(_data, _f, indent=4)
+                        log.info(f"Injected mask_path into {_injected} frames in existing transforms.json")
                 
                 # Clean up temp directory
                 if os.path.exists(temp_path):
@@ -545,14 +568,15 @@ if __name__ == "__main__":
             if os.path.exists(os.path.join(config['DATASET_PATH'], 'masks')):
                 ZIP_HAS_MASKS = True
                 masks_dir = os.path.join(config['DATASET_PATH'], 'masks')
-                for mask_file in os.listdir(masks_dir):
-                    mask_stem, mask_ext = os.path.splitext(mask_file)
-                    inner_stem, inner_ext = os.path.splitext(mask_stem)
-                    if inner_ext and inner_ext == mask_ext:
-                        os.rename(
-                            os.path.join(masks_dir, mask_file),
-                            os.path.join(masks_dir, mask_stem)
-                        )
+                for root, dirs, files in os.walk(masks_dir):
+                    for mask_file in files:
+                        mask_stem, mask_ext = os.path.splitext(mask_file)
+                        inner_stem, inner_ext = os.path.splitext(mask_stem)
+                        if inner_ext and inner_ext == mask_ext:
+                            os.rename(
+                                os.path.join(root, mask_file),
+                                os.path.join(root, mask_stem)
+                            )
                 log.info("Masks renamed from COLMAP to NerfStudio convention in directory input")
         
         # Ensure colmap/sparse structure exists for NerfStudio (not needed for 3DGRUT or depth loss)
@@ -2983,26 +3007,25 @@ if __name__ == "__main__":
                                 if video_found:
                                     break
                             if not video_found:
-                                # No video found, process as images
-                                temp_dir_input = os.listdir(temp_path)[0]
-                                if os.path.isdir(os.path.join(temp_path, temp_dir_input)): # Archive has a directory
-                                    log.info(f"Moving directory from {temp_path} to {temp_dir_input}")
-                                    # Remove existing images directory if it exists
-                                    if os.path.exists(image_path):
-                                        shutil.rmtree(image_path)
-                                    os.rename(
-                                        os.path.join(temp_path, temp_dir_input),
-                                        image_path
+                                # No video found - only applies when run_recon == true.
+                                if config['RUN_RECON'] == 'true':
+                                    extract_images_from_zip_temp(
+                                        temp_path, image_path, config['DATASET_PATH'], log
                                     )
-                                else: # Archive has files, not folder
-                                    # Get all items in the source directory
-                                    files = os.listdir(temp_path)
-                                    # Move each item to the destination
-                                    for filename in files:
-                                        source_path = os.path.join(temp_path, filename)
-                                        destination_path = os.path.join(image_path, filename)
-                                        # Move the file
-                                        shutil.move(source_path, destination_path)
+                                else:
+                                    # run_recon == false: pre-processing already done,
+                                    # move contents as-is (original behaviour)
+                                    temp_dir_input = os.listdir(temp_path)[0]
+                                    if os.path.isdir(os.path.join(temp_path, temp_dir_input)):
+                                        if os.path.exists(image_path):
+                                            shutil.rmtree(image_path)
+                                        os.rename(os.path.join(temp_path, temp_dir_input), image_path)
+                                    else:
+                                        for filename in os.listdir(temp_path):
+                                            shutil.move(
+                                                os.path.join(temp_path, filename),
+                                                os.path.join(image_path, filename)
+                                            )
                             
                             # Clean up temp directory
                             if os.path.exists(temp_path):

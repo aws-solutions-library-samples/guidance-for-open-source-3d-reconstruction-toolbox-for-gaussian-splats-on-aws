@@ -761,6 +761,42 @@ def cleanup_dataset(dataset_path):
             except OSError:
                 pass  # Directory not empty or permission issue
 
+def extract_images_from_zip_temp(temp_path, image_path, dataset_path, log):
+    """
+    Walk temp_path, routing image files to image_path and mask images
+    (those inside a folder named 'mask' or 'masks') to dataset_path/masks/.
+    Sub-folders are flattened; non-image files are silently ignored.
+    Only intended for run_recon == true jobs.
+    """
+    IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
+    os.makedirs(image_path, exist_ok=True)
+    masks_dest = os.path.join(dataset_path, 'masks')
+    seen_names = {}
+    for root, dirs, files in os.walk(temp_path):
+        rel_root = os.path.relpath(root, temp_path)
+        path_parts = rel_root.replace('\\', '/').split('/')
+        is_mask_folder = any(p.lower() in ('mask', 'masks') for p in path_parts)
+        for fname in files:
+            if not fname.lower().endswith(IMAGE_EXTS):
+                continue
+            src = os.path.join(root, fname)
+            if is_mask_folder:
+                os.makedirs(masks_dest, exist_ok=True)
+                dst = os.path.join(masks_dest, fname)
+            else:
+                dst = os.path.join(image_path, fname)
+            if dst in seen_names:
+                base, ext = os.path.splitext(fname)
+                dst = os.path.join(os.path.dirname(dst), f"{base}_{seen_names[dst]}{ext}")
+            seen_names[dst] = seen_names.get(dst, 0) + 1
+            shutil.move(src, dst)
+    log.info(
+        f"Extracted {len(os.listdir(image_path))} images"
+        + (f" and {len(os.listdir(masks_dest))} masks" if os.path.isdir(masks_dest) else "")
+        + " from zip (sub-folders flattened, non-image files ignored)"
+    )
+
+
 def validate_and_resize_images(image_path, config, log, pipeline):
     """
     Validate image files and resize them if needed.
@@ -771,18 +807,11 @@ def validate_and_resize_images(image_path, config, log, pipeline):
         log: Logger instance
         pipeline: Pipeline instance for error reporting
     """
-    filenames = os.listdir(image_path)
+    IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
+    all_files = os.listdir(image_path)
+    filenames = [f for f in all_files if os.path.splitext(f)[1].lower() in IMAGE_EXTS]
     if filenames:
-        first_file_ext = os.path.splitext(filenames[0])[1]
-        if first_file_ext == ".png" or first_file_ext == ".jpeg" or first_file_ext == ".jpg":
-            log.info("Found images in archive.")
-        else:
-            pipeline.report_error(
-                790,
-                """The archive doesn't contain supported image files
-                .jpg, .jpeg, or .png"""
-            )
-        
+        log.info(f"Found {len(filenames)} images in archive (skipped {len(all_files) - len(filenames)} non-image files).")
         # Check first image to determine if resizing is needed
         first_filepath = os.path.join(image_path, filenames[0])
         first_image = cv2.imread(first_filepath)
@@ -790,7 +819,6 @@ def validate_and_resize_images(image_path, config, log, pipeline):
             height, width = first_image.shape[:2]
             max_dimension = max(width, height)
             needs_resize = max_dimension > 3840 and config['SPHERICAL_CAMERA'] != "true"
-            
             if needs_resize:
                 log.info(f"Images need resizing (first image: {width}x{height}). Processing all {len(filenames)} images...")
                 for filename in filenames:
@@ -804,7 +832,7 @@ def validate_and_resize_images(image_path, config, log, pipeline):
                 filepath = os.path.join(image_path, filename)
                 resize_to_4k(filepath, config['SPHERICAL_CAMERA'] == "true")
     else:
-        log.info("No files found in image directory - this is expected for resume training")
+        log.info("No image files found in image directory - this is expected for resume training")
 
 # Clean up GPU memory
 def cleanup_cuda_memory():
