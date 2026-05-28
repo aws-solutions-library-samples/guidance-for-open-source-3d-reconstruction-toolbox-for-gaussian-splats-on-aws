@@ -581,15 +581,13 @@ def create_aws_configuration_tab():
                 s3_output = gr.Textbox(label="S3 Output Prefix", value="workflow-output")
                 media_input = gr.Textbox(label="Media Input Prefix", value="media-input")
 
-                def update_shared_state(region, ddb_table, bucket, input_prefix, output_prefix, media_prefix, inst, spot):
+                def update_shared_state(region, ddb_table, bucket, input_prefix, output_prefix, media_prefix):
                     shared_state.aws_region = region
                     shared_state.ddb_table_name = ddb_table
                     shared_state.s3_bucket = bucket
                     shared_state.s3_input = input_prefix
                     shared_state.s3_output = output_prefix
                     shared_state.media_input = media_prefix
-                    shared_state.instance = inst
-                    shared_state.use_spot_instance = spot
                     return "AWS configuration updated"
 
                 # Immediately update shared_state when values change
@@ -614,7 +612,7 @@ def create_aws_configuration_tab():
                 for component in [aws_region, ddb_table_name, s3_bucket, s3_input, s3_output, media_input]:
                     component.change(
                         fn=update_shared_state,
-                        inputs=[aws_region, ddb_table_name, s3_bucket, s3_input, s3_output, media_input, instance, use_spot_instance],
+                        inputs=[aws_region, ddb_table_name, s3_bucket, s3_input, s3_output, media_input],
                         outputs=[gr.Textbox(label="Status", visible=False)]
                     )
 
@@ -4247,7 +4245,7 @@ def create_interface():
                     with gr.Column(scale=0, elem_classes=["logo-container"], elem_id="logo-column"):
                         # Load logos directly from Gradio components and apply theme-based visibility
                         light_logo = gr.Image(
-                            "../../assets/images/PoweredByAWS_horiz_RGB_1c_Gray850.png",
+                            os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "images", "PoweredByAWS_horiz_RGB_1c_Gray850.png")),
                             show_label=False,
                             container=False,
                             height=40,
@@ -4258,7 +4256,7 @@ def create_interface():
                             buttons=[]
                         )
                         dark_logo = gr.Image(
-                            "../../assets/images/PoweredByAWS_horiz_RGB_1c_White.png",
+                            os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "images", "PoweredByAWS_horiz_RGB_1c_White.png")),
                             show_label=False,
                             container=False,
                             height=40,
@@ -4328,9 +4326,10 @@ if __name__ == "__main__":
     # Add favorites directory and temp 3D cache to allowed_paths
     import tempfile
     favorites_dir = os.path.join(os.path.dirname(__file__), "favorites")
+    assets_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "images"))
     temp_3d_cache = os.path.join(tempfile.gettempdir(), "gradio_3d_cache")
     os.makedirs(temp_3d_cache, exist_ok=True)
-    iface.launch(server_name="0.0.0.0", server_port=7861, share=False, allowed_paths=[favorites_dir, temp_3d_cache],
+    iface.launch(server_name="0.0.0.0", server_port=7861, share=False, allowed_paths=[favorites_dir, temp_3d_cache, assets_dir],
                  js=playcanvas_js, theme=gr.themes.Ocean(), css=_css,
                  head="""<script src="https://code.playcanvas.com/playcanvas-2.17.0.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
