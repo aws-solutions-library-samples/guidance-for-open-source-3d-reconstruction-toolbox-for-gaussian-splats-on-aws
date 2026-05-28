@@ -88,14 +88,15 @@ import torch
 import shutil
 import zipfile
 import multiprocessing
+import subprocess
 from pathlib import Path
-from pipeline import Pipeline, Status, ComponentEnvironment, ComponentType
+from pipeline import Pipeline, Status, ComponentEnvironment, ComponentType, Component
 from utils import (
     read_camera_params_from_file, validate_input_media,
     load_config, obj_to_glb, count_up_to, untar_gz, process_images,
     select_largest_colmap_model, create_tarball, has_alpha_channel,
     cleanup_dataset, cleanup_cuda_memory, validate_and_resize_images,
-    extract_images_from_zip_temp,
+    extract_images_from_zip_temp, resize_images_to_common_dimensions,
     setup_local_debug, copy_to_local_output, print_container_version_info,
     update_dynamodb_metrics, update_component_phase_completion,
     parse_3dgrut_metrics_from_log, parse_gsplat_metrics_from_log,
@@ -176,22 +177,20 @@ if __name__ == "__main__":
                 s3_client = None
             
             # Parse S3 paths from environment variables
-            s3_input = os.environ.get('S3_INPUT', '')
-            s3_model = os.environ.get('MODEL_INPUT', '')
+            if s3_client:
+                s3_input = os.environ.get('S3_INPUT', '')
+                s3_model = os.environ.get('MODEL_INPUT', '')
 
-            if s3_client and s3_input.startswith('s3://'):
+            if s3_input.startswith('s3://'):
                 bucket, key = s3_input[5:].split('/', 1)
                 filename = os.path.basename(key)
                 # Download to both locations for compatibility
                 local_path_train = os.path.join('/tmp/input/train', filename)
                 local_path_data = os.path.join('/opt/ml/input/data/train', filename)
                 os.makedirs('/opt/ml/input/data/train', exist_ok=True)
-                print(f"Downloading s3://{bucket}/{key} to {local_path_train}")
                 s3_client.download_file(bucket, key, local_path_train)
-                print(f"Downloading s3://{bucket}/{key} to {local_path_data}")
                 s3_client.download_file(bucket, key, local_path_data)
-                print(f"Downloaded input file: {filename}")
-            
+
             if s3_client and s3_model.startswith('s3://'):
                 bucket, key = s3_model[5:].split('/', 1)
                 local_path = '/tmp/input/model/models.tar.gz'
@@ -215,6 +214,7 @@ if __name__ == "__main__":
         # Unpack the sam2 models
         models_start = time_module.time()
         print(f"Starting model extraction at: {time_module.strftime('%Y-%m-%d %H:%M:%S')}")
+        untar_gz(os.path.join(os.environ["MODEL_PATH"], "models.tar.gz"), os.environ["MODEL_PATH"])
 
         # Unpack all models from S3 - OPTIMIZED: Extract only needed files
         models_archive = os.path.join(os.environ["MODEL_PATH"], "models.tar.gz")
@@ -222,10 +222,7 @@ if __name__ == "__main__":
         # Check if models already extracted (for warm containers)
         u2net_dst = os.path.expanduser("~/.u2net")
         if not os.path.exists(u2net_dst):
-            if os.path.exists(models_archive):
-                untar_gz(models_archive, os.environ["MODEL_PATH"])
-            else:
-                print(f"models.tar.gz not found at {models_archive}, skipping extraction")
+            untar_gz(models_archive, os.environ["MODEL_PATH"])
         else:
             print(f"Models already extracted, skipping extraction")
         
@@ -326,7 +323,8 @@ if __name__ == "__main__":
     log.info(f"  Resume training: {config['RUN_RECON'] == 'false' and config['RUN_TRAIN'] == 'true'}")
     log.info(f"  Only export: {config['RUN_RECON'] == 'false' and config['RUN_TRAIN'] == 'false'}")
     os.environ['PYTORCH_CUDA_ALLOC_CONF']= 'expandable_segments:True'
-    # Set SQLite to use more EFS-friendly locking for COLMAP database
+    # SQLite on EFS: EFS does not support POSIX file locking which SQLite requires.
+    # Redirect both temp files and the COLMAP database itself to local storage.
     os.environ['SQLITE_TMPDIR'] = '/tmp'
 
     # Ensure we have an /images directory in dataset path for Colmap/Glomap
@@ -338,6 +336,11 @@ if __name__ == "__main__":
     # Ensure we have a /sparse directory in dataset path for NerfStudio
     sparse_path = os.path.join(config['DATASET_PATH'], "sparse")
     sparse_model_path = os.path.join(sparse_path, "0")
+
+    # Remove dangling symlink from prior 3DGRUT run before creating directory
+    if os.path.islink(sparse_path) and not os.path.exists(sparse_path):
+        os.remove(sparse_path)
+
     if not os.path.isdir(sparse_path):
         log.info(f"Creating '/sparse/0' directory in {config['DATASET_PATH']}")
         os.makedirs(sparse_model_path, exist_ok=True)
@@ -701,74 +704,47 @@ if __name__ == "__main__":
                         with open(config_yml_src, 'r') as f:
                             config_content = f.read()
 
+                        # Find latest checkpoint for load_checkpoint field
+                        ckpt_files = sorted([f for f in os.listdir(model_src_dir) if f.endswith('.ckpt')])
+                        if ckpt_files:
+                            latest_ckpt = os.path.join(model_src_dir, ckpt_files[-1])
+                            
+                            # Update load_checkpoint in config
+                            config_content = re.sub(
+                                r'load_checkpoint: null',
+                                f'load_checkpoint: !!python/object/apply:pathlib.PosixPath\n  - {latest_ckpt}',
+                                config_content
+                            )
+                        
                         # Update max_num_iterations using text replacement
                         config_content = re.sub(r'max_num_iterations: \d+', f'max_num_iterations: {REFINE_STEPS_SPLATFACTO}', config_content)
-
-                        # Save only at the final step to avoid the PyTorch optimizer
-                        # KeyError bug that fires when save_checkpoint coincides with
-                        # a densification step (refine_every=100 by default).
-                        config_content = re.sub(r'steps_per_save: \d+', f'steps_per_save: {REFINE_STEPS_SPLATFACTO}', config_content)
-
-                        # Stop densification before the end so the optimizer
-                        # param_mappings are stable when _after_train calls save_checkpoint.
-                        # Use max_num_iterations as stop_split_at to guarantee densification
-                        # is fully stopped before the final save.
-                        stop_split_at = REFINE_STEPS_SPLATFACTO
-                        if 'stop_split_at:' in config_content:
-                            config_content = re.sub(r'stop_split_at: \d+', f'stop_split_at: {stop_split_at}', config_content)
-                        else:
-                            config_content = re.sub(
-                                r'(max_num_iterations: \d+)',
-                                f'\\1\n    stop_split_at: {stop_split_at}',
-                                config_content
-                            )
-
+                        
                         # Update timestamp using text replacement
                         config_content = re.sub(r'timestamp: [^\n]+', f'timestamp: {RESUME_TRAIN_EXPERIMENT_NAME}', config_content)
-
+                        
+                        # Set load_scheduler to false
+                        config_content = re.sub(r'load_scheduler: \w+', 'load_scheduler: false', config_content)
+                        
                         # Update dataset path using text replacement
-                        config_content = re.sub(r'data: !!python/object/apply:pathlib\.PosixPath\s*\n\s*-[^\n]*(?:\n\s*-[^\n]*)*',
-                                              f'data: !!python/object/apply:pathlib.PosixPath\n      - {config["DATASET_PATH"]}',
+                        config_content = re.sub(r'data: !!python/object/apply:pathlib\.PosixPath\s*\n\s*-[^\n]*(?:\n\s*-[^\n]*)*', 
+                                              f'data: !!python/object/apply:pathlib.PosixPath\n      - {config["DATASET_PATH"]}', 
                                               config_content, flags=re.MULTILINE)
-
-                        # Set load_dir to the nerfstudio_models directory so the trainer
-                        # loads the checkpoint. load_dir is the field nerfstudio actually
-                        # reads; relative_model_dir only controls where new checkpoints save.
+                        
+                        # Update checkpoint path to point to dataset directory
                         checkpoint_path = os.path.join(config['DATASET_PATH'], 'nerfstudio_models')
-                        checkpoint_path_fwd = checkpoint_path.replace('\\', '/')
-                        if 'load_dir:' in config_content:
-                            config_content = re.sub(
-                                r'load_dir: .*',
-                                f'load_dir: !!python/object/apply:pathlib.PosixPath\n  - {checkpoint_path_fwd}',
-                                config_content
-                            )
-                        else:
-                            # Insert load_dir after load_config line (or before load_step)
-                            config_content = re.sub(
-                                r'(load_config: .*\n)',
-                                f'\\1load_dir: !!python/object/apply:pathlib.PosixPath\n  - {checkpoint_path_fwd}\n',
-                                config_content
-                            )
-
-                        # Also update relative_model_dir so new checkpoints save alongside old ones
-                        config_content = re.sub(r'outputs/unnamed/splatfacto/[^/]+/nerfstudio_models',
-                                              checkpoint_path_fwd,
+                        config_content = re.sub(r'outputs/unnamed/splatfacto/[^/]+/nerfstudio_models', 
+                                              checkpoint_path.replace('\\', '/'),
                                               config_content)
-
+                        
                         with open(config_yml_src, 'w') as f:
                             f.write(config_content)
-
-                        log.info(f"Config stop_split_at present: {'stop_split_at' in config_content}")
-                        log.info(f"Config max_num_iterations present: {'max_num_iterations' in config_content}")
-                        log.info(f"Config snippet around max_num_iterations: {config_content[max(0,config_content.find('max_num_iterations')-20):config_content.find('max_num_iterations')+80] if 'max_num_iterations' in config_content else 'NOT FOUND'}")
-
+                        
                         log.info(f"""
                                 Updated config.yml in dataset directory:
+                                load_checkpoint={latest_ckpt if ckpt_files else 'null'},
                                 max_num_iterations={REFINE_STEPS_SPLATFACTO},
-                                stop_split_at={stop_split_at} (=max_num_iterations, densification fully disabled for resume),
                                 timestamp={RESUME_TRAIN_EXPERIMENT_NAME},
-                                data_path={config['DATASET_PATH']},
-                                load_dir={checkpoint_path_fwd}
+                                data_path={config['DATASET_PATH']}
                                 """)
                     except Exception as e:
                         log.warning(f"Failed to update config.yml: {e}")
@@ -778,6 +754,18 @@ if __name__ == "__main__":
                     shutil.move(config_yml_src, model_config_path)
                     log.info(f"Moved config.yml from {config_yml_src} to {model_config_path}")
             
+            log.info("Dataset path after moving: ")
+            if os.path.exists(config['DATASET_PATH']):
+                log.info(", ".join(os.listdir(config['DATASET_PATH'])))
+                # Check for nested directories that might contain the model files
+                for item in os.listdir(config['DATASET_PATH']):
+                    item_path = os.path.join(config['DATASET_PATH'], item)
+                    if os.path.isdir(item_path):
+                        log.info(f"Contents of {item}/: {os.listdir(item_path)}")
+            else:
+                log.error(f"DATASET_PATH does not exist: {config['DATASET_PATH']}")
+            
+
             # Log checkpoint and config locations for debugging
             dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
             dataset_config_path = os.path.join(config['DATASET_PATH'], "config.yml")
@@ -1038,6 +1026,55 @@ if __name__ == "__main__":
     except Exception as e:
         error_message = f"Issue creating video to images component: {e}"
         pipeline.report_error(720, error_message)
+
+    ##################################
+    # PRE-PROCESS COMPONENT:
+        # Autogroup Images by Prefix
+    ##################################
+    try:
+        if config.get('AUTOGROUP_IMAGES', 'false') == 'true' and config['RUN_RECON'] == 'true':
+            log.info(f"Creating AutogroupImages component: target_name={config.get('AUTOGROUP_TARGET_NAME', '')}")
+            args = [
+                "-i", image_path,
+                "-t", config.get('AUTOGROUP_TARGET_NAME', '')
+            ]
+            pipeline.create_component(
+                name="AutogroupImages",
+                comp_type=ComponentType.PRE_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="pre_processing/autogroup_images.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue creating autogroup images component: {e}"
+        pipeline.report_error(723, error_message)
+
+    ##################################
+    # PRE-PROCESS COMPONENT:
+    # Autoscale Dataset Resolution/Count
+    ##################################
+    try:
+        if config.get('AUTOSCALE_DATASET', 'false') == 'true' and config['RUN_RECON'] == 'true':
+            autoscale_mode = config.get('AUTOSCALE_DATASET_MODE', 'resize').upper()
+            log.info(f"Creating AutoscaleDataset component: mode={autoscale_mode}")
+            args = [
+                "-i", image_path,
+                "-m", autoscale_mode
+            ]
+            pipeline.create_component(
+                name="AutoscaleDataset",
+                comp_type=ComponentType.PRE_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="pre_processing/autoscale_dataset.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue creating autoscale dataset component: {e}"
+        pipeline.report_error(722, error_message)
 
     ##################################
     # PRE-PROCESS COMPONENT:
@@ -1689,71 +1726,21 @@ if __name__ == "__main__":
                 elif config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
                     config['MODEL'] == "splatfacto-mcmc":
                     if config['RUN_RECON'] == "false" and not colmap_zip_found: # Resume training
+                       # For splatfacto resume training, config.yml was already updated during extraction
                         dataset_config_path = os.path.join(config['DATASET_PATH'], "config.yml")
-
-                        if not os.path.exists(dataset_config_path):
-                            log.error(f"Config file not found at: {dataset_config_path}")
-                            raise RuntimeError(f"Cannot resume training - config file missing")
-
-                        checkpoint_dir = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
-                        if not os.path.exists(checkpoint_dir):
-                            log.error(f"Checkpoint directory not found at: {checkpoint_dir}")
-                            raise RuntimeError(f"Cannot resume training - checkpoint directory missing")
-
-                        # Read the checkpoint step. nerfstudio sets _start_step = ckpt_step + 1
-                        # and loops range(_start_step, max_num_iterations). stop_split_at is an
-                        # absolute step number, so setting it to ckpt_step guarantees densification
-                        # never fires during the resume run (all steps > ckpt_step).
-                        _ckpt_step = 0
-                        try:
-                            _ckpt_files = sorted(
-                                f for f in os.listdir(checkpoint_dir) if f.endswith('.ckpt')
-                            )
-                            if _ckpt_files:
-                                _latest = os.path.join(checkpoint_dir, _ckpt_files[-1])
-                                _ckpt_data = torch.load(_latest, weights_only=False, map_location="cpu")
-                                _ckpt_step = int(_ckpt_data.get("step", 0))
-                                del _ckpt_data
-                                log.info(f"Checkpoint step: {_ckpt_step}")
-                        except Exception as _e:
-                            log.warning(f"Could not read checkpoint step: {_e}. Defaulting to 0.")
-
-                        _stop_split_at = _ckpt_step          # == _start_step - 1
-                        _total_steps = _ckpt_step + 1 + REFINE_STEPS_SPLATFACTO
-
-                        try:
-                            with open(dataset_config_path, 'r') as _f:
-                                _cfg = _f.read()
-                            _cfg = re.sub(r'max_num_iterations: \d+', f'max_num_iterations: {_total_steps}', _cfg)
-                            _cfg = re.sub(r'steps_per_save: \d+', f'steps_per_save: {_total_steps}', _cfg)
-                            if 'stop_split_at:' in _cfg:
-                                _cfg = re.sub(r'stop_split_at: \d+', f'stop_split_at: {_stop_split_at}', _cfg)
-                            else:
-                                _cfg = re.sub(
-                                    r'(  max_num_iterations: \d+)',
-                                    f'\\1\n    stop_split_at: {_stop_split_at}',
-                                    _cfg
-                                )
-                            _cfg = re.sub(r'timestamp: [^\n]+', f'timestamp: {RESUME_TRAIN_EXPERIMENT_NAME}', _cfg)
-                            with open(dataset_config_path, 'w') as _f:
-                                _f.write(_cfg)
-                            log.info(f"Resume: ckpt_step={_ckpt_step}, max_num_iterations={_total_steps}, "
-                                     f"stop_split_at={_stop_split_at}")
+                        dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
+                        has_config = os.path.exists(dataset_config_path)
+                        has_ckpt = os.path.exists(dataset_models_path) and any(
+                            f.endswith('.ckpt') for f in os.listdir(dataset_models_path)
+                        ) if os.path.exists(dataset_models_path) else False
+                        
+                        if has_config and has_ckpt:
                             resume_training_active = True
-                        except Exception as _e:
-                            log.warning(f"Failed to patch config.yml for resume: {_e}")
-
-                        args = [
-                            config['MODEL'],
-                            "--load-config", dataset_config_path,
-                            "--viewer.quit-on-train-completion=True",
-                        ]
-                        if config['LOG_VERBOSITY'] != "debug":
                             args.extend([
-                                "--logging.local-writer.enable", "False",
-                                "--logging.profiler", "none"
+                                "--load-config", dataset_config_path,
                             ])
-                        log.info(f"Resume training using --load-config: {dataset_config_path}")
+                            log.info(f"Resume training using config: {dataset_config_path}")
+                            log.info(f"Resume training with {REFINE_STEPS_SPLATFACTO} iterations")
                     else:
                         # Initial training (either RUN_RECON=true or colmap_zip_found)
                         isp_mode = config.get('THREED_ISP', 'none').lower()
@@ -2977,7 +2964,9 @@ if __name__ == "__main__":
                                 log.info(f"Copied {len(os.listdir(image_path))} files from folder to images directory")
                             else:
                                 log.info(f"Using {len(os.listdir(image_path))} files from folder (already in place)")
-                            validate_and_resize_images(image_path, config, log, pipeline)
+                            if config.get('AUTOSCALE_DATASET', 'false') != 'true':
+                                validate_and_resize_images(image_path, config, log, pipeline)
+                                resize_images_to_common_dimensions(image_path)
                         else: # Archive of images or archive with a video
                             # unzip archive into temp directory
                             temp_path = os.path.join(config['DATASET_PATH'], 'temp')
@@ -3036,7 +3025,9 @@ if __name__ == "__main__":
                                 not colmap_zip_found:
                             # Only process images if no video was found and not resuming/skipping recon
                             if not video_found:
-                                validate_and_resize_images(image_path, config, log, pipeline)
+                                if config.get('AUTOSCALE_DATASET', 'false') != 'true':
+                                    validate_and_resize_images(image_path, config, log, pipeline)
+                                    resize_images_to_common_dimensions(image_path)
                             else:
                                 # Video found - update component args with correct video path and run
                                 log.info("Video found in zip - running VideoToImages component")
@@ -3124,6 +3115,165 @@ if __name__ == "__main__":
                             log.warning(f"PRESERVE_SCENE_SCALE focal heuristic failed, "
                                         f"falling back to COLMAP defaults: {_e}")
                     pipeline.run_component(i)
+                    # AUTO_MAPPER: override mapper components based on actual image count
+                    if config.get('AUTO_MAPPER', 'false') == 'true' and config['RUN_RECON'] == 'true':
+                        num_imgs = len([f for f in os.listdir(image_path)
+                                        if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+                        if num_imgs < 600:
+                            target_mapper = 'glomap'
+                        elif num_imgs <= 5000:
+                            target_mapper = 'colmap'
+                        else:
+                            target_mapper = 'hloc'
+                        log.info(f"AUTO_MAPPER: {num_imgs} images -> selecting '{target_mapper}' mapper")
+                        if target_mapper != config['RECON_SOFTWARE_NAME']:
+                            config['RECON_SOFTWARE_NAME'] = target_mapper
+                            # Remove existing mapper/viewgraph components
+                            pipeline.components = [
+                                c for c in pipeline.components
+                                if 'Mapper' not in c.name and 'ViewGraph' not in c.name
+                                    and c.name not in ('HlocSfM-Tri')
+                            ]
+                            pipeline.config.num_components = len(pipeline.components)
+                            # Insert new mapper components after the last matcher component
+                            insert_idx = max(
+                                (j for j, c in enumerate(pipeline.components)
+                                 if 'Matcher' in c.name or 'Undistorter' in c.name),
+                                default=i
+                            ) + 1
+                            new_components = []
+                            if target_mapper == 'glomap':
+                                new_components.append(Component(
+                                    name='GlomapSfM-ViewGraph',
+                                    comp_type=ComponentType.RECONSTRUCTION,
+                                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                                    command='colmap',
+                                    args=['view_graph_calibrator', '--database_path', colmap_db_path],
+                                    cwd=current_dir_path, requires_gpu=False
+                                ))
+                                new_components.append(Component(
+                                    name='GlomapSfM-Mapper',
+                                    comp_type=ComponentType.RECONSTRUCTION,
+                                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                                    command='colmap',
+                                    args=['global_mapper', '--database_path', colmap_db_path,
+                                          '--image_path', image_path, '--output_path', sparse_path],
+                                    cwd=current_dir_path, requires_gpu=False
+                                ))
+                            elif target_mapper == 'colmap':
+                                mapper_args = [
+                                    'mapper', '--database_path', colmap_db_path,
+                                    '--image_path', image_path, '--output_path', sparse_path,
+                                    '--Mapper.multiple_models', '0'
+                                ]
+                                if config['LOG_VERBOSITY'] == 'error':
+                                    mapper_args.extend(['--log_level', '1'])
+                                if int(pipeline.config.num_gpus) > 0:
+                                    mapper_args.extend(['--Mapper.ba_use_gpu', '1'])
+                                new_components.append(Component(
+                                    name='ColmapSfM-Mapper',
+                                    comp_type=ComponentType.RECONSTRUCTION,
+                                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                                    command='colmap',
+                                    args=mapper_args,
+                                    cwd=current_dir_path, requires_gpu=False
+                                ))
+                            else:  # hloc
+                                new_components.append(Component(
+                                    name='HlocSfM-Mapper',
+                                    comp_type=ComponentType.RECONSTRUCTION,
+                                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                                    command='colmap',
+                                    args=['hierarchical_mapper', '--database_path', colmap_db_path,
+                                          '--image_path', image_path, '--output_path', sparse_path],
+                                    cwd=current_dir_path, requires_gpu=False
+                                ))
+                                new_components.append(Component(
+                                    name='HlocSfM-Tri',
+                                    comp_type=ComponentType.RECONSTRUCTION,
+                                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                                    command='colmap',
+                                    args=['point_triangulator', '--database_path', colmap_db_path,
+                                          '--image_path', image_path, '--input_path', sparse_model_path,
+                                          '--output_path', sparse_model_path, '--refine_intrinsics', '1',
+                                          '--Mapper.multiple_models', '0'],
+                                    cwd=current_dir_path, requires_gpu=False
+                                ))
+                            for idx_offset, comp in enumerate(new_components):
+                                pipeline.components.insert(insert_idx + idx_offset, comp)
+                            pipeline.config.num_components = len(pipeline.components)
+                            log.info(f"AUTO_MAPPER: replaced mapper with {[c.name for c in new_components]}")
+                    # AUTO_MATCHER: analyze image overlap to select best feature matcher
+                    if config.get('AUTO_MATCHER', 'false') == 'true' and config['RUN_RECON'] == 'true':
+                        has_pose_priors = config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'true' or \
+                                         config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true'
+                        matcher_cmd = [
+                            sys.executable, os.path.join(current_dir_path, 'pre_processing', 'auto_matcher.py'),
+                            '-i', image_path
+                        ]
+                        if has_pose_priors:
+                            matcher_cmd.append('--pose-priors')
+                        try:
+                            matcher_result = subprocess.run(
+                                matcher_cmd, capture_output=True, text=True, check=True,
+                                cwd=current_dir_path
+                            )
+                            log.info(matcher_result.stdout.strip())
+                            # Parse MATCHER= line from output
+                            target_matcher = None
+                            auto_matcher_overlap = None
+                            for line in matcher_result.stdout.strip().split('\n'):
+                                if line.startswith('MATCHER='):
+                                    target_matcher = line.split('=', 1)[1].strip()
+                                elif 'Median consecutive overlap:' in line:
+                                    try:
+                                        auto_matcher_overlap = float(line.split(':')[-1].strip())
+                                    except ValueError:
+                                        pass
+                            if target_matcher and target_matcher != config['MATCHING_METHOD']:
+                                log.info(f"AUTO_MATCHER: overriding '{config['MATCHING_METHOD']}' -> '{target_matcher}'")
+                                config['MATCHING_METHOD'] = target_matcher
+                                # Find and replace the existing matcher component
+                                for j, c in enumerate(pipeline.components):
+                                    if c.name == 'ColmapSfM-Feature-Matcher':
+                                        if target_matcher == 'sequential':
+                                            c.args = [
+                                                'sequential_matcher',
+                                                '--database_path', colmap_db_path,
+                                                '--SequentialMatching.quadratic_overlap', '1',
+                                                '--SequentialMatching.overlap', '10',
+                                                '--SequentialMatching.loop_detection', '1',
+                                                '--SequentialMatching.loop_detection_period', config['MAX_NUM_IMAGES'],
+                                                '--SequentialMatching.loop_detection_num_images', config['MAX_NUM_IMAGES'],
+                                                '--SequentialMatching.vocab_tree_path', colmap_vocab_path
+                                            ]
+                                        elif target_matcher == 'spatial':
+                                            c.args = [
+                                                'spatial_matcher',
+                                                '--database_path', colmap_db_path,
+                                                '--SpatialMatching.ignore_z', '0'
+                                            ]
+                                        elif target_matcher == 'vocab':
+                                            c.args = [
+                                                'vocab_tree_matcher',
+                                                '--database_path', colmap_db_path,
+                                                '--VocabTreeMatching.num_images', str(math.ceil(float(config['MAX_NUM_IMAGES']) / 3)),
+                                                '--VocabTreeMatching.vocab_tree_path', colmap_vocab_path
+                                            ]
+                                        else:  # exhaustive
+                                            c.args = [
+                                                'exhaustive_matcher',
+                                                '--database_path', colmap_db_path,
+                                                '--ExhaustiveMatching.block_size', config['MAX_NUM_IMAGES']
+                                            ]
+                                        if config['LOG_VERBOSITY'] == 'error':
+                                            c.args.extend(['--log_level', '1'])
+                                        log.info(f"AUTO_MATCHER: updated matcher component to '{target_matcher}'")
+                                        break
+                            elif target_matcher:
+                                log.info(f"AUTO_MATCHER: keeping current matcher '{config['MATCHING_METHOD']}'")
+                        except Exception as e:
+                            log.warning(f"AUTO_MATCHER: analysis failed ({e}), keeping '{config['MATCHING_METHOD']}'")
                 case "ColmapSfM-Image-Undistorter":
                     pipeline.run_component(i)
                     # For 3DGRUT with pre-existing COLMAP: move undistorted output into place
@@ -3203,18 +3353,9 @@ if __name__ == "__main__":
                                 else:
                                     component.args.insert(index, "cpu")
                                 component.args.insert(index, "--pipeline.datamanager.cache-images")
-                            # Cap Gaussian count for splatfacto-mcmc on large datasets to prevent OOM
-                            # MCMC grows to max_gs_num (default 1M) which is too large for 22GB GPU
-                            # with disk cache + bilagrid active
-                            # Must be inserted before the colmap subcommand
-                            if config['MODEL'] == "splatfacto-mcmc":
-                                if "colmap" in component.args:
-                                    colmap_idx = component.args.index("colmap")
-                                    component.args.insert(colmap_idx, "500000")
-                                    component.args.insert(colmap_idx, "--pipeline.model.max-gs-num")
-                                else:
-                                    component.args.extend(["--pipeline.model.max-gs-num", "500000"])
-                                log.info(f"Capping splatfacto-mcmc max_gs_num=500000 for large dataset ({num_images} images)")
+                                # Reduce dataloader workers to avoid IndexError with disk caching
+                                component.args.insert(index, "0")
+                                component.args.insert(index, "--pipeline.datamanager.dataloader-num-workers")
                     if ENABLE_MULTI_GPU == "false":
                         if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and not ENABLE_DEPTH_LOSS:
                             if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
@@ -3581,6 +3722,10 @@ if __name__ == "__main__":
                         log.info(f"Copied rotated orig.ply to spz.ply for gsplat SPZ")
                 case _: # Default case, run Component
                     pipeline.run_component(i)
+                    # After autoscale runs, normalize image dimensions
+                    if component.name == "AutoscaleDataset":
+                        resize_images_to_common_dimensions(image_path)
+
         pipeline.session.status = Status.STOP
         log.info(f"Pipeline status changed to {pipeline.session.status}")
         end_time = int(time.time())
@@ -3620,7 +3765,23 @@ if __name__ == "__main__":
         
         log.info(f"Total Pipeline Time: {total_time}s")
         log.info(f"Phase durations: {phase_durations}")
-        
+        matcher_info = config['MATCHING_METHOD']
+        if 'auto_matcher_overlap' in dir() and auto_matcher_overlap is not None:
+            matcher_info += f" (overlap: {auto_matcher_overlap:.1%})"
+        log.info(f"Mapper: {config['RECON_SOFTWARE_NAME']}  |  Matcher: {matcher_info}  |  Model: {config['MODEL']}")
+        # Dataset summary: image count, resolution, autogroup prefix
+        try:
+            summary_imgs = [f for f in os.listdir(image_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+            summary_res = 'N/A'
+            if summary_imgs:
+                from PIL import Image as _PILImg
+                _s = _PILImg.open(os.path.join(image_path, summary_imgs[0]))
+                summary_res = f"{_s.width}x{_s.height}"
+            summary_group = config.get('AUTOGROUP_TARGET_NAME', '') if config.get('AUTOGROUP_IMAGES', 'false') == 'true' else 'off'
+            summary_autoscale = config.get('AUTOSCALE_DATASET_MODE', 'resize').upper() if config.get('AUTOSCALE_DATASET', 'false') == 'true' else 'off'
+            log.info(f"Dataset: {len(summary_imgs)} images @ {summary_res}  |  Autogroup: {summary_group}  |  Autoscale: {summary_autoscale}")
+        except Exception:
+            pass
         # Update DynamoDB with final timing information only if table is configured
         if ddb_table_name:
             log.info(f"Updating DynamoDB metrics for UUID {config['UUID']}")

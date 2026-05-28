@@ -29,6 +29,12 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             "inputKey": "venetian_010d5342-1876-4012-8868-c548b020b91c.mp4",
             "outputPrefix": "workflow-output"
         },
+        "imageProcessing": {
+            "autoScaleDataset": false,
+            "autoScaleDatasetMode": "RESIZE",
+            "autoGroupImages": false,
+            "autoGroupTargetName": ""
+        },
         "videoProcessing": {
             "maxNumImages": "800",
             "videoStartTime": 0,
@@ -51,7 +57,9 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             "enableFlHeuristic": false,
             "flHeuristicValue": "1.1",
             "enableFlMetric": false,
-            "flMetricValue": "24"
+            "flMetricValue": "24",
+            "autoMatcher": false,
+            "autoMapper": false
         },
         "training": {
             "enable": true,
@@ -129,15 +137,32 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
     - **Filter blurry images:** (boolean), whether to remove blurry images from the dataset. If using a `.zip` file with pose priors, this parameter will be ignored.
     - **Video start time:** (integer), the time in seconds to start extracting frames from the video.
     - **Video stop time:** (integer), the time in seconds to stop extracting frames from the video.
+- **Image processing:**
+    - **Autoscale dataset:** (boolean), when enabled, automatically resizes or drops images so the dataset fits within the GPU's VRAM budget. Images are capped at 4K resolution (3840px long edge) regardless of VRAM. Two modes are available:
+        - **RESIZE** (default): downscales all images to a resolution that fits in VRAM while maintaining aspect ratio (minimum 1080p)
+        - **DROPOUT**: uniformly drops images to reduce count while preserving the original resolution
+    - **Autogroup images:** (boolean), when enabled, filters images by a target filename prefix (e.g. "dji") to select only matching images from a mixed dataset. Useful when a folder contains images from multiple cameras or capture sessions.
+        - **Autogroup target name:** (string), the filename prefix to filter by (e.g. "dji" keeps only files starting with "DJI")
 - **Reconstruction (SfM):**
     - **Enable:** (boolean), whether to enable SfM or not. Future plans will enable input of SfM output
     - **Software name:** (string), colmap, glomap, or hloc. Software to use for the triangulation of the mapper
+    - **Auto mapper:** (boolean), when enabled, overrides the **Software name** at runtime based on the actual image count after pre-processing:
+        - < 600 images → **glomap** (global mapper — fast for small sets)
+        - 600–5000 images → **colmap** (incremental mapper — robust for medium sets)
+        - \> 5000 images → **hloc** (hierarchical mapper — scales to large sets)
     - **Enable enhanced feature extraction:** (boolean), whether to enable enhanced feature extraction which uses `estimate_affine_shape` to enhance the feature matching
     - **Matching method:**
         - sequential (best for videos or images that share overlapping features)
         - spatial (best to use for pose priors or GPS to take spatial orientation into account)
         - vocab (best for large datasets that are not sequentially bound)
         - exhaustive (only use this method if dataset struggles to converge with other methods)
+    - **Auto matcher:** (boolean), when enabled, overrides the **Matching method** at runtime by analyzing image overlap using ORB feature matching on sampled pairs. The analysis uses multi-stride sampling (stride 1, 2, 3) with median overlap and a "sequential signal" metric (fraction of consecutive pairs with meaningful overlap) to tolerate scattered non-overlapping frames. Decision logic (evaluated in order, first match wins):
+            1. GPS EXIF coordinates detected or pose priors enabled → **spatial** — leverages known camera positions for efficient neighbor lookup
+            2. ≥70% of consecutive pairs overlap AND median overlap ≥ 0.20 → **sequential** — images are in capture order with strong frame-to-frame continuity (e.g. video frames, walk-around captures)
+            3. \> 1000 images with median overlap ≥ 0.10 → **vocab** — exhaustive matching on large datasets is O(n²) which becomes prohibitively slow (e.g. 4000 images = ~16M pairs). Vocab tree matching uses a visual vocabulary to find likely matches in roughly O(n·log n), dramatically reducing matching time while still finding cross-scene matches that sequential would miss. This is the typical result for large drone datasets where images aren't strictly sequential after pre-processing (autogroup, autoscale)
+            4. Median overlap < 0.10 → **exhaustive** — low overlap means the scene has few shared features between neighbors, so brute-force comparison of all pairs gives the best chance of finding matches
+            5. \> 1000 images (any overlap) → **vocab** — catches large datasets that passed the sequential signal check but didn't meet the median threshold
+            6. Fallback → **exhaustive** — most reliable method for small-to-medium unordered datasets where the O(n²) cost is acceptable
     - **Enable focal length heuristic:** (boolean), whether to enable focal length estimate to help normalize the scene scale if focal length is unknown. This uses the formula `focal_length = fl_heur_val*max(x_res, y_res)`
     - **Focal length heuristic value:** (string), coefficient used in focal length heuristic (default: 1.2).
     - **Enable focal length metric:** (boolean), whether to use a known metric focal length in pixels directly instead of estimating it. Takes priority over the heuristic if both are enabled.
@@ -146,7 +171,7 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
         > *Note: The primary use case for `enableDepthLoss` is when providing a LiDAR-derived point cloud via `usePosePriorColmapModelFiles`. The LiDAR point cloud is projected as sparse depth supervision during training, anchoring Gaussians to accurate metric geometry. It also works with standard colmap reconstructions as a weaker depth signal. Depth image files are not required.*
 
         > ***Note:** All image files must be sequentially named and padded (e.g. 001.png, 002.png, etc.)*
-
+    - **Pose Priors**
         - **Use pose prior Colmap model files:** see [Colmap model text files](https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses){:target="_blank"}
             - The file schema for providing the already created Colmap model files looks like this
                 <details>

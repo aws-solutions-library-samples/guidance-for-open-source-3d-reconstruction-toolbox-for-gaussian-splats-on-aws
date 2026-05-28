@@ -222,6 +222,79 @@ def resize_to_4k(image_path, spherical_camera=False):
     # Return original image if no resize needed
     return image
 
+def resize_images_to_common_dimensions(image_dir):
+    """
+    Resize all images in a directory to the smallest common dimensions
+    found among the images. Images with a different aspect ratio are
+    center-cropped to the target aspect ratio first, then scaled to
+    the exact target dimensions. This ensures every image ends up at
+    identical width x height without distortion.
+
+    Args:
+        image_dir (str): Path to directory containing images
+
+    Returns:
+        tuple: (target_width, target_height) used, or None if no images found
+    """
+    extensions = ('.png', '.jpg', '.jpeg')
+    image_files = [f for f in os.listdir(image_dir)
+                   if f.lower().endswith(extensions) and os.path.isfile(os.path.join(image_dir, f))]
+
+    if not image_files:
+        print(f"No images found in {image_dir}")
+        return None
+
+    # Collect all unique dimensions
+    dimensions = set()
+    for f in image_files:
+        img = cv2.imread(os.path.join(image_dir, f))
+        if img is not None:
+            h, w = img.shape[:2]
+            dimensions.add((w, h))
+
+    if not dimensions:
+        print("Could not read any images")
+        return None
+
+    if len(dimensions) == 1:
+        w, h = dimensions.pop()
+        print(f"All {len(image_files)} images already have uniform dimensions: {w}x{h}")
+        return (w, h)
+
+    target_w = min(d[0] for d in dimensions)
+    target_h = min(d[1] for d in dimensions)
+    print(f"Found {len(dimensions)} unique sizes across {len(image_files)} images. "
+          f"Target dimensions: {target_w}x{target_h}")
+
+    resized_count = 0
+    for f in image_files:
+        filepath = os.path.join(image_dir, f)
+        img = cv2.imread(filepath)
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        if w == target_w and h == target_h:
+            continue
+        # Center-crop to target aspect ratio, then resize
+        target_ratio = target_w / target_h
+        img_ratio = w / h
+        if img_ratio > target_ratio:
+            # Image is wider — crop width
+            crop_w = int(h * target_ratio)
+            x_start = (w - crop_w) // 2
+            img = img[:, x_start:x_start + crop_w]
+        elif img_ratio < target_ratio:
+            # Image is taller — crop height
+            crop_h = int(w / target_ratio)
+            y_start = (h - crop_h) // 2
+            img = img[y_start:y_start + crop_h, :]
+        img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(filepath, img)
+        resized_count += 1
+
+    print(f"Resized {resized_count}/{len(image_files)} images to {target_w}x{target_h}")
+    return (target_w, target_h)
+
 def read_camera_params_from_file(cameras_txt_path):
     """Read camera parameters from cameras.txt file"""
     try:
@@ -837,8 +910,12 @@ def validate_and_resize_images(image_path, config, log, pipeline):
 # Clean up GPU memory
 def cleanup_cuda_memory():
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        except Exception:
+            # If synchronize fails, just do cache cleanup
+            torch.cuda.empty_cache()
         import gc
         gc.collect()
 

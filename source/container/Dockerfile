@@ -251,12 +251,16 @@ RUN git clone https://github.com/nerfstudio-project/gsplat.git --recursive \
     && git reset --hard ${GSPLAT_HASH} \
     && sed -i '/os.environ\["MASTER_ADDR"\] = "localhost"/s/^/# /' gsplat/distributed.py \
     && sed -i '/os.environ\["MASTER_PORT"\] = str(_find_free_port())/s/^/# /' gsplat/distributed.py \
-    && sed -i 's/point_indices = self\.parser\.point_indices\[image_name\]/point_indices = self.parser.point_indices.get(image_name, np.array([], dtype=np.int32))/' examples/datasets/colmap.py \
+#    && sed -i 's/point_indices = self\.parser\.point_indices\[image_name\]/point_indices = self.parser.point_indices.get(image_name, np.array([], dtype=np.int32))/' examples/datasets/colmap.py \
     && python setup.py build_ext --inplace \
     && python setup.py develop \
     && pip install --no-build-isolation -r examples/requirements.txt \
     && pip install --force-reinstall imageio tqdm \
     && cd ${CODE_PATH}
+
+#COPY ./src/pipeline/training/patch_gsplat.py ${CODE_PATH}/
+#RUN python3 ${CODE_PATH}/patch_gsplat.py ${CODE_PATH} \
+#    && rm ${CODE_PATH}/patch_gsplat.py
 
 # Install Splatfacto-w with gsplat==1.4.0 to separate location
 # Install with dependencies to get complete environment
@@ -266,11 +270,13 @@ RUN mkdir -p /opt/splatfacto_w_env \
     && pip install --target=/opt/splatfacto_w_env --upgrade git+https://github.com/KevinXu02/splatfacto-w
 
 # Copy and make wrapper scripts executable
+COPY src/pipeline/training/run_splatfacto_w_wrapper.sh /opt/ml/code/training/run_splatfacto_w_wrapper.sh
 COPY src/pipeline/training/run_splatfacto_w_wrapper.py /opt/ml/code/training/run_splatfacto_w_wrapper.py
 COPY src/pipeline/training/run_splatfacto_w_export.py /opt/ml/code/training/run_splatfacto_w_export.py
 COPY src/pipeline/training/run_splatfacto_w_eval.py /opt/ml/code/training/run_splatfacto_w_eval.py
 COPY src/pipeline/training/run_splatfacto_w_render.py /opt/ml/code/training/run_splatfacto_w_render.py
-RUN chmod +x /opt/ml/code/training/run_splatfacto_w_wrapper.py \
+RUN chmod +x /opt/ml/code/training/run_splatfacto_w_wrapper.sh \
+    /opt/ml/code/training/run_splatfacto_w_wrapper.py \
     /opt/ml/code/training/run_splatfacto_w_export.py \
     /opt/ml/code/training/run_splatfacto_w_eval.py \
     /opt/ml/code/training/run_splatfacto_w_render.py
@@ -281,21 +287,21 @@ RUN mkdir -p /opt/gsplat_pycolmap \
 
 # Build OpenEXR + OpenImageIO from source (system libopenimageio-dev is built against old OpenEXR
 # and its cmake config pins an incompatible version requirement for COLMAP 4.x)
-RUN wget https://github.com/AcademySoftwareFoundation/openexr/archive/refs/tags/v3.1.5.tar.gz \
-    && tar -xzf v3.1.5.tar.gz && rm v3.1.5.tar.gz \
-    && cmake -S ${CODE_PATH}/openexr-3.1.5 -B ${CODE_PATH}/openexr-3.1.5/build -GNinja \
+RUN wget https://github.com/AcademySoftwareFoundation/openexr/archive/refs/tags/v${OPENEXR_VERSION}.tar.gz \
+    && tar -xzf v${OPENEXR_VERSION}.tar.gz && rm v${OPENEXR_VERSION}.tar.gz \
+    && cmake -S ${CODE_PATH}/openexr-${OPENEXR_VERSION} -B ${CODE_PATH}/openexr-${OPENEXR_VERSION}/build -GNinja \
        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
        -DBUILD_TESTING=OFF -DOPENEXR_BUILD_TOOLS=OFF \
-    && ninja -C ${CODE_PATH}/openexr-3.1.5/build -j${NINJA_JOBS} install \
-    && rm -rf ${CODE_PATH}/openexr-3.1.5 && ldconfig
-RUN wget https://github.com/AcademySoftwareFoundation/OpenImageIO/archive/refs/tags/v2.5.13.0.tar.gz \
-    && tar -xzf v2.5.13.0.tar.gz && rm v2.5.13.0.tar.gz \
-    && cmake -S ${CODE_PATH}/OpenImageIO-2.5.13.0 -B ${CODE_PATH}/OpenImageIO-2.5.13.0/build -GNinja \
+    && ninja -C ${CODE_PATH}/openexr-${OPENEXR_VERSION}/build -j${NINJA_JOBS} install \
+    && rm -rf ${CODE_PATH}/openexr-${OPENEXR_VERSION} && ldconfig
+RUN wget https://github.com/AcademySoftwareFoundation/OpenImageIO/archive/refs/tags/v${OPENIMAGEIO_VERSION}.tar.gz \
+    && tar -xzf v${OPENIMAGEIO_VERSION}.tar.gz && rm v${OPENIMAGEIO_VERSION}.tar.gz \
+    && cmake -S ${CODE_PATH}/OpenImageIO-${OPENIMAGEIO_VERSION} -B ${CODE_PATH}/OpenImageIO-${OPENIMAGEIO_VERSION}/build -GNinja \
        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
        -DCMAKE_PREFIX_PATH=/usr/local \
        -DOIIO_BUILD_TESTS=OFF -DOIIO_BUILD_TOOLS=OFF -DUSE_PYTHON=OFF -DINSTALL_DOCS=OFF \
-    && ninja -C ${CODE_PATH}/OpenImageIO-2.5.13.0/build -j${NINJA_JOBS} install \
-    && rm -rf ${CODE_PATH}/OpenImageIO-2.5.13.0 && ldconfig \
+    && ninja -C ${CODE_PATH}/OpenImageIO-${OPENIMAGEIO_VERSION}/build -j${NINJA_JOBS} install \
+    && rm -rf ${CODE_PATH}/OpenImageIO-${OPENIMAGEIO_VERSION} && ldconfig \
     && find /usr/local/lib/cmake -name 'OpenImageIOConfig.cmake'
 
 # Install COLMAP from source
@@ -317,7 +323,7 @@ RUN wget "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -O "awscliv2
     && unzip awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip
 
 # Install utilities and ensure numpy==1.26.4 for compatibility
-RUN pip install --no-cache-dir scipy 'numpy==1.26.4' 'Pillow>=9.4.0,<10.0.0' 'timm>=1.0.0' einops omegaconf fvcore iopath rembg rich natsort trimesh onnxruntime onnxruntime-gpu boto3
+RUN pip install --no-cache-dir scipy 'numpy==1.26.4' Pillow>=10.3.0 'timm>=1.0.0' einops omegaconf fvcore iopath rembg rich natsort trimesh onnxruntime onnxruntime-gpu boto3
 
 # Install sharp-frame-extractor separately after scipy is available
 RUN pip install --no-cache-dir sharp-frame-extractor
@@ -422,7 +428,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 # Install PlayCanvas splat-transform globally for SOG capability
 RUN npm install -g @playcanvas/splat-transform@${SPLAT_TRANSFORM_VERSION}
 
-# Install Map-Anything v1.1 with pycolmap 3.10.0 in separate location
+# Install Map-Anything with pycolmap 3.10.0 in separate location
 RUN mkdir -p /opt/mapanything_pycolmap \
     && pip install --target=/opt/mapanything_pycolmap --no-deps pycolmap==3.10.0 \
     && wget https://github.com/facebookresearch/map-anything/archive/refs/tags/v${MAPANYTHING_VERSION}.tar.gz \
@@ -509,6 +515,9 @@ COPY ./src/pipeline/pre_processing/segmentation/remove_background_sam2.py       
 COPY ./src/pipeline/pre_processing/video/simple_video_to_images.py                  ${CODE_PATH}/pre_processing/video
 COPY ./src/pipeline/pre_processing/video/sharp_video_to_images.py                   ${CODE_PATH}/pre_processing/video
 COPY ./src/pipeline/pre_processing/video/rotate_portrait_images.py                  ${CODE_PATH}/pre_processing/video
+COPY ./src/pipeline/pre_processing/autoscale_dataset.py                             ${CODE_PATH}/pre_processing
+COPY ./src/pipeline/pre_processing/autogroup_images.py                              ${CODE_PATH}/pre_processing
+COPY ./src/pipeline/pre_processing/auto_matcher.py                                  ${CODE_PATH}/pre_processing
 COPY ./src/pipeline/post_processing/rotate_splat.py                                 ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/mirror_splat.py                                 ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/gsplat_pt_to_ply.py                             ${CODE_PATH}/post_processing

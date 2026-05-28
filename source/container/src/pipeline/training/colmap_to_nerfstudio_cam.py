@@ -72,11 +72,14 @@ if os.path.isdir(path):
                 with open(transforms_path, "r") as f:
                     data = json.load(f)
                 for frame in data.get("frames", []):
-                    img_name = os.path.basename(frame["file_path"])
+                    img_name = frame["file_path"]
+                    # Strip leading "images/" prefix if present — mask path mirrors image subpath
+                    if img_name.startswith("images/"):
+                        img_name = img_name[len("images/"):]
+                    elif img_name.startswith("./images/"):
+                        img_name = img_name[len("./images/"):]
                     mask_file = os.path.join(masks_dir, img_name)
                     if os.path.isfile(mask_file):
-                        # Masks are renamed to NerfStudio convention before transforms.json is created
-                        # so mask filename matches image filename exactly: masks/scan_001_view02.png
                         frame["mask_path"] = f"masks/{img_name}"
                 with open(transforms_path, "w") as f:
                     json.dump(data, f, indent=4)
