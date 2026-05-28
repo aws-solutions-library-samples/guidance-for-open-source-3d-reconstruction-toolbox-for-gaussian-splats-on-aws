@@ -270,13 +270,11 @@ RUN mkdir -p /opt/splatfacto_w_env \
     && pip install --target=/opt/splatfacto_w_env --upgrade git+https://github.com/KevinXu02/splatfacto-w
 
 # Copy and make wrapper scripts executable
-COPY src/pipeline/training/run_splatfacto_w_wrapper.sh /opt/ml/code/training/run_splatfacto_w_wrapper.sh
 COPY src/pipeline/training/run_splatfacto_w_wrapper.py /opt/ml/code/training/run_splatfacto_w_wrapper.py
 COPY src/pipeline/training/run_splatfacto_w_export.py /opt/ml/code/training/run_splatfacto_w_export.py
 COPY src/pipeline/training/run_splatfacto_w_eval.py /opt/ml/code/training/run_splatfacto_w_eval.py
 COPY src/pipeline/training/run_splatfacto_w_render.py /opt/ml/code/training/run_splatfacto_w_render.py
-RUN chmod +x /opt/ml/code/training/run_splatfacto_w_wrapper.sh \
-    /opt/ml/code/training/run_splatfacto_w_wrapper.py \
+RUN chmod +x /opt/ml/code/training/run_splatfacto_w_wrapper.py \
     /opt/ml/code/training/run_splatfacto_w_export.py \
     /opt/ml/code/training/run_splatfacto_w_eval.py \
     /opt/ml/code/training/run_splatfacto_w_render.py
