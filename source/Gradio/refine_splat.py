@@ -154,7 +154,15 @@ def refine_splat(selected_data, instance_type, use_spot_instance, crop_bounds=No
                 "enableEnhancedFeatureExtraction": str(selected_job.get('enableEnhancedFeatureExtraction', shared_state.enhanced_feature)) == "True",
                 "matchingMethod": str(selected_job.get('matchingMethod', shared_state.matching_method)),
                 "enableFlHeuristic": str(selected_job.get('reconstruction', {}).get('enableFlHeuristic', selected_job.get('enableFlHeuristic', 'false'))).lower() == 'true',
-                "flHeuristicValue": str(selected_job.get('reconstruction', {}).get('flHeuristicValue', selected_job.get('flHeuristicValue', '1.1')))
+                "flHeuristicValue": str(selected_job.get('reconstruction', {}).get('flHeuristicValue', selected_job.get('flHeuristicValue', '1.1'))),
+                "autoMatcher": str(selected_job.get('reconstruction', {}).get('autoMatcher', selected_job.get('autoMatcher', 'false'))).lower() == 'true',
+                "autoMapper": str(selected_job.get('reconstruction', {}).get('autoMapper', selected_job.get('autoMapper', 'false'))).lower() == 'true'
+            },
+            "imageProcessing": {
+                "autoScaleDataset": str(selected_job.get('imageProcessing', {}).get('autoScaleDataset', selected_job.get('autoScaleDataset', 'false'))).lower() == 'true',
+                "autoScaleDatasetMode": str(selected_job.get('imageProcessing', {}).get('autoScaleDatasetMode', selected_job.get('autoScaleDatasetMode', 'RESIZE'))),
+                "autoGroupImages": str(selected_job.get('imageProcessing', {}).get('autoGroupImages', selected_job.get('autoGroupImages', 'false'))).lower() == 'true',
+                "autoGroupTargetName": str(selected_job.get('imageProcessing', {}).get('autoGroupTargetName', selected_job.get('autoGroupTargetName', '')))
             },
             "training": {
                 "enable": True,

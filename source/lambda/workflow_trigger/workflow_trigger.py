@@ -81,6 +81,12 @@ def validate_config(config: dict):
             "enableEnhancedFeatureExtraction": None,
             "matchingMethod": None
         },
+        "imageProcessing": {
+            "autoScaleDataset": None,
+            "autoScaleDatasetMode": None,
+            "autoGroupImages": None,
+            "autoGroupTargetName": None
+        },
         "training": {
             "enable": None,
             "maxSteps": None,
@@ -119,10 +125,13 @@ def validate_config(config: dict):
 
     dict_keys = required_dict_props.keys()
 
+    # imageProcessing is optional for backward compatibility with jobs submitted before this field was added
+    optional_keys = {"imageProcessing"}
+
     status_code = None
     body = None
     for key in dict_keys:
-        if key not in config:
+        if key not in config and key not in optional_keys:
             raise RuntimeError(f"Required configuration property {key} was not found.")
     print("Input validation passed...")
 
@@ -227,6 +236,12 @@ def lambda_handler(event, context):
                     "flHeuristicValue": str(json_content["reconstruction"].get("flHeuristicValue", "1.1")),
                     "enableFlMetric": str(json_content["reconstruction"].get("enableFlMetric", "false")),
                     "flMetricValue": str(json_content["reconstruction"].get("flMetricValue", "24")),
+                    "autoMatcher": str(json_content["reconstruction"].get("autoMatcher", "false")),
+                    "autoMapper": str(json_content["reconstruction"].get("autoMapper", "false")),
+                    "autoScaleDataset": str(json_content["imageProcessing"].get("autoScaleDataset", "false")),
+                    "autoScaleDatasetMode": str(json_content["imageProcessing"].get("autoScaleDatasetMode", "RESIZE")),
+                    "autoGroupImages": str(json_content["imageProcessing"].get("autoGroupImages", "false")),
+                    "autoGroupTargetName": str(json_content["imageProcessing"].get("autoGroupTargetName", "")),
                     "runTrain": str(json_content["training"]["enable"]),
                     "model": str(json_content["training"]["model"]),
                     "maxSteps": str(json_content["training"]["maxSteps"]),
@@ -311,6 +326,12 @@ def lambda_handler(event, context):
                     "FL_HEURISTIC_VALUE": str(json_content["reconstruction"].get("flHeuristicValue", "1.1")),
                     "ENABLE_FL_METRIC": str(json_content["reconstruction"].get("enableFlMetric", "false")),
                     "FL_METRIC_VALUE": str(json_content["reconstruction"].get("flMetricValue", "24")),
+                    "AUTO_MATCHER": str(json_content["reconstruction"].get("autoMatcher", "false")),
+                    "AUTO_MAPPER": str(json_content["reconstruction"].get("autoMapper", "false")),
+                    "AUTOSCALE_DATASET": str(json_content["imageProcessing"].get("autoScaleDataset", "false")),
+                    "AUTOSCALE_DATASET_MODE": str(json_content["imageProcessing"].get("autoScaleDatasetMode", "RESIZE")),
+                    "AUTOGROUP_IMAGES": str(json_content["imageProcessing"].get("autoGroupImages", "false")),
+                    "AUTOGROUP_TARGET_NAME": str(json_content["imageProcessing"].get("autoGroupTargetName", "")),
                     "RUN_TRAIN": str(json_content["training"]["enable"]),
                     "MODEL": str(json_content["training"]["model"]),
                     "MAX_STEPS": str(json_content["training"]["maxSteps"]),

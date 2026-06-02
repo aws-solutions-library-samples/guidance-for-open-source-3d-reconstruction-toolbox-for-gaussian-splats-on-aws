@@ -39,5 +39,11 @@
   "fl_heuristic_value": 1.2,
   "enable_fl_metric": "false",
   "fl_metric_value": 24,
-  "enable_depth_loss": "false"
+  "enable_depth_loss": "false",
+  "auto_matcher": "false",
+  "auto_mapper": "false",
+  "autoscale_dataset": "false",
+  "autoscale_dataset_mode": "RESIZE",
+  "autogroup_images": "false",
+  "autogroup_target_name": ""
 }

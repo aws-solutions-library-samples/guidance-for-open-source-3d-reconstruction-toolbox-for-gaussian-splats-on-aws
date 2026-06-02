@@ -89,7 +89,11 @@ import shutil
 import zipfile
 import multiprocessing
 import subprocess
+import json as _json
+import time as time_module
+import threading as _threading
 from pathlib import Path
+from PIL import Image
 from pipeline import Pipeline, Status, ComponentEnvironment, ComponentType, Component
 from utils import (
     read_camera_params_from_file, validate_input_media,
@@ -108,7 +112,6 @@ if __name__ == "__main__":
     # INITIALIZATION
     ##################################
     try:
-        import time as time_module
         container_start = time_module.time()
         print(f"=== CONTAINER STARTUP TIMING ===")
         print(f"Container started at: {time_module.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -527,7 +530,6 @@ if __name__ == "__main__":
                     # so gsplat can find the masks without relying on the Colmap-to-Nerfstudio step.
                     transforms_path = os.path.join(config['DATASET_PATH'], 'transforms.json')
                     if has_transforms and os.path.isfile(transforms_path):
-                        import json as _json
                         with open(transforms_path, 'r') as _f:
                             _data = _json.load(_f)
                         _injected = 0
@@ -716,9 +718,20 @@ if __name__ == "__main__":
                                 config_content
                             )
                         
-                        # Update max_num_iterations using text replacement
-                        config_content = re.sub(r'max_num_iterations: \d+', f'max_num_iterations: {REFINE_STEPS_SPLATFACTO}', config_content)
+                        # Compute total iterations = checkpoint step + additional steps
+                        # so nerfstudio continues from where it left off rather than restarting
+                        ckpt_step = 0
+                        if ckpt_files:
+                            _m = re.search(r'step-(\d+)\.ckpt$', ckpt_files[-1])
+                            if _m:
+                                ckpt_step = int(_m.group(1)) + 1  # +1 because step is 0-indexed
+                        additional_steps = max(int(config['MAX_STEPS']), 9000)
+                        total_iterations = ckpt_step + additional_steps
+                        log.info(f"Resume training: checkpoint_step={ckpt_step}, additional_steps={additional_steps}, total_iterations={total_iterations}")
                         
+                        # Update max_num_iterations using text replacement
+                        config_content = re.sub(r'max_num_iterations: \d+', f'max_num_iterations: {total_iterations}', config_content)
+
                         # Update timestamp using text replacement
                         config_content = re.sub(r'timestamp: [^\n]+', f'timestamp: {RESUME_TRAIN_EXPERIMENT_NAME}', config_content)
                         
@@ -742,7 +755,7 @@ if __name__ == "__main__":
                         log.info(f"""
                                 Updated config.yml in dataset directory:
                                 load_checkpoint={latest_ckpt if ckpt_files else 'null'},
-                                max_num_iterations={REFINE_STEPS_SPLATFACTO},
+                                max_num_iterations={total_iterations},
                                 timestamp={RESUME_TRAIN_EXPERIMENT_NAME},
                                 data_path={config['DATASET_PATH']}
                                 """)
@@ -1736,11 +1749,14 @@ if __name__ == "__main__":
                         
                         if has_config and has_ckpt:
                             resume_training_active = True
+                            # Update model paths to point to the resume training output directory
+                            model_ckpt_path = os.path.join(config['CODE_PATH'], "outputs", "unnamed", model, RESUME_TRAIN_EXPERIMENT_NAME, model_dir_name)
+                            model_config_path = os.path.join(config['CODE_PATH'], "outputs", "unnamed", model, RESUME_TRAIN_EXPERIMENT_NAME, "config.yml")
                             args.extend([
                                 "--load-config", dataset_config_path,
                             ])
                             log.info(f"Resume training using config: {dataset_config_path}")
-                            log.info(f"Resume training with {REFINE_STEPS_SPLATFACTO} iterations")
+                            log.info(f"Resume training: max_num_iterations set to checkpoint_step + additional_steps in config.yml")
                     else:
                         # Initial training (either RUN_RECON=true or colmap_zip_found)
                         isp_mode = config.get('THREED_ISP', 'none').lower()
@@ -2033,32 +2049,14 @@ if __name__ == "__main__":
                 else:
                     # Use correct output path for resume training
                     if resume_training_active:
-                        # Resume training - use config from dataset directory
-                        config_path = os.path.join(config['DATASET_PATH'], "config.yml")
-                        checkpoint_dir = os.path.join(config['DATASET_PATH'], 'nerfstudio_models')
-                        
-                        # Update config.yml to use absolute path only in LOCAL_DEBUG mode
-                        if LOCAL_DEBUG:
-                            try:
-                                with open(config_path, 'r') as f:
-                                    config_content = f.read()
-                                config_content = re.sub(
-                                    r'relative_model_dir: !!python/object/apply:pathlib\.PosixPath\s*\n\s*- nerfstudio_models',
-                                    f'relative_model_dir: !!python/object/apply:pathlib.PosixPath\n- {checkpoint_dir}',
-                                    config_content
-                                )
-                                with open(config_path, 'w') as f:
-                                    f.write(config_content)
-                                log.info(f"Updated config.yml to use absolute checkpoint path: {checkpoint_dir}")
-                            except Exception as e:
-                                log.warning(f"Failed to update config.yml: {e}")
+                        # Resume training - use config from outputs directory (written by nerfstudio after training)
+                        config_path = f"outputs/unnamed/splatfacto/{RESUME_TRAIN_EXPERIMENT_NAME}/config.yml"
                         args = [
                             "gaussian-splat",
                             "--load-config", config_path,
                             "--output-dir", output_path
                         ]
                         log.info(f"Resume training export using config: {config_path}")
-                        log.info(f"Resume training export using checkpoint dir: {checkpoint_dir}")
                     else:
                         # Initial training - use config from outputs directory
                         config_path = f"outputs/unnamed/splatfacto/{TRAIN_EXPERIMENT_NAME}/config.yml"
@@ -2114,7 +2112,7 @@ if __name__ == "__main__":
                 if resume_training_active:
                     # Resume training - use config from dataset directory for splatfacto models
                     if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
-                        config_path = os.path.join(config['DATASET_PATH'], "config.yml")
+                        config_path = f"outputs/unnamed/splatfacto/{RESUME_TRAIN_EXPERIMENT_NAME}/config.yml"
                     else:
                         # For splatfacto-w-light, use the train-stage-2 config from outputs
                         config_path = f"outputs/unnamed/splatfacto-w-light/{RESUME_TRAIN_EXPERIMENT_NAME}/config.yml"
@@ -2882,10 +2880,10 @@ if __name__ == "__main__":
         # Fires every 6 hours so Step Functions never hits HeartbeatSeconds=172800.
         # Only active when IS_BATCH=True, TASK_TOKEN is set, and not LOCAL_DEBUG.
         if ENABLE_TASK_TOKEN_CALLBACK:
-            import threading as _threading
             _heartbeat_stop = _threading.Event()
             def _heartbeat_loop():
-                # Send a heartbeat every 6 hours until the pipeline finishes
+                # Send an immediate heartbeat on startup, then every 6 hours
+                send_task_heartbeat(TASK_TOKEN, log)
                 while not _heartbeat_stop.wait(timeout=21600):
                     send_task_heartbeat(TASK_TOKEN, log)
             _heartbeat_thread = _threading.Thread(target=_heartbeat_loop, daemon=True)
@@ -3064,11 +3062,10 @@ if __name__ == "__main__":
                         # for any image resizing (e.g. 4K downscale) since _w is read from
                         # the actual image on disk after pre-processing.
                         try:
-                            from PIL import Image as _PILImage
                             img_files = [f for f in os.listdir(image_path)
                                          if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
                             if img_files:
-                                with _PILImage.open(os.path.join(image_path, img_files[0])) as _img:
+                                with Image.open(os.path.join(image_path, img_files[0])) as _img:
                                     _w, _h = _img.size
                                 fl_mm = float(config.get('FL_METRIC_VALUE', '24'))
                                 focal = round((fl_mm / 36.0) * _w)
@@ -3091,11 +3088,10 @@ if __name__ == "__main__":
                     elif config.get('ENABLE_FL_HEURISTIC', 'false') == 'true':
                         # Apply focal length heuristic: f = multiplier * max(width, height)
                         try:
-                            from PIL import Image as _PILImage
                             img_files = [f for f in os.listdir(image_path)
                                          if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
                             if img_files:
-                                with _PILImage.open(os.path.join(image_path, img_files[0])) as _img:
+                                with Image.open(os.path.join(image_path, img_files[0])) as _img:
                                     _w, _h = _img.size
                                 focal = round(float(config.get('FL_HEURISTIC_VALUE', '1.2'))* max(_w, _h))
                                 cx, cy = _w // 2, _h // 2
@@ -3331,7 +3327,6 @@ if __name__ == "__main__":
                     num_images = len(image_files)
                     is_4k_or_higher = False
                     if image_files:
-                        from PIL import Image
                         sample_img = Image.open(os.path.join(image_path, image_files[0]))
                         is_4k_or_higher = sample_img.width >= 3840 or sample_img.height >= 2160
                     
@@ -3774,8 +3769,7 @@ if __name__ == "__main__":
             summary_imgs = [f for f in os.listdir(image_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
             summary_res = 'N/A'
             if summary_imgs:
-                from PIL import Image as _PILImg
-                _s = _PILImg.open(os.path.join(image_path, summary_imgs[0]))
+                _s = Image.open(os.path.join(image_path, summary_imgs[0]))
                 summary_res = f"{_s.width}x{_s.height}"
             summary_group = config.get('AUTOGROUP_TARGET_NAME', '') if config.get('AUTOGROUP_IMAGES', 'false') == 'true' else 'off'
             summary_autoscale = config.get('AUTOSCALE_DATASET_MODE', 'resize').upper() if config.get('AUTOSCALE_DATASET', 'false') == 'true' else 'off'

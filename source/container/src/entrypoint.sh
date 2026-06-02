@@ -36,12 +36,15 @@ if [ $EXIT_CODE -ne 0 ]; then
     if [ -n "${TASK_TOKEN}" ] && [ -n "${AWS_BATCH_JOB_ID}" ]; then
         REGION="${AWS_DEFAULT_REGION:-${AWS_REGION:-us-east-1}}"
         CAUSE="Container exited with code ${EXIT_CODE}. Check CloudWatch log stream for details."
-        aws stepfunctions send-task-failure \
-            --task-token "${TASK_TOKEN}" \
-            --error "ContainerExitError" \
-            --cause "${CAUSE}" \
-            --region "${REGION}" 2>/dev/null || \
-            echo "Warning: send-task-failure call failed (token may be expired)"
+        for attempt in 1 2 3; do
+            aws stepfunctions send-task-failure \
+                --task-token "${TASK_TOKEN}" \
+                --error "ContainerExitError" \
+                --cause "${CAUSE}" \
+                --region "${REGION}" && break
+            echo "Warning: send-task-failure attempt ${attempt} failed, retrying..."
+            sleep 5
+        done
     fi
     exit $EXIT_CODE
 fi

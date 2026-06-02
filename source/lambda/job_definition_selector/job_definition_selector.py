@@ -133,6 +133,7 @@ def lambda_handler(event, context):
             jobQueue=selected_queue,
             jobDefinition=selected_job_definition,
             containerOverrides={
+                'command': ['/bin/bash', '/opt/ml/code/entrypoint.sh'],
                 'environment': _build_container_environment(env_vars, task_token)
             }
         )

@@ -1055,14 +1055,29 @@ This is an automated message from the Splat Processing System"""
 
         # Always try to get container logs first
         # Check if this is a Batch job error
-        is_batch_error = event.get('result', {}).get('JobId') is not None or event.get('envVars', {}).get('COMPUTE_TYPE') == 'batch'
+        is_batch_error = event.get('result', {}).get('JobId') is not None or event.get('envVars', {}).get('COMPUTE_TYPE', '').lower() == 'batch'
         
         if is_batch_error:
             # Extract log stream name from the error details if available
             log_stream_name = None
             print(f"Batch error detected. Error object: {error}")
-            
-            if error:
+
+            # Handle States.Timeout specially — container crashed before sending heartbeat
+            error_type = error.get('Error', '') if isinstance(error, dict) else str(error)
+            if error_type in ('States.Timeout', 'States.HeartbeatTimeout'):
+                container_logs = {
+                    'status': 'ERROR',
+                    'message': (
+                        'Container crashed before pipeline started (heartbeat timeout).\n'
+                        'The container likely encountered a pre-Python error such as:\n'
+                        '  - SyntaxError or ImportError in main.py\n'
+                        '  - Out-of-memory (OOM) kill\n'
+                        '  - GPU initialization failure\n\n'
+                        'Check the CloudWatch log stream for this Batch job for details.'
+                    )
+                }
+
+            if 'container_logs' not in dir() and error:
                 try:
                     if isinstance(error, dict) and 'Cause' in error:
                         cause_str = error['Cause']
@@ -1087,7 +1102,7 @@ This is an automated message from the Splat Processing System"""
                     print(f"Error parsing batch error details: {parse_error}")
             
             # waitForTaskToken fallback: look up batchJobId from DynamoDB then Batch API
-            if not log_stream_name:
+            if 'container_logs' not in dir() and not log_stream_name:
                 try:
                     ddb_item = get_ddb_item_value(table, key).get('Item', {})
                     batch_job_id = ddb_item.get('batchJobId')

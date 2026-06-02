@@ -103,6 +103,12 @@ class SharedState:
         self.fl_heuristic_value = 1.2
         self.enable_fl_metric = "false"
         self.fl_metric_value = 24
+        self.auto_matcher = "false"
+        self.auto_mapper = "false"
+        self.autoscale_dataset = "false"
+        self.autoscale_dataset_mode = "RESIZE"
+        self.autogroup_images = "false"
+        self.autogroup_target_name = ""
 
 # Create a singleton instance
 shared_state = SharedState()
@@ -349,7 +355,15 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
             "enableFlHeuristic": shared_state.enable_fl_heuristic == "true",
             "flHeuristicValue": str(shared_state.fl_heuristic_value),
             "enableFlMetric": shared_state.enable_fl_metric == "true",
-            "flMetricValue": str(shared_state.fl_metric_value)
+            "flMetricValue": str(shared_state.fl_metric_value),
+            "autoMatcher": shared_state.auto_matcher == "true",
+            "autoMapper": shared_state.auto_mapper == "true"
+        },
+        "imageProcessing": {
+            "autoScaleDataset": shared_state.autoscale_dataset == "true",
+            "autoScaleDatasetMode": shared_state.autoscale_dataset_mode,
+            "autoGroupImages": shared_state.autogroup_images == "true",
+            "autoGroupTargetName": shared_state.autogroup_target_name
         },
         "training": {
             "enable": training_enable == "true",
@@ -488,7 +502,15 @@ def create_upload_aws_tab():
                                 "enableFlHeuristic": shared_state.enable_fl_heuristic == "true",
                                 "flHeuristicValue": str(shared_state.fl_heuristic_value),
                                 "enableFlMetric": shared_state.enable_fl_metric == "true",
-                                "flMetricValue": str(shared_state.fl_metric_value)
+                                "flMetricValue": str(shared_state.fl_metric_value),
+                                "autoMatcher": shared_state.auto_matcher == "true",
+                                "autoMapper": shared_state.auto_mapper == "true"
+                            },
+                            "imageProcessing": {
+                                "autoScaleDataset": shared_state.autoscale_dataset == "true",
+                                "autoScaleDatasetMode": shared_state.autoscale_dataset_mode,
+                                "autoGroupImages": shared_state.autogroup_images == "true",
+                                "autoGroupTargetName": shared_state.autogroup_target_name
                             },
                             "training": {
                                 "enable": shared_state.training_enable == "true",
@@ -675,6 +697,31 @@ def create_advanced_settings_tab():
                 )
         with gr.Row():
             with gr.Column():
+                gr.Markdown("### Image Processing")
+                autoscale_dataset = gr.Radio(
+                    label="Auto Scale Dataset",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Automatically scale the dataset before reconstruction."
+                )
+                autoscale_dataset_mode = gr.Dropdown(
+                    label="Auto Scale Dataset Mode",
+                    choices=["RESIZE", "CROP"],
+                    value="RESIZE"
+                )
+                autogroup_images = gr.Radio(
+                    label="Auto Group Images",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Automatically group images by target name before reconstruction."
+                )
+                autogroup_target_name = gr.Textbox(
+                    label="Auto Group Target Name",
+                    value="",
+                    info="Target group name used when Auto Group Images is enabled."
+                )
+        with gr.Row():
+            with gr.Column():
                 gr.Markdown("### Spherical Camera")
                 spherical_enable = gr.Radio(
                     label="Enable Spherical Camera",
@@ -777,6 +824,18 @@ def create_advanced_settings_tab():
                     value=24,
                     minimum=1,
                     info="Fixed focal length in mm to pass to COLMAP (default: 24)"
+                )
+                auto_matcher = gr.Radio(
+                    label="Auto Matcher",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Automatically select the best matching method for the dataset."
+                )
+                auto_mapper = gr.Radio(
+                    label="Auto Mapper",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Automatically select the best SfM mapper for the dataset."
                 )
             with gr.Column():
                 gr.Markdown("### Pose Priors-Colmap")
@@ -939,7 +998,10 @@ def create_advanced_settings_tab():
                      shared_state.log_verbosity, shared_state.mask_threshold, shared_state.ply_coords, shared_state.spz_coords, shared_state.sog_coords, shared_state.usdz_coords, shared_state.preserve_scene_scale, shared_state.isp_3d,
                      shared_state.enable_fl_heuristic, shared_state.fl_heuristic_value,
                      shared_state.enable_fl_metric, shared_state.fl_metric_value,
-                     shared_state.enable_depth_loss) = args
+                     shared_state.enable_depth_loss,
+                     shared_state.auto_matcher, shared_state.auto_mapper,
+                     shared_state.autoscale_dataset, shared_state.autoscale_dataset_mode,
+                     shared_state.autogroup_images, shared_state.autogroup_target_name) = args
                     return "Advanced settings updated"
 
                 # Get all advanced settings components after they're defined
@@ -954,7 +1016,10 @@ def create_advanced_settings_tab():
                     log_verbosity, mask_threshold, ply_coords, spz_coords, sog_coords, usdz_coords, preserve_scene_scale, isp_3d,
                     enable_fl_heuristic, fl_heuristic_value,
                     enable_fl_metric, fl_metric_value,
-                    enable_depth_loss
+                    enable_depth_loss,
+                    auto_matcher, auto_mapper,
+                    autoscale_dataset, autoscale_dataset_mode,
+                    autogroup_images, autogroup_target_name
                 ]
                 
                 def save_configuration(config_name, *settings):
@@ -1002,7 +1067,13 @@ def create_advanced_settings_tab():
                         'fl_heuristic_value': settings[37],
                         'enable_fl_metric': settings[38],
                         'fl_metric_value': settings[39],
-                        'enable_depth_loss': settings[40]
+                        'enable_depth_loss': settings[40],
+                        'auto_matcher': settings[41],
+                        'auto_mapper': settings[42],
+                        'autoscale_dataset': settings[43],
+                        'autoscale_dataset_mode': settings[44],
+                        'autogroup_images': settings[45],
+                        'autogroup_target_name': settings[46]
                     }
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -1077,6 +1148,12 @@ def create_advanced_settings_tab():
                         shared_state.enable_fl_metric = config_data.get('enable_fl_metric', 'false')
                         shared_state.fl_metric_value = config_data.get('fl_metric_value', 24)
                         shared_state.enable_depth_loss = config_data.get('enable_depth_loss', 'false')
+                        shared_state.auto_matcher = config_data.get('auto_matcher', 'false')
+                        shared_state.auto_mapper = config_data.get('auto_mapper', 'false')
+                        shared_state.autoscale_dataset = config_data.get('autoscale_dataset', 'false')
+                        shared_state.autoscale_dataset_mode = config_data.get('autoscale_dataset_mode', 'RESIZE')
+                        shared_state.autogroup_images = config_data.get('autogroup_images', 'false')
+                        shared_state.autogroup_target_name = config_data.get('autogroup_target_name', '')
                         
                         return [
                             f"Configuration '{config_name}' loaded successfully",
@@ -1120,10 +1197,16 @@ def create_advanced_settings_tab():
                             config_data.get('fl_heuristic_value', 1.2),
                             config_data.get('enable_fl_metric', 'false'),
                             config_data.get('fl_metric_value', 24),
-                            config_data.get('enable_depth_loss', 'false')
+                            config_data.get('enable_depth_loss', 'false'),
+                            config_data.get('auto_matcher', 'false'),
+                            config_data.get('auto_mapper', 'false'),
+                            config_data.get('autoscale_dataset', 'false'),
+                            config_data.get('autoscale_dataset_mode', 'RESIZE'),
+                            config_data.get('autogroup_images', 'false'),
+                            config_data.get('autogroup_target_name', '')
                         ]
                     except Exception as e:
-                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(40)]
+                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(46)]
                 
                 # Wire up save/load buttons
                 save_config_btn.click(
