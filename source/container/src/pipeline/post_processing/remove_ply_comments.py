@@ -24,6 +24,7 @@ Remove comment lines from PLY files to fix SPZ compatibility issues.
 """
 
 import argparse
+import os
 import sys
 
 def main():
@@ -34,7 +35,12 @@ def main():
     args = parser.parse_args()
     
     output_path = args.output if args.output else args.input
-    
+
+    # Skip gracefully if input file doesn't exist (e.g. export failed or was skipped)
+    if not os.path.exists(args.input):
+        print(f"Info: PLY file not found, skipping comment removal: {args.input}")
+        sys.exit(0)
+
     try:
         with open(args.input, 'rb') as infile:
             content = infile.read()

@@ -36,16 +36,16 @@ ENV CMAKE_VERSION="3.30.3"
 ENV NODE_VERSION="22"
 ENV EIGEN_VERSION="3.4"
 ENV COLMAP_VERSION="4.0.4"
-ENV SPLAT_TRANSFORM_VERSION="2.0.2"
-ENV MAPANYTHING_VERSION="1.1.1"
+ENV SPLAT_TRANSFORM_VERSION="2.5.2"
+ENV MAPANYTHING_VERSION="1.1.2"
 ENV SPZ_VERSION="2.1.0"
 ENV OPENEXR_VERSION="3.1.5"
 ENV OPENIMAGEIO_VERSION="2.5.13.0"
 
 # Pinned versions
-ENV CERES_HASH="806af056feb22a1236baca247b4f4b6e1ea911e5"
+ENV CERES_HASH="0ba987acaf9e8674070f116ed624edf017d2b630"
 ENV NERFSTUDIO_HASH="50e0e3c70c775e89333256213363badbf074f29d"
-ENV GSPLAT_HASH="3d4f9027f36d70ac8e89536e14c247de377f74b5"
+ENV GSPLAT_HASH="4e52698e45eaaed929ed3a5065e96a688d085df6"
 ENV THREEDGRUT_HASH="9846a28babb2171802907017c44d3adaa927f4e4"
 ENV BGREMOVER_HASH="d6278fef141d1669e5fffbbc4cf185edfdc89cf9"
 ENV SAM2_HASH="2b90b9f5ceec907a1c18123530e92e794ad901a4"
@@ -54,7 +54,7 @@ ENV SAM2_HASH="2b90b9f5ceec907a1c18123530e92e794ad901a4"
 # G4dn=7.5, P4d=8.0, g5=8.6, g6/g6e=8.9
 ENV TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9"
 ENV TCNN_CUDA_ARCHITECTURES=75;80;86;89
-ENV NINJA_JOBS=3
+ENV NINJA_JOBS=2
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/lib
 ENV PATH=/usr/local/cuda-${CUDA_VERSION}/bin:${PATH}
 ENV LD_LIBRARY_PATH=/usr/local/cuda-${CUDA_VERSION}/lib64:${LD_LIBRARY_PATH}
@@ -215,7 +215,16 @@ RUN wget https://developer.download.nvidia.com/compute/cudss/${CUDSS_VERSION}/lo
     && dpkg -i cudss-local-repo-ubuntu2204-${CUDSS_VERSION}_${CUDSS_VERSION}-1_amd64.deb \
     && cp /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/cudss-*-keyring.gpg /usr/share/keyrings/ \
     && apt-get update \
-    && apt-get -y install cudss \
+    && dpkg --force-overwrite -i \
+        /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/libcudss0-cuda-13_${CUDSS_VERSION}.4-1_amd64.deb \
+        /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/libcudss0-dev-cuda-13_${CUDSS_VERSION}.4-1_amd64.deb \
+        /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/libcudss0-static-cuda-13_${CUDSS_VERSION}.4-1_amd64.deb \
+    && apt-mark hold libcudss0-cuda-13 libcudss0-dev-cuda-13 libcudss0-static-cuda-13 \
+    && echo "/usr/lib/x86_64-linux-gnu/libcudss/13" > /etc/ld.so.conf.d/cudss.conf \
+    && ldconfig \
+    && ln -sf /usr/include/libcudss/13/cudss.h /usr/include/cudss.h \
+    && ln -sf /usr/include/libcudss/13/cudss_threading_interface.h /usr/include/cudss_threading_interface.h \
+    && ln -sf /usr/include/libcudss/13/cudss_distributed_interface.h /usr/include/cudss_distributed_interface.h \
     && cd ${CODE_PATH}
 
 # Build Ceres with cuDSS support
@@ -224,13 +233,14 @@ RUN git clone https://github.com/ceres-solver/ceres-solver.git --recursive \
     && git reset --hard ${CERES_HASH} \
     && cd ${CODE_PATH} \
     && mkdir ceres-bin && cd ceres-bin \
-    && cmake -DCUDA=ON -DUSE_CUDSS=ON -DCUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF ../ceres-solver \
+    && cmake -DCUDA=ON -DUSE_CUDSS=ON -DCUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -Dcudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/13/cmake/cudss -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF ../ceres-solver \
     && make -j3 && make install \
     && cd ${CODE_PATH}
 
 ENV CMAKE_PREFIX_PATH="/usr/local/bin/eigen/${EIGEN_VERSION}"
 ENV Eigen3_DIR="/usr/local/bin/eigen/${EIGEN_VERSION}"
 ENV Ceres_DIR=${CODE_PATH}/ceres-bin
+ENV cudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/13/cmake/cudss
 
 # Install NerfStudio from source to get get full access to repo files
 RUN git clone https://github.com/nerfstudio-project/nerfstudio.git \
@@ -251,9 +261,10 @@ RUN git clone https://github.com/nerfstudio-project/gsplat.git --recursive \
     && git reset --hard ${GSPLAT_HASH} \
     && sed -i '/os.environ\["MASTER_ADDR"\] = "localhost"/s/^/# /' gsplat/distributed.py \
     && sed -i '/os.environ\["MASTER_PORT"\] = str(_find_free_port())/s/^/# /' gsplat/distributed.py \
-#    && sed -i 's/point_indices = self\.parser\.point_indices\[image_name\]/point_indices = self.parser.point_indices.get(image_name, np.array([], dtype=np.int32))/' examples/datasets/colmap.py \
+    && sed -i 's/point_indices = self\.parser\.point_indices\[image_name\]/point_indices = self.parser.point_indices.get(image_name, np.array([], dtype=np.int32))/' examples/datasets/colmap.py \
     && python setup.py build_ext --inplace \
     && python setup.py develop \
+    && pip install -e libs/scene -e libs/stage \
     && pip install --no-build-isolation -r examples/requirements.txt \
     && pip install --force-reinstall imageio tqdm \
     && cd ${CODE_PATH}
@@ -261,6 +272,27 @@ RUN git clone https://github.com/nerfstudio-project/gsplat.git --recursive \
 #COPY ./src/pipeline/training/patch_gsplat.py ${CODE_PATH}/
 #RUN python3 ${CODE_PATH}/patch_gsplat.py ${CODE_PATH} \
 #    && rm ${CODE_PATH}/patch_gsplat.py
+
+# Install DN-Splatter (dn-splatter + ags-mesh models)
+ENV DN_SPLATTER_HASH="main"
+RUN git clone https://github.com/maturk/dn-splatter.git ${CODE_PATH}/dn-splatter \
+    && cd ${CODE_PATH}/dn-splatter \
+    && pip install -e . --no-deps \
+    && pip install --no-cache-dir geffnet scikit-learn PyMCubes pymeshlab open3d \
+    && cd ${CODE_PATH}
+
+# Apply compatibility patches to dn-splatter for gsplat 1.5.x
+# dn_model_patched.py replaces the cloned dn_model.py with a known-working version
+# Cache-bust: bd4b5d4a0175861ed881c84384bb9e30
+COPY src/pipeline/training/dn_model_patched.py ${CODE_PATH}/dn-splatter/dn_splatter/dn_model.py
+COPY src/pipeline/training/patch_dn_splatter.py ${CODE_PATH}/
+RUN python3 ${CODE_PATH}/patch_dn_splatter.py ${CODE_PATH}/dn-splatter \
+    && rm ${CODE_PATH}/patch_dn_splatter.py
+# Fix normal map loading order: natsorted causes normals to load in a different order
+# than images when filenames are numeric (e.g. 1.png, 2.png ... 10.png, 100.png).
+# Replacing with sorted() ensures consistent alphabetical/numeric ordering.
+RUN sed -i 's/return natsorted(glob.glob(f"{self.normal_save_dir}\/\*.png"))/return sorted(glob.glob(f"{self.normal_save_dir}\/\*.png"))/' \
+    ${CODE_PATH}/dn-splatter/dn_splatter/data/normal_nerfstudio.py
 
 # Install Splatfacto-w with gsplat==1.4.0 to separate location
 # Install with dependencies to get complete environment
@@ -274,10 +306,12 @@ COPY src/pipeline/training/run_splatfacto_w_wrapper.py /opt/ml/code/training/run
 COPY src/pipeline/training/run_splatfacto_w_export.py /opt/ml/code/training/run_splatfacto_w_export.py
 COPY src/pipeline/training/run_splatfacto_w_eval.py /opt/ml/code/training/run_splatfacto_w_eval.py
 COPY src/pipeline/training/run_splatfacto_w_render.py /opt/ml/code/training/run_splatfacto_w_render.py
+COPY src/pipeline/training/run_dn_splatter_wrapper.py /opt/ml/code/training/run_dn_splatter_wrapper.py
 RUN chmod +x /opt/ml/code/training/run_splatfacto_w_wrapper.py \
     /opt/ml/code/training/run_splatfacto_w_export.py \
     /opt/ml/code/training/run_splatfacto_w_eval.py \
-    /opt/ml/code/training/run_splatfacto_w_render.py
+    /opt/ml/code/training/run_splatfacto_w_render.py \
+    /opt/ml/code/training/run_dn_splatter_wrapper.py
 
 # Install gsplat-specific pycolmap to separate location
 RUN mkdir -p /opt/gsplat_pycolmap \
@@ -306,7 +340,7 @@ RUN wget https://github.com/AcademySoftwareFoundation/OpenImageIO/archive/refs/t
 RUN wget https://github.com/colmap/colmap/archive/refs/tags/${COLMAP_VERSION}.zip \
     && unzip ${COLMAP_VERSION}.zip && rm ${COLMAP_VERSION}.zip \
     && cd colmap-${COLMAP_VERSION}/ && mkdir build && cd build \
-    && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DMARCH_NATIVE=OFF -DCMAKE_PREFIX_PATH=/usr/local && ninja -j${NINJA_JOBS} install \
+    && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DMARCH_NATIVE=OFF -DCMAKE_PREFIX_PATH=/usr/local -Dcudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/13/cmake/cudss && ninja -j${NINJA_JOBS} install \
     && cd ${CODE_PATH}/colmap-${COLMAP_VERSION} \
     && python -m pip install . \
     && cd ${CODE_PATH}
@@ -445,7 +479,7 @@ RUN pip uninstall -y xformers || true
 
 # Reinstall pycolmap after map-anything to ensure ABI compatibility
 # Map-anything may have installed incompatible dependencies that conflict with pycolmap
-RUN pip install --force-reinstall --no-cache-dir --no-deps pycolmap 
+RUN pip install --force-reinstall --no-cache-dir --no-deps pycolmap==4.0.4 
 
 # Install diffusers without torch dependencies to avoid overwriting
 RUN pip install --no-cache-dir --no-deps diffusers && pip install --no-cache-dir accelerate safetensors regex requests transformers
@@ -479,7 +513,7 @@ WORKDIR ${CODE_PATH}
 # Install gsplat-specific pycolmap for multi-GPU (MUST BE LAST to avoid being overwritten)
 RUN mkdir -p /opt/gsplat_pycolmap \
     && pip install --target=/opt/gsplat_pycolmap --no-deps git+https://github.com/rmbrualla/pycolmap@cc7ea4b7301720ac29287dbe450952511b32125e \
-    && rm -rf /opt/gsplat_pycolmap/numpy* \
+    && rm -rf /opt/gsplat_pycolmap/numpy* /opt/gsplat_pycolmap/scipy* \
     && pip install --target=/opt/gsplat_pycolmap --upgrade 'numpy==1.26.4'
 
 # The main entrypoint and arguments are added into the container in the State Machine (e.g. ENTRYPOINT [ "python", "main.py" ])
@@ -503,6 +537,7 @@ COPY ./src/pipeline/reconstruction/update_camera_model.py                       
 COPY ./src/pipeline/reconstruction/convert_cameras_to_pinhole.py                    ${CODE_PATH}/reconstruction
 COPY ./src/pipeline/reconstruction/run_map_anything.py                              ${CODE_PATH}/reconstruction
 COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py                            ${CODE_PATH}/training
+COPY ./src/pipeline/training/dn_splatter_preprocess.py                               ${CODE_PATH}/training
 COPY ./src/pipeline/training/run_gsplat_trainer.sh                                  ${CODE_PATH}/training
 RUN chmod +x ${CODE_PATH}/training/run_gsplat_trainer.sh
 COPY ./src/pipeline/reconstruction/spherical/panorama_sfm.py                        ${CODE_PATH}/spherical
@@ -530,6 +565,9 @@ COPY ./src/pipeline/post_processing/images_to_video.py                          
 COPY ./src/pipeline/post_processing/create_derivative_plys.py                       ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/convert_ply_to_sog.py                           ${CODE_PATH}/post_processing
 COPY ./src/pipeline/post_processing/create_collision_mesh.py                        ${CODE_PATH}/post_processing
+COPY ./src/pipeline/post_processing/generate_collision.py                           ${CODE_PATH}/post_processing
+COPY ./src/pipeline/post_processing/generate_lod.py                                ${CODE_PATH}/post_processing
+COPY ./src/pipeline/post_processing/extract_mesh.py                                ${CODE_PATH}/post_processing
 
 # Verify installed versions match expected versions
 RUN echo "=== VERSION VERIFICATION ===" \
@@ -555,3 +593,11 @@ RUN echo "=== VERSION VERIFICATION ===" \
     && echo "  NerfStudio: $(python -c 'import nerfstudio; print(getattr(nerfstudio, "__version__", "installed"))' 2>/dev/null || echo 'Not found')" \
     && echo "  GSplat: $(python -c 'import gsplat; print(gsplat.__version__)' 2>/dev/null || echo 'Not found')" \
     && echo "=== END VERSION VERIFICATION ==="
+
+
+# Hot-patch layer: copied last so all slow dependency layers stay cached during
+# active development. These overwrite the versions installed earlier in the build.
+# Once stable, the earlier COPY can be removed and this layer kept as the canonical one.
+COPY src/pipeline/training/dn_model_patched.py          ${CODE_PATH}/dn-splatter/dn_splatter/dn_model.py
+COPY src/pipeline/training/dn_splatter_preprocess.py    ${CODE_PATH}/training/dn_splatter_preprocess.py
+COPY src/main.py                                        ${CODE_PATH}/main.py

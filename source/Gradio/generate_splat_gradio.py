@@ -73,11 +73,17 @@ class SharedState:
         self.use_transform_json = "false"
         self.training_enable = "true"
         self.max_steps = 15000
+        self.num_gaussians = 1000000
 
         self.spherical_enable = "false"
         self.enable_spz = "true"
         self.enable_sog = "true"
         self.enable_usdz = "true"
+        self.generate_collision = "false"
+        self.collision_scene_type = "outdoor"
+        self.collision_seed_pos = "0,0,0"
+        self.generate_lod = "false"
+        self.generate_mesh = "true"
         self.ply_coords = "rhyu"
         self.spz_coords = "rhyu"
         self.sog_coords = "rhyu"
@@ -98,7 +104,6 @@ class SharedState:
         self.video_stop_time = None
         self.preserve_scene_scale = "false"
         self.isp_3d = "none"
-        self.enable_depth_loss = "false"
         self.enable_fl_heuristic = "false"
         self.fl_heuristic_value = 1.2
         self.enable_fl_metric = "false"
@@ -309,7 +314,7 @@ def refresh_s3_contents():
 def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file, 
                 instance_type, sfm_software, training_model, cube_faces_remove, bg_removal_model,
                 filter_blurry, max_images, sfm_enable, enhanced_feature, matching_method, use_colmap_model,
-                use_transform_json, training_enable, max_steps, spherical_enable, remove_bg, remove_objects,
+                use_transform_json, training_enable, max_steps, num_gaussians, spherical_enable, remove_bg, remove_objects,
                 object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam, log_verbosity, mask_threshold, 
                 crop_output_bounds, crop_mode, clean_splat, enable_spz, enable_sog, video_start_time, video_stop_time, preserve_scene_scale):
     unique_uuid = uuid.uuid4()
@@ -368,10 +373,10 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
         "training": {
             "enable": training_enable == "true",
             "maxSteps": str(max_steps),
+            "numGaussians": str(int(num_gaussians)),
             "model": training_model,
             "preserveSceneScale": preserve_scene_scale == "true",
-            "3dIsp": shared_state.isp_3d,
-            "enableDepthLoss": shared_state.enable_depth_loss == "true"
+            "3dIsp": shared_state.isp_3d
         },
         "postProcessing": {
             "cropOutputBounds": crop_output_bounds == "true" if isinstance(crop_output_bounds, str) else crop_output_bounds,
@@ -383,10 +388,14 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
             "plyCoords": shared_state.ply_coords,
             "spzCoords": shared_state.spz_coords,
             "sogCoords": shared_state.sog_coords,
-            "usdzCoords": shared_state.usdz_coords
+            "usdzCoords": shared_state.usdz_coords,
+            "generateCollision": shared_state.generate_collision == "true",
+            "collisionSceneType": shared_state.collision_scene_type,
+            "collisionSeedPos": shared_state.collision_seed_pos,
+            "generateLod": shared_state.generate_lod == "true",
+            "generateMesh": shared_state.generate_mesh == "true"
         },
-        "sphericalCamera": {
-            "enable": spherical_enable == "true",
+        "sphericalCamera": {"enable": spherical_enable == "true",
             "cubeFacesToRemove": cube_faces_remove
         },
         "segmentation": {
@@ -515,10 +524,10 @@ def create_upload_aws_tab():
                             "training": {
                                 "enable": shared_state.training_enable == "true",
                                 "maxSteps": str(shared_state.max_steps),
+                                "numGaussians": str(int(shared_state.num_gaussians)),
                                 "model": shared_state.model,
                                 "preserveSceneScale": shared_state.preserve_scene_scale == "true",
-                                "3dIsp": shared_state.isp_3d,
-                                "enableDepthLoss": shared_state.enable_depth_loss == "true"
+                                "3dIsp": shared_state.isp_3d
                             },
                             "postProcessing": {
                                 "cropOutputBounds": shared_state.crop_output_bounds == "true",
@@ -530,7 +539,12 @@ def create_upload_aws_tab():
                                 "plyCoords": shared_state.ply_coords,
                                 "spzCoords": shared_state.spz_coords,
                                 "sogCoords": shared_state.sog_coords,
-                                "usdzCoords": shared_state.usdz_coords
+                                "usdzCoords": shared_state.usdz_coords,
+                                "generateCollision": shared_state.generate_collision == "true",
+                                "collisionSceneType": shared_state.collision_scene_type,
+                                "collisionSeedPos": shared_state.collision_seed_pos,
+                                "generateLod": shared_state.generate_lod == "true",
+                                "generateMesh": shared_state.generate_mesh == "true"
                             },
                             "sphericalCamera": {
                                 "enable": shared_state.spherical_enable == "true",
@@ -618,6 +632,9 @@ def create_aws_configuration_tab():
                 
                 def update_spot_instance(spot):
                     shared_state.use_spot_instance = spot
+
+                def update_sfm(sfm_val):
+                    shared_state.sfm = sfm_val
                 
                 # Update shared_state immediately when values change
                 instance.change(
@@ -875,6 +892,13 @@ def create_advanced_settings_tab():
                     minimum=5,
                     maximum=100000
                 )
+                num_gaussians = gr.Number(
+                    label="Max Gaussians (MCMC models only)",
+                    value=1000000,
+                    minimum=10000,
+                    maximum=10000000,
+                    info="Maximum number of Gaussians for splatfacto-mcmc and gsplat-mcmc. Default: 1,000,000."
+                )
                 model = gr.Dropdown(
                     label="Training Model",
                     choices=[
@@ -884,7 +908,10 @@ def create_advanced_settings_tab():
                         "splatfacto-w-light",
                         "3dgut",
                         "3dgrt",
-                        "nerfacto"
+                        "nerfacto",
+                        "dn-splatter",
+                        "ags-mesh",
+                        "gsplat-depth"
                     ],
                     value="splatfacto"
                 )
@@ -902,12 +929,6 @@ def create_advanced_settings_tab():
                     ],
                     value="none",
                     info="Image signal processing for splatfacto, gsplat multi-GPU, and 3DGRUT. Not applicable to nerfacto."
-                )
-                enable_depth_loss = gr.Radio(
-                    label="Enable Depth Loss",
-                    choices=["true", "false"],
-                    value="false",
-                    info="Use sparse colmap depth supervision (gsplat). Overrides model choice. Enable when lidar data is provided."
                 )
         with gr.Row():
             with gr.Column():
@@ -941,6 +962,39 @@ def create_advanced_settings_tab():
                     label="Enable USDZ Export",
                     choices=["true", "false"],
                     value="true"
+                )
+                generate_collision = gr.Radio(
+                    label="Generate Collision Data",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Outputs .voxel.json/.voxel.bin (SVO) and .collision.glb for runtime collision detection."
+                )
+                collision_scene_type = gr.Dropdown(
+                    label="Collision Scene Type",
+                    choices=[
+                        ("Outdoor (terrain, open scenes)", "outdoor"),
+                        ("Indoor (rooms, buildings)", "indoor"),
+                        ("Object (isolated, no floor)", "object")
+                    ],
+                    value="outdoor",
+                    info="Controls voxel fill/carve strategy. Only used when Generate Collision is enabled."
+                )
+                collision_seed_pos = gr.Textbox(
+                    label="Collision Seed Position (x,y,z)",
+                    value="0,0,0",
+                    info="World-space seed point inside the scene for filter-cluster and fill/carve."
+                )
+                generate_lod = gr.Radio(
+                    label="Generate Streamed LOD",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Outputs lod-meta.json with 4 decimation levels (100%, 50%, 25%, 12.5%) for progressive streaming."
+                )
+                generate_mesh = gr.Radio(
+                    label="Generate Mesh (dn-splatter/ags-mesh only)",
+                    choices=["true", "false"],
+                    value="true",
+                    info="Extract a mesh from the trained model using IsoOctree TSDF fusion and export as GLB."
                 )
                 ply_coords = gr.Dropdown(
                     label="PLY Coordinate System",
@@ -990,7 +1044,8 @@ def create_advanced_settings_tab():
                      shared_state.max_images, shared_state.video_start_time, shared_state.video_stop_time, shared_state.sfm_enable, 
                      shared_state.enhanced_feature, shared_state.matching_method,
                      shared_state.use_colmap_model, shared_state.use_transform_json,
-                     shared_state.training_enable, shared_state.max_steps, shared_state.enable_spz, shared_state.enable_sog, shared_state.enable_usdz,
+                     shared_state.training_enable, shared_state.max_steps, shared_state.num_gaussians, shared_state.enable_spz, shared_state.enable_sog, shared_state.enable_usdz,
+                     shared_state.generate_collision, shared_state.collision_scene_type, shared_state.collision_seed_pos, shared_state.generate_lod, shared_state.generate_mesh,
                      shared_state.crop_output_bounds, shared_state.crop_mode, shared_state.clean_splat,
                      shared_state.spherical_enable,
                      shared_state.remove_bg, shared_state.remove_objects,
@@ -998,7 +1053,6 @@ def create_advanced_settings_tab():
                      shared_state.log_verbosity, shared_state.mask_threshold, shared_state.ply_coords, shared_state.spz_coords, shared_state.sog_coords, shared_state.usdz_coords, shared_state.preserve_scene_scale, shared_state.isp_3d,
                      shared_state.enable_fl_heuristic, shared_state.fl_heuristic_value,
                      shared_state.enable_fl_metric, shared_state.fl_metric_value,
-                     shared_state.enable_depth_loss,
                      shared_state.auto_matcher, shared_state.auto_mapper,
                      shared_state.autoscale_dataset, shared_state.autoscale_dataset_mode,
                      shared_state.autogroup_images, shared_state.autogroup_target_name) = args
@@ -1009,14 +1063,14 @@ def create_advanced_settings_tab():
                     sfm, model, faces, bg_model, filter_blurry,
                     max_images, video_start_time, video_stop_time, sfm_enable, enhanced_feature, matching_method,
                     use_colmap_model, use_transform_json, training_enable,
-                    max_steps, enable_spz, enable_sog, enable_usdz,
+                    max_steps, num_gaussians, enable_spz, enable_sog, enable_usdz,
+                    generate_collision, collision_scene_type, collision_seed_pos, generate_lod, generate_mesh,
                     crop_output_bounds, crop_mode, clean_splat,
                     spherical_enable, remove_bg, remove_objects,
                     object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam,
                     log_verbosity, mask_threshold, ply_coords, spz_coords, sog_coords, usdz_coords, preserve_scene_scale, isp_3d,
                     enable_fl_heuristic, fl_heuristic_value,
                     enable_fl_metric, fl_metric_value,
-                    enable_depth_loss,
                     auto_matcher, auto_mapper,
                     autoscale_dataset, autoscale_dataset_mode,
                     autogroup_images, autogroup_target_name
@@ -1042,38 +1096,43 @@ def create_advanced_settings_tab():
                         'use_transform_json': settings[12],
                         'training_enable': settings[13],
                         'max_steps': settings[14],
-                        'enable_spz': settings[15],
-                        'enable_sog': settings[16],
-                        'enable_usdz': settings[17],
-                        'crop_output_bounds': settings[18],
-                        'crop_mode': settings[19],
-                        'clean_splat': settings[20],
-                        'spherical_enable': settings[21],
-                        'remove_bg': settings[22],
-                        'remove_objects': settings[23],
-                        'object_removal_action': settings[24],
-                        'objects_to_remove': settings[25],
-                        'source_coordinate': settings[26],
-                        'pose_world_to_cam': settings[27],
-                        'log_verbosity': settings[28],
-                        'mask_threshold': settings[29],
-                        'ply_coords': settings[30],
-                        'spz_coords': settings[31],
-                        'sog_coords': settings[32],
-                        'usdz_coords': settings[33],
-                        'preserve_scene_scale': settings[34],
-                        'isp_3d': settings[35],
-                        'enable_fl_heuristic': settings[36],
-                        'fl_heuristic_value': settings[37],
-                        'enable_fl_metric': settings[38],
-                        'fl_metric_value': settings[39],
-                        'enable_depth_loss': settings[40],
-                        'auto_matcher': settings[41],
-                        'auto_mapper': settings[42],
-                        'autoscale_dataset': settings[43],
-                        'autoscale_dataset_mode': settings[44],
-                        'autogroup_images': settings[45],
-                        'autogroup_target_name': settings[46]
+                        'num_gaussians': settings[15],
+                        'enable_spz': settings[16],
+                        'enable_sog': settings[17],
+                        'enable_usdz': settings[18],
+                        'generate_collision': settings[19],
+                        'collision_scene_type': settings[20],
+                        'collision_seed_pos': settings[21],
+                        'generate_lod': settings[22],
+                        'generate_mesh': settings[23],
+                        'crop_output_bounds': settings[24],
+                        'crop_mode': settings[25],
+                        'clean_splat': settings[26],
+                        'spherical_enable': settings[27],
+                        'remove_bg': settings[28],
+                        'remove_objects': settings[29],
+                        'object_removal_action': settings[30],
+                        'objects_to_remove': settings[31],
+                        'source_coordinate': settings[32],
+                        'pose_world_to_cam': settings[33],
+                        'log_verbosity': settings[34],
+                        'mask_threshold': settings[35],
+                        'ply_coords': settings[36],
+                        'spz_coords': settings[37],
+                        'sog_coords': settings[38],
+                        'usdz_coords': settings[39],
+                        'preserve_scene_scale': settings[40],
+                        'isp_3d': settings[41],
+                        'enable_fl_heuristic': settings[42],
+                        'fl_heuristic_value': settings[43],
+                        'enable_fl_metric': settings[44],
+                        'fl_metric_value': settings[45],
+                        'auto_matcher': settings[46],
+                        'auto_mapper': settings[47],
+                        'autoscale_dataset': settings[48],
+                        'autoscale_dataset_mode': settings[49],
+                        'autogroup_images': settings[50],
+                        'autogroup_target_name': settings[51]
                     }
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -1121,9 +1180,15 @@ def create_advanced_settings_tab():
                         shared_state.use_transform_json = config_data.get('use_transform_json', 'false')
                         shared_state.training_enable = config_data.get('training_enable', 'true')
                         shared_state.max_steps = config_data.get('max_steps', 15000)
+                        shared_state.num_gaussians = config_data.get('num_gaussians', 1000000)
                         shared_state.enable_spz = config_data.get('enable_spz', 'true')
                         shared_state.enable_sog = config_data.get('enable_sog', 'true')
                         shared_state.enable_usdz = config_data.get('enable_usdz', 'true')
+                        shared_state.generate_collision = config_data.get('generate_collision', 'false')
+                        shared_state.collision_scene_type = config_data.get('collision_scene_type', 'outdoor')
+                        shared_state.collision_seed_pos = config_data.get('collision_seed_pos', '0,0,0')
+                        shared_state.generate_lod = config_data.get('generate_lod', 'false')
+                        shared_state.generate_mesh = config_data.get('generate_mesh', 'true')
                         shared_state.crop_output_bounds = config_data.get('crop_output_bounds', 'false')
                         shared_state.crop_mode = config_data.get('crop_mode', 'environment')
                         shared_state.clean_splat = config_data.get('clean_splat', 'false')
@@ -1147,7 +1212,6 @@ def create_advanced_settings_tab():
                         shared_state.fl_heuristic_value = config_data.get('fl_heuristic_value', 1.1)
                         shared_state.enable_fl_metric = config_data.get('enable_fl_metric', 'false')
                         shared_state.fl_metric_value = config_data.get('fl_metric_value', 24)
-                        shared_state.enable_depth_loss = config_data.get('enable_depth_loss', 'false')
                         shared_state.auto_matcher = config_data.get('auto_matcher', 'false')
                         shared_state.auto_mapper = config_data.get('auto_mapper', 'false')
                         shared_state.autoscale_dataset = config_data.get('autoscale_dataset', 'false')
@@ -1172,9 +1236,15 @@ def create_advanced_settings_tab():
                             config_data.get('use_transform_json', 'false'),
                             config_data.get('training_enable', 'true'),
                             config_data.get('max_steps', 15000),
+                            config_data.get('num_gaussians', 1000000),
                             config_data.get('enable_spz', 'true'),
                             config_data.get('enable_sog', 'true'),
                             config_data.get('enable_usdz', 'true'),
+                            config_data.get('generate_collision', 'false'),
+                            config_data.get('collision_scene_type', 'outdoor'),
+                            config_data.get('collision_seed_pos', '0,0,0'),
+                            config_data.get('generate_lod', 'false'),
+                            config_data.get('generate_mesh', 'true'),
                             config_data.get('crop_output_bounds', 'false'),
                             config_data.get('crop_mode', 'environment'),
                             config_data.get('clean_splat', 'false'),
@@ -1197,7 +1267,6 @@ def create_advanced_settings_tab():
                             config_data.get('fl_heuristic_value', 1.2),
                             config_data.get('enable_fl_metric', 'false'),
                             config_data.get('fl_metric_value', 24),
-                            config_data.get('enable_depth_loss', 'false'),
                             config_data.get('auto_matcher', 'false'),
                             config_data.get('auto_mapper', 'false'),
                             config_data.get('autoscale_dataset', 'false'),
@@ -1206,7 +1275,7 @@ def create_advanced_settings_tab():
                             config_data.get('autogroup_target_name', '')
                         ]
                     except Exception as e:
-                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(46)]
+                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(52)]
                 
                 # Wire up save/load buttons
                 save_config_btn.click(
@@ -1633,6 +1702,30 @@ def handle_view_multi(selected_row):
             payload = {"data": file_data, "filename": filename, "ts": __import__('time').time()}
             if camera_params:
                 payload['camera'] = camera_params
+            return (gr.update(value=None), "", gr.update(value=""), gr.update(value=""), gr.update(value=None), "", gr.update(value=json.dumps(payload)))
+
+        elif filename.lower().endswith('.glb'):
+            import requests, base64
+            bucket_name = shared_state.s3_bucket
+            output_prefix = shared_state.s3_output or "workflow-output"
+            job_id = selected_row[0]
+            file_key = f"{output_prefix}/{job_id}/{filename}"
+            current_key = getattr(shared_state, 'current_model_key', None)
+            cached_data = getattr(shared_state, 'current_model_data', None)
+            if current_key == file_key and cached_data:
+                file_data = cached_data
+            else:
+                presigned_url = generate_presigned_url(bucket_name, file_key)
+                if not presigned_url:
+                    return (gr.update(value=None), "", gr.update(value=""), "Error generating URL", gr.update(value=None), "", gr.update(value=""))
+                try:
+                    response = requests.get(presigned_url)
+                    file_data = base64.b64encode(response.content).decode('utf-8')
+                except Exception as e:
+                    return (gr.update(value=None), "", gr.update(value=""), f"Error: {e}", gr.update(value=None), "", gr.update(value=""))
+                shared_state.current_model_key = file_key
+                shared_state.current_model_data = file_data
+            payload = {"data": file_data, "filename": filename, "ts": __import__('time').time()}
             return (gr.update(value=None), "", gr.update(value=""), gr.update(value=""), gr.update(value=None), "", gr.update(value=json.dumps(payload)))
 
         elif filename.lower().endswith('.mp4'):
@@ -2481,6 +2574,7 @@ def create_debug_tab():
                         shared_state.use_transform_json,
                         shared_state.training_enable,
                         shared_state.max_steps,
+                        shared_state.num_gaussians,
                         shared_state.spherical_enable,
                         shared_state.remove_bg,
                         shared_state.remove_objects,
@@ -3792,7 +3886,7 @@ async () => {
         let lastMouseX = 0;
         let lastMouseY = 0;
         let cameraDistance = 10;
-        let cameraYaw = 0;
+        let cameraYaw = Math.PI;
         let cameraPitch = 0.3;
         let sceneScale = 1.0;  // updated after splat loads
         const target = new pc.Vec3(0, 0, 0);
@@ -3926,6 +4020,9 @@ async () => {
                 entity.addComponent('gsplat', {
                     asset: asset
                 });
+                if (fileName.toLowerCase().endsWith('.sog') || fileName.toLowerCase().endsWith('.ply')) {
+                    entity.setLocalEulerAngles(180, 0, 0);
+                }
                 app.root.addChild(entity);
                 // Camera distance will be set correctly by meta.json parsing above
                 
@@ -4482,7 +4579,7 @@ window.createSOGViewer = function(fileData, fileName, fileSize, cameraParams) {
     app.root.addChild(light);
 
     // Orbit controls
-    var yaw = 0, pitch = 0.3, dist = 10, sceneScale = 1;
+    var yaw = Math.PI, pitch = 0.3, dist = 10, sceneScale = 1;
     var target = new pc.Vec3(0,0,0);
     var updateCam = function() {
         camera.setPosition(
@@ -4552,6 +4649,9 @@ window.createSOGViewer = function(fileData, fileName, fileSize, cameraParams) {
         asset.ready(function() {
             var entity = new pc.Entity('GaussianSplat');
             entity.addComponent('gsplat', { asset: asset });
+            if (fileName.toLowerCase().endsWith('.sog') || fileName.toLowerCase().endsWith('.ply')) {
+                entity.setLocalEulerAngles(180, 0, 0);
+            }
             app.root.addChild(entity);
             // Poll for AABB as fallback if no server params
             if (!cameraParams || !cameraParams.distance) {
@@ -4730,7 +4830,7 @@ window.createSPZViewer = async function(fileData, fileName, cameraParams) {
                 }
             };
             doFit(); // run immediately - no delay needed, bbox is available at SceneLoader success
-        }, function(scene, msg, ex) { console.error('[SPZ] SceneLoader error:', msg, ex); }, null, '.spz');
+        }, function(scene, msg, ex) { console.error('[SPZ] SceneLoader error:', msg, ex); }, null, fileName.toLowerCase().endsWith('.glb') ? '.glb' : '.spz');
         engine.runRenderLoop(function() { scene.render(); });
         window.addEventListener('resize', function() { engine.resize(); });
     }

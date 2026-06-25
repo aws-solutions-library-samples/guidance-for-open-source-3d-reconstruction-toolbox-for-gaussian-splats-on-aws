@@ -280,7 +280,7 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
 - **Training:**
     - **Enable:** (boolean), whether to enable 3DGS training or not. Future plans will enable user to only perform SfM
     - **Maximum steps:** (integer), The maximum training steps to use while training the splat
-    - **Splat model:** (string), splatfacto, splatfacto-mcmc, splatfacto-big, splatfacto-w-light, 3dgrt, 3dgut, nerfacto, The 3DGS model to use for training
+    - **Splat model:** (string), splatfacto, splatfacto-mcmc, splatfacto-big, splatfacto-w-light, 3dgrt, 3dgut, nerfacto, dn-splatter, ags-mesh, gsplat-depth. The 3DGS model to use for training
         - Pointers:
             - **splatfacto:** a great, generalized model that is perfect to start with if you are unsure what model to choose
             - **splatfacto-big:** high quality model that should be used to output feature-rich scenes and objects. This will yield a larger .ply file.
@@ -289,6 +289,21 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             - **nerfacto:** used for testing and comparisons between NeRF and GS. The output will be a NeRF. Beware, this model will need more images than GS in order to maintain higher quality.
             - **3dgut:** used for enabling Distorted Cameras and Secondary Rays in Gaussian Splatting. Great for fisheye camera input.
             - **3dgrt:** used for 3D Gaussian Ray Tracing and Fast Tracing of Particle Scenes. Great for highly detailed scenes at the cost of processing power and time
+            - **dn-splatter:** depth and normal supervised Gaussian Splatting via the dn-splatter library. Improves geometric accuracy by incorporating monocular depth and normal priors during training. Best suited for scenes where surface geometry matters. Requires a Colmap reconstruction.
+
+                **Sensor depth (optional):** If your dataset includes LiDAR or RGB-D sensor depth images (e.g. from an iPhone, RealSense, or similar), you can include them in the zip to enable sensor-depth-guided alignment of the scale-aligned mono depths. The pipeline automatically detects and uses them.
+
+                | Requirement | Detail |
+                |---|---|
+                | **Folder name** | `depth/` or `depth_images/` inside the zip |
+                | **File naming** | Must match image stems after flattening. Flat images: `0.png` → depth `0.png`. Subdir images: `face_00/pano_008.png` → depth `face_00/pano_008.png` **or** `face_00_pano_008.png` (both work — subdirs are auto-flattened to `face_00_pano_008.png` during preprocessing) |
+                | **File format** | **uint16 PNG, values in millimeters** — e.g. a pixel at 2.5 m must have value `2500`. Standard ARKit `.depth.png` files are **not** compatible as they are uint8 confidence maps, not metric depth. |
+                | **Resolution** | Any — the pipeline resizes to match the image |
+
+                > *Note: If sensor depth is present but not in the correct uint16 mm format, training will silently fall back to scale-aligned monocular depth (ZoeDepth + SfM alignment), which is the default and produces good results for most datasets.*
+
+            - **ags-mesh:** advanced Gaussian Splatting with mesh extraction, built on dn-splatter. Produces a mesh output alongside the Gaussian splat. Best for rigid objects where a clean surface mesh is desired in addition to the splat. Requires a Colmap reconstruction. Accepts the same optional sensor depth format as dn-splatter above.
+            - **gsplat-depth:** Gaussian Splatting with sparse depth loss supervision using gsplat's `simple_trainer`. Anchors Gaussians to the Colmap or LiDAR-derived point cloud for improved metric accuracy. Useful when accurate geometry is required and a pose prior with point cloud data is available. Video export and nerfstudio metrics are not available with this model.
     - **Preserve scene scale:** (boolean), whether to preserve the reconstruction scale during gaussian splat training
     - **3D image signal processing:** (string), technique to use for scene signal processing. Current options are bilagrid (bilateral grid), ppisp (physically plausible image signal processing)
     - **Enable depth loss:** (boolean), whether to enable sparse depth supervision during training. The primary use case is when a LiDAR-derived point cloud is provided as pose prior input (via `usePosePriorColmapModelFiles`), giving the trainer accurate metric depth to anchor the Gaussians. It also works with standard colmap point cloud projections as a weaker depth signal. When enabled, overrides the model choice and uses gsplat's `simple_trainer` with depth loss. Requires a colmap reconstruction. Improves geometric accuracy especially for scenes with strong depth cues. Video export and nerfstudio metrics are not available when this is enabled.
@@ -296,11 +311,29 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
 - **Post Processing:**
     - **Crop output bounds:** (boolean), whether to crop gaussians that are outliers.
     - **Crop mode:** (string), mode to use for cropping the gaussian scene. Options include environment and rigid_object.
-    - **Clean splat:** (boolean), whether to clean gaussians that are noisy.
+    - **Clean splat:** (boolean), whether to remove floating/outlier Gaussians from the splat using `splat-transform --filter-floaters`. This removes isolated clusters of Gaussians that are disconnected from the main scene.
+        - Valid values: `"true"`, `"false"`
+        - Default: `"false"`
     - **Enable spz output:** (boolean), whether to output a compressed .spz file.
     - **Enable sog output:** (boolean), whether to output a compressed .sog file.
     - **Enable usdz output:** (boolean), whether to output a compressed .usdz file.
     - **Enable video export:** (boolean), whether to render and export a trajectory flythrough video (.mp4) and thumbnail (.png) of the trained splat.
+    - **Generate collision:** (boolean), whether to generate a sparse voxel octree (`.voxel.json` / `.voxel.bin`) and collision mesh (`.collision.glb`) from the splat for runtime collision detection in PlayCanvas / supersplat-viewer.
+        - Valid values: `"true"`, `"false"`
+        - Default: `"false"`
+    - **Collision scene type:** (string), controls the voxel fill and carve strategy used when generating collision data.
+        - `"indoor"` — for enclosed rooms and buildings: seals the exterior void then carves navigable interior space (`--voxel-external-fill --voxel-carve`)
+        - `"outdoor"` — for terrain and open scenes: fills the ground beneath surfaces then carves navigable space (`--voxel-floor-fill --voxel-carve`)
+        - `"object"` — for isolated objects with no walkable floor: bare voxelization only, no fill or carve
+        - Default: `"outdoor"`
+    - **Collision seed position:** (string), `"x,y,z"` world-space point used as the seed for `--filter-cluster` and voxel fill/carve passes. Should be a known point inside the scene (e.g. a walkable floor position). If the default `"0,0,0"` is outside or inside solid geometry, adjust to a point clearly inside the open space.
+        - Default: `"0,0,0"`
+    - **Generate LOD:** (boolean), whether to generate a streamed multi-LOD SOG bundle (`lod-meta.json`) from the splat. Produces 4 decimation levels (100%, 50%, 25%, 12.5%) that PlayCanvas viewers can stream progressively based on camera distance.
+        - Valid values: `"true"`, `"false"`
+        - Default: `"false"`
+    - **Generate mesh:** (boolean), whether to extract a surface mesh from a trained `dn-splatter` or `ags-mesh` model using IsoOctree TSDF fusion (`isooctree_dn.py`). Outputs a `mesh.ply` and `mesh.glb` that are uploaded to S3 alongside the splat. Only applies when `model` is `dn-splatter`, `dn-splatter-big`, or `ags-mesh`.
+        - Valid values: `"true"`, `"false"`
+        - Default: `"true"`
     - **Ply Coordinates:** (string), the coordinate system to transform the .ply to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
     - **Spz Coordinates:** (string), the coordinate system to transform the .spz to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
     - **Sog Coordinates:** (string), the coordinate system to transform the .sog to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)

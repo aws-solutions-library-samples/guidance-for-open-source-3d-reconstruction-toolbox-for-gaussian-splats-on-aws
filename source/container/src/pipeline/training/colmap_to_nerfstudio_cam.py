@@ -62,6 +62,25 @@ if os.path.isdir(path):
             # Create json from colmap data
             print(f"Sparse Path: {sparse_path}")
             print(f"PLY Filename: {ply_path}")
+
+            # Generate sparse.ply from points3D.bin if it doesn't already exist.
+            # dn-splatter (normal_nerfstudio.py) requires this file when load_3D_points=True.
+            if not os.path.isfile(ply_path):
+                points3d_bin = os.path.join(sparse_path, "points3D.bin")
+                points3d_txt = os.path.join(sparse_path, "points3D.txt")
+                if os.path.isfile(points3d_bin) or os.path.isfile(points3d_txt):
+                    try:
+                        import pycolmap
+                        reconstruction = pycolmap.Reconstruction(sparse_path)
+                        reconstruction.export_PLY(ply_path)
+                        print(f"Generated sparse.ply with {reconstruction.num_points3D()} points")
+                    except Exception as ply_err:
+                        print(f"WARNING: Could not generate sparse.ply: {ply_err}")
+                else:
+                    print(f"WARNING: No points3D.bin/txt found, sparse.ply will not be generated")
+            else:
+                print(f"DEBUG: sparse.ply already exists at {ply_path} ({os.path.getsize(ply_path)} bytes)")
+
             colmap_to_json(recon_dir=Path(sparse_path), output_dir=Path(path), ply_filename=ply_path)
 
             # Inject mask_path into each frame if a masks directory exists

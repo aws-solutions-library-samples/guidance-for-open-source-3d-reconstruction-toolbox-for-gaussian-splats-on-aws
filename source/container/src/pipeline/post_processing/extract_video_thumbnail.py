@@ -44,6 +44,11 @@ def main():
         output_path = os.path.join(input_dir, f"{input_name}_thumbnail.png")
     
     try:
+        # Skip gracefully if input video doesn't exist (e.g. video export was skipped)
+        if not os.path.exists(args.input):
+            print(f"Info: Video file not found, skipping thumbnail extraction: {args.input}")
+            sys.exit(0)
+
         # Open video file
         cap = cv2.VideoCapture(args.input)
         

@@ -435,7 +435,8 @@ if __name__ == '__main__':
             scheduler=scheduler,
             variant=dtype_,
             use_safetensors=True,
-            torch_dtype=dtype
+            torch_dtype=dtype,
+            trust_remote_code=True
         )
         pipeline.to(device)
         pipeline.enable_attention_slicing()

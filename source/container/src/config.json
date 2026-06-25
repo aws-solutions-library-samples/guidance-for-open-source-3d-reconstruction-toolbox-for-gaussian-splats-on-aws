@@ -42,8 +42,12 @@
     "ENABLE_USDZ": "true",
     "USDZ_COORDS": "rhyu",
     "ENABLE_VIDEO_EXPORT": "True",
+    "GENERATE_COLLISION": "false",
+    "COLLISION_SCENE_TYPE": "outdoor",
+    "COLLISION_SEED_POS": "0,0,0",
+    "GENERATE_LOD": "false",
+    "GENERATE_MESH": "true",
     "PRESERVE_SCENE_SCALE": "false",
-    "ENABLE_DEPTH_LOSS": "false",
     "ENABLE_FL_HEURISTIC": "false",
     "FL_HEURISTIC_VALUE": "1.2",
     "ENABLE_FL_METRIC": "false",
@@ -54,5 +58,6 @@
     "AUTOGROUP_IMAGES": "True",
     "AUTOGROUP_TARGET_NAME": "",
     "AUTO_MAPPER": "True",
-    "AUTO_MATCHER": "True"
+    "AUTO_MATCHER": "True",
+    "NUM_GAUSSIANS": "1000000"
 }

@@ -91,7 +91,8 @@ def validate_config(config: dict):
             "enable": None,
             "maxSteps": None,
             "model": None,
-            "3dIsp": None
+            "3dIsp": None,
+            "numGaussians": None
         },
         "postProcessing": {
             "cropOutputBounds": None,
@@ -103,7 +104,12 @@ def validate_config(config: dict):
             "plyCoords": None,
             "spzCoords": None,
             "sogCoords": None,
-            "usdzCoords": None
+            "usdzCoords": None,
+            "generateCollision": None,
+            "collisionSceneType": None,
+            "collisionSeedPos": None,
+            "generateLod": None,
+            "generateMesh": None
         },
         "sphericalCamera": {
             "enable": None,
@@ -245,6 +251,7 @@ def lambda_handler(event, context):
                     "runTrain": str(json_content["training"]["enable"]),
                     "model": str(json_content["training"]["model"]),
                     "maxSteps": str(json_content["training"]["maxSteps"]),
+                    "numGaussians": str(json_content["training"].get("numGaussians", "1000000")),
                     "3dIsp": str(json_content["training"].get("3dIsp", "none")),
                     "cropOutputBounds": str(json_content["postProcessing"]["cropOutputBounds"]),
                     "cropMode": str(json_content["postProcessing"]["cropMode"]),
@@ -254,7 +261,7 @@ def lambda_handler(event, context):
                     "enableUsdz": str(json_content["postProcessing"].get("enableUsdz", "true")),
                     "plyCoords": str(json_content["postProcessing"].get("plyCoords", "rhyu")),
                     "spzCoords": str(json_content["postProcessing"].get("spzCoords", "rhyu")),
-                    "sogCoords": str(json_content["postProcessing"].get("sogCoords", "rhyu")),
+                    "sogCoords": str(json_content["postProcessing"].get("sogCoords", "rhzu")),
                     "usdzCoords": str(json_content["postProcessing"].get("usdzCoords", "rhyu")),
                     "sphericalCamera": str(json_content["sphericalCamera"]["enable"]),
                     "sphericalCubeFacesToRemove": str(json_content["sphericalCamera"]["cubeFacesToRemove"]),
@@ -266,7 +273,12 @@ def lambda_handler(event, context):
                     "objectRemovalObjects": str(json_content["segmentation"]["objectRemoval"]["objects"]),
                     "preserveSceneScale": str(json_content["training"].get("preserveSceneScale", "false")),
                     "enableDepthLoss": str(json_content["training"].get("enableDepthLoss", "false")),
-                    "enableVideoExport": str(json_content["postProcessing"].get("enableVideoExport", "true"))
+                    "enableVideoExport": str(json_content["postProcessing"].get("enableVideoExport", "true")),
+                    "generateCollision": str(json_content["postProcessing"].get("generateCollision", "false")),
+                    "collisionSceneType": str(json_content["postProcessing"].get("collisionSceneType", "outdoor")),
+                    "collisionSeedPos": str(json_content["postProcessing"].get("collisionSeedPos", "0,0,0")),
+                    "generateLod": str(json_content["postProcessing"].get("generateLod", "false")),
+                    "generateMesh": str(json_content["postProcessing"].get("generateMesh", "true"))
                 }
 
                 try:
@@ -335,6 +347,7 @@ def lambda_handler(event, context):
                     "RUN_TRAIN": str(json_content["training"]["enable"]),
                     "MODEL": str(json_content["training"]["model"]),
                     "MAX_STEPS": str(json_content["training"]["maxSteps"]),
+                    "NUM_GAUSSIANS": str(json_content["training"].get("numGaussians", "1000000")),
                     "THREED_ISP": str(json_content["training"].get("3dIsp", "none")),
                     "CROP_OUTPUT_BOUNDS": str(json_content["postProcessing"]["cropOutputBounds"]).lower(),
                     "CROP_MODE": str(json_content["postProcessing"]["cropMode"]),
@@ -355,8 +368,12 @@ def lambda_handler(event, context):
                     "OBJECT_REMOVAL_ACTION": str(json_content["segmentation"]["objectRemoval"]["action"]),
                     "OBJECT_REMOVAL_OBJECTS": str(json_content["segmentation"]["objectRemoval"]["objects"]),
                     "PRESERVE_SCENE_SCALE": str(json_content["training"].get("preserveSceneScale", "false")),
-                    "ENABLE_DEPTH_LOSS": str(json_content["training"].get("enableDepthLoss", "false")),
                     "ENABLE_VIDEO_EXPORT": str(json_content["postProcessing"].get("enableVideoExport", "true")),
+                    "GENERATE_COLLISION": str(json_content["postProcessing"].get("generateCollision", "false")),
+                    "COLLISION_SCENE_TYPE": str(json_content["postProcessing"].get("collisionSceneType", "outdoor")),
+                    "COLLISION_SEED_POS": str(json_content["postProcessing"].get("collisionSeedPos", "0,0,0")),
+                    "GENERATE_LOD": str(json_content["postProcessing"].get("generateLod", "false")),
+                    "GENERATE_MESH": str(json_content["postProcessing"].get("generateMesh", "true")),
                     "DDB_TABLE_NAME": os.environ.get("DDB_TABLE_NAME", ""),
                     "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-east-1"))
                 },

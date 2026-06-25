@@ -1272,3 +1272,372 @@ def parse_gsplat_metrics_from_log(log_output, output_json_path):
         return metrics
     
     return None
+
+
+
+
+def images_have_subdirectories(image_path):
+    """
+    Returns True if any immediate children of image_path are directories,
+    indicating a subdirectory image layout (e.g. face_00/pano_006.png).
+    """
+    if not os.path.isdir(image_path):
+        return False
+    return any(os.path.isdir(os.path.join(image_path, e)) for e in os.listdir(image_path))
+
+
+def flatten_images_for_gsplat(image_path, sparse_0_path, log):
+    """
+    Ensure images/ files and images.bin both use flat names (subdir_file.ext).
+
+    Two scenarios handled:
+    1. Files already flat (clean_images_dir ran): only update images.bin.
+    2. Files still in subdirs (gsplat-depth, no dn-splatter preprocess):
+       rename files AND update images.bin.
+    """
+    import struct
+
+    images_bin = os.path.join(sparse_0_path, "images.bin")
+    if not os.path.exists(images_bin):
+        log.warning(f"flatten_images_for_gsplat: images.bin not found at {images_bin}, skipping")
+        return
+
+    try:
+        with open(images_bin, "rb") as f:
+            num_images = struct.unpack("<Q", f.read(8))[0]
+            records = []
+            for _ in range(num_images):
+                image_id = struct.unpack("<I", f.read(4))[0]
+                qvec = struct.unpack("<4d", f.read(32))
+                tvec = struct.unpack("<3d", f.read(24))
+                camera_id = struct.unpack("<I", f.read(4))[0]
+                name_bytes = b""
+                while True:
+                    c = f.read(1)
+                    if c == b"\x00":
+                        break
+                    name_bytes += c
+                name = name_bytes.decode("utf-8")
+                num_pts = struct.unpack("<Q", f.read(8))[0]
+                points2d_raw = f.read(num_pts * 24) if num_pts else b""
+                records.append((image_id, qvec, tvec, camera_id, name, num_pts, points2d_raw))
+    except Exception as e:
+        log.error(f"flatten_images_for_gsplat: failed to read images.bin: {e}")
+        return
+
+    needs_flatten = any("/" in r[4] or "\\" in r[4] for r in records)
+    if not needs_flatten:
+        log.info("flatten_images_for_gsplat: images.bin already has flat names, nothing to do")
+        return
+
+    # Build rename map: original subdir name -> flat name
+    rename_map = {}
+    for _, _, _, _, name, _, _ in records:
+        norm = name.replace("\\", "/")
+        if "/" in norm:
+            flat = norm.replace("/", "_")
+            rename_map[norm] = flat
+
+    # Rename image files on disk if they still have subdirectory structure
+    renamed_files = 0
+    for old_rel, flat_name in rename_map.items():
+        src = os.path.join(image_path, old_rel)
+        dst = os.path.join(image_path, flat_name)
+        if os.path.exists(src) and not os.path.exists(dst):
+            os.makedirs(os.path.dirname(dst) if os.path.dirname(flat_name) else image_path, exist_ok=True)
+            os.rename(src, dst)
+            renamed_files += 1
+
+    # Remove now-empty subdirectories
+    if renamed_files > 0:
+        for entry in os.listdir(image_path):
+            entry_path = os.path.join(image_path, entry)
+            if os.path.isdir(entry_path):
+                shutil.rmtree(entry_path, ignore_errors=True)
+        log.info(f"flatten_images_for_gsplat: renamed {renamed_files} image files on disk")
+
+    # Update images.bin with flat names
+    shutil.copy2(images_bin, images_bin + ".bak")
+    try:
+        with open(images_bin, "wb") as f:
+            f.write(struct.pack("<Q", num_images))
+            for image_id, qvec, tvec, camera_id, name, num_pts, points2d_raw in records:
+                norm = name.replace("\\", "/")
+                flat_name = norm.replace("/", "_") if "/" in norm else norm
+                f.write(struct.pack("<I", image_id))
+                f.write(struct.pack("<4d", *qvec))
+                f.write(struct.pack("<3d", *tvec))
+                f.write(struct.pack("<I", camera_id))
+                f.write(flat_name.encode("utf-8") + b"\x00")
+                f.write(struct.pack("<Q", num_pts))
+                f.write(points2d_raw)
+        count = len(rename_map)
+        log.info(f"flatten_images_for_gsplat: updated images.bin — {count} names flattened")
+    except Exception as e:
+        log.error(f"flatten_images_for_gsplat: failed to write images.bin: {e}, restoring backup")
+        shutil.copy2(images_bin + ".bak", images_bin)
+
+
+def remove_unobserved_images_for_gsplat(sparse_0_path, log):
+    """
+    Remove images from images.bin that have zero valid 3D point references.
+
+    gsplat's depth loss path calls point_indices[image_name] for every image
+    without guarding for missing keys. Images with no triangulated points are
+    absent from point_indices, causing a KeyError.
+
+    Determines observed images by reading point3D_id references in images.bin
+    directly (point3D_id >= 0 means the keypoint is matched to a 3D point).
+    This handles COLMAP exports where points3D.bin tracks are stripped but
+    images.bin still contains valid per-keypoint point3D_id references.
+
+    Args:
+        sparse_0_path: Path to colmap/sparse/0 containing images.bin
+        log:           Logger instance
+    """
+    import struct
+
+    images_bin = os.path.join(sparse_0_path, "images.bin")
+    if not os.path.exists(images_bin):
+        log.warning("remove_unobserved_images_for_gsplat: images.bin missing, skipping")
+        return
+
+    # Read images.bin, tracking which images have at least one valid point3D reference
+    with open(images_bin, "rb") as f:
+        num_images = struct.unpack("<Q", f.read(8))[0]
+        records = []
+        for _ in range(num_images):
+            image_id = struct.unpack("<I", f.read(4))[0]
+            qvec = struct.unpack("<4d", f.read(32))
+            tvec = struct.unpack("<3d", f.read(24))
+            camera_id = struct.unpack("<I", f.read(4))[0]
+            name_bytes = b""
+            while True:
+                c = f.read(1)
+                if c == b"\x00":
+                    break
+                name_bytes += c
+            name = name_bytes.decode("utf-8")
+            num_pts = struct.unpack("<Q", f.read(8))[0]
+            points2d_raw = f.read(num_pts * 24) if num_pts else b""
+            # Count valid point3D_id references (signed int64, -1 = unmatched)
+            has_observations = False
+            if num_pts:
+                for j in range(num_pts):
+                    p3d_id = struct.unpack("<q", points2d_raw[j*24+16 : j*24+24])[0]
+                    if p3d_id >= 0:
+                        has_observations = True
+                        break
+            records.append((image_id, qvec, tvec, camera_id, name, num_pts, points2d_raw, has_observations))
+
+    kept = [r for r in records if r[7]]
+    removed = [r[4] for r in records if not r[7]]
+
+    if not removed:
+        log.info("remove_unobserved_images_for_gsplat: all images have 3D observations, nothing to remove")
+        return
+
+    log.info(f"remove_unobserved_images_for_gsplat: removing {len(removed)} unobserved images: {removed}")
+
+    shutil.copy2(images_bin, images_bin + ".bak_unobserved")
+    with open(images_bin, "wb") as f:
+        f.write(struct.pack("<Q", len(kept)))
+        for image_id, qvec, tvec, camera_id, name, num_pts, points2d_raw, _ in kept:
+            f.write(struct.pack("<I", image_id))
+            f.write(struct.pack("<4d", *qvec))
+            f.write(struct.pack("<3d", *tvec))
+            f.write(struct.pack("<I", camera_id))
+            f.write(name.encode("utf-8") + b"\x00")
+            f.write(struct.pack("<Q", num_pts))
+            f.write(points2d_raw)
+
+    log.info(f"remove_unobserved_images_for_gsplat: kept {len(kept)}/{num_images} images")
+
+
+def rebuild_points3d_tracks_for_gsplat(sparse_0_path, log):
+    """
+    Rebuild points3D.bin track data from images.bin point2D->point3D_id references.
+
+    COLMAP 4.x rig reconstructions store points3D with track_length=0 because the
+    reverse index is not populated in the rig format. gsplat's colmap parser builds
+    point_indices from points3D tracks, resulting in an empty dict and KeyError.
+
+    This function reads the forward references (point3D_id per keypoint in images.bin)
+    and writes them back into points3D.bin as proper track entries, making the file
+    compatible with gsplat's older pycolmap SceneManager.
+
+    Uses pycolmap to read the reconstruction correctly (handles rig format).
+
+    Args:
+        sparse_0_path: Path to colmap/sparse/0
+        log:           Logger instance
+    """
+    try:
+        import pycolmap
+    except ImportError:
+        log.warning("rebuild_points3d_tracks_for_gsplat: pycolmap not available, skipping")
+        return
+
+    import struct
+
+    points3d_bin = os.path.join(sparse_0_path, "points3D.bin")
+    images_bin = os.path.join(sparse_0_path, "images.bin")
+
+    if not os.path.exists(points3d_bin) or not os.path.exists(images_bin):
+        log.warning("rebuild_points3d_tracks_for_gsplat: missing files, skipping")
+        return
+
+    # Check if tracks already populated
+    with open(points3d_bin, "rb") as f:
+        num_pts = struct.unpack("<Q", f.read(8))[0]
+        if num_pts == 0:
+            log.info("rebuild_points3d_tracks_for_gsplat: no points, skipping")
+            return
+        # Sample first point track length
+        f.read(8)   # point3d_id
+        f.read(24)  # xyz
+        f.read(3)   # rgb
+        f.read(8)   # error
+        sample_track_len = struct.unpack("<Q", f.read(8))[0]
+
+    if sample_track_len > 0:
+        log.info("rebuild_points3d_tracks_for_gsplat: tracks already populated, skipping")
+        return
+
+    log.info("rebuild_points3d_tracks_for_gsplat: rebuilding tracks from images.bin point2D references")
+
+    # Read reconstruction via pycolmap (handles rig format correctly)
+    r = pycolmap.Reconstruction()
+    r.read(sparse_0_path)
+
+    # Build track index: point3D_id -> [(image_id, point2D_idx), ...]
+    tracks = {}
+    for image_id, image in r.images.items():
+        for pt2d_idx, pt2d in enumerate(image.points2D):
+            if pt2d.has_point3D():
+                p3d_id = pt2d.point3D_id
+                if p3d_id not in tracks:
+                    tracks[p3d_id] = []
+                tracks[p3d_id].append((image_id, pt2d_idx))
+
+    log.info(f"rebuild_points3d_tracks_for_gsplat: built tracks for {len(tracks)}/{num_pts} points")
+
+    if not tracks:
+        log.warning("rebuild_points3d_tracks_for_gsplat: no tracks found in images, skipping")
+        return
+
+    # Rewrite points3D.bin with track data
+    shutil.copy2(points3d_bin, points3d_bin + ".bak_tracks")
+
+    # Read existing points3D data
+    point_data = {}
+    with open(points3d_bin, "rb") as f:
+        num_pts = struct.unpack("<Q", f.read(8))[0]
+        for _ in range(num_pts):
+            p3d_id = struct.unpack("<Q", f.read(8))[0]
+            xyz = f.read(24)
+            rgb = f.read(3)
+            error = f.read(8)
+            track_len = struct.unpack("<Q", f.read(8))[0]
+            f.read(track_len * 8)  # skip empty tracks
+            point_data[p3d_id] = (xyz, rgb, error)
+
+    with open(points3d_bin, "wb") as f:
+        f.write(struct.pack("<Q", num_pts))
+        for p3d_id, (xyz, rgb, error) in point_data.items():
+            track = tracks.get(p3d_id, [])
+            f.write(struct.pack("<Q", p3d_id))
+            f.write(xyz)
+            f.write(rgb)
+            f.write(error)
+            f.write(struct.pack("<Q", len(track)))
+            for image_id, pt2d_idx in track:
+                f.write(struct.pack("<I", image_id))
+                f.write(struct.pack("<I", pt2d_idx))
+
+    log.info(f"rebuild_points3d_tracks_for_gsplat: wrote {num_pts} points with track data")
+
+
+def apply_camera_masks_to_images(image_path, masks_path, log):
+    """
+    Pre-apply per-camera static masks to images for gsplat depth loss training.
+
+    gsplat's colmap dataset only supports camera-level masks for fisheye ROI and
+    has no per-image mask loading. Since our masks are static per camera (same mask
+    for all images from a given camera face), we apply them directly to the image
+    pixels: masked pixels (value=0 in mask) are zeroed out in the image.
+
+    The mask subdirectory name (e.g. 'face_01') is matched to the image subdirectory
+    or flat image prefix after flattening (e.g. 'face_01_pano_001.png').
+
+    Args:
+        image_path:  Path to images directory (flat after flatten_images_for_gsplat)
+        masks_path:  Path to masks directory containing per-camera subdirectories
+        log:         Logger instance
+    """
+    import cv2
+
+    if not os.path.isdir(masks_path):
+        log.info("apply_camera_masks_to_images: no masks directory, skipping")
+        return
+
+    # Build camera_name -> mask array mapping (one mask per camera subdir)
+    camera_masks = {}
+    for cam_name in os.listdir(masks_path):
+        cam_mask_dir = os.path.join(masks_path, cam_name)
+        if not os.path.isdir(cam_mask_dir):
+            continue
+        mask_files = [f for f in os.listdir(cam_mask_dir)
+                      if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        if not mask_files:
+            continue
+        mask_img = cv2.imread(os.path.join(cam_mask_dir, mask_files[0]),
+                              cv2.IMREAD_GRAYSCALE)
+        if mask_img is None:
+            continue
+        # Normalize to binary: >0 = valid pixel
+        mask_bin = (mask_img > 0).astype('uint8') * 255
+        camera_masks[cam_name] = mask_bin
+        log.info(f"apply_camera_masks_to_images: loaded mask for {cam_name} "
+                 f"shape={mask_bin.shape} valid_frac={mask_bin.mean()/255:.2f}")
+
+    if not camera_masks:
+        log.info("apply_camera_masks_to_images: no camera masks found, skipping")
+        return
+
+    # Apply masks to images - match by camera name prefix
+    image_files = [f for f in os.listdir(image_path)
+                   if os.path.isfile(os.path.join(image_path, f))
+                   and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+
+    applied = 0
+    for img_file in image_files:
+        # Find matching camera mask by prefix (e.g. face_01_pano_001.png -> face_01)
+        matched_cam = None
+        for cam_name in camera_masks:
+            if img_file.startswith(cam_name + "_") or img_file.startswith(cam_name + "/"):
+                matched_cam = cam_name
+                break
+
+        if matched_cam is None:
+            continue
+
+        img_path = os.path.join(image_path, img_file)
+        img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            continue
+
+        mask = camera_masks[matched_cam]
+
+        # Resize mask to image dimensions if needed
+        h, w = img.shape[:2]
+        if mask.shape != (h, w):
+            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        # Apply mask: zero out pixels where mask=0
+        mask_3ch = mask[:, :, np.newaxis] if img.ndim == 3 else mask
+        img_masked = (img * (mask_3ch / 255)).astype(img.dtype)
+        cv2.imwrite(img_path, img_masked)
+        applied += 1
+
+    log.info(f"apply_camera_masks_to_images: applied masks to {applied}/{len(image_files)} images")

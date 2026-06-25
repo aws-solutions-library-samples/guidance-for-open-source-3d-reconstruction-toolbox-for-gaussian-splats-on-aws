@@ -142,7 +142,7 @@ main.py
 │   ├─ Import statements
 │   ├─ Environment variable loading via load_config()
 │   ├─ Path constants (OUTPUT_TAR_PATH, EVAL_METRIC_PATH, etc.)
-│   ├─ Feature flags derived from config (IS_BATCH, LOCAL_DEBUG, ENABLE_DEPTH_LOSS, etc.)
+│   ├─ Feature flags derived from config (IS_BATCH, LOCAL_DEBUG, etc.)
 │   ├─ AWS Batch S3 download (if IS_BATCH)
 │   ├─ Model archive extraction
 │   └─ Pipeline instantiation
@@ -541,4 +541,6 @@ Error codes 700–799 are reserved for container pipeline errors. When adding a 
 | 788 | Post-processing | Issue converting PLY to SPZ |
 | 790 | Post-processing | Issue uploading asset to S3 |
 | 795 | General | General error running the pipeline |
-| 800–899 | Reserved | Available for new features |
+| 800 | Post-processing | Issue generating or uploading collision voxel data |
+| 801 | Post-processing | Issue generating or uploading LOD SOG bundle |
+| 802–899 | Reserved | Available for new features |

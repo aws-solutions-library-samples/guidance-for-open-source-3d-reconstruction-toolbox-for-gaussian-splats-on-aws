@@ -310,7 +310,22 @@ def get_cloudwatch_logs(training_job_name, is_batch_job=False, log_stream_name=N
             'maxDynamicUniformBuffersPerPipelineLayout',
             'maxDynamicStorageBuffersPerPipelineLayout',
             'LOG_VERBOSITY:',
-            '(type: str)'
+            '(type: str)',
+            'Warning (non-fatal): Could not update pose priors',
+            'table pose_priors has no column named',
+            'update_colmap_db_with_pose_priors',
+            'sqlite3.OperationalError: table pose_priors',
+            'POSE_PRIOR_DEBUG',
+            'Error updating COLMAP database with pose priors',
+            'Average depth alignment error for batch depths is',
+            'saving aligned depth images',
+            'DN-Splatter pre-processing complete',
+            'Running depth completion zoe',
+            'Generating sfm depth maps',
+            'Generating aligned mono depth',
+            'Computing mono depth estimates',
+            'Aligning sparse depth maps',
+            'Processing batch'
         ]
         
         def should_ignore_message(message):

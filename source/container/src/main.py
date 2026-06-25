@@ -58,8 +58,8 @@ ERROR CODES
 750, "Issue creating the reconstruction component"
 755, "Issue creating the Colmap to Nerfstudio component"
 760, "Trainer specified does not match proper configuration"
-765, "Issue running the training session stage"
-770, "Issue exporting splat from NerfStudio"
+766, "Gaussian splat training diverged: all Gaussians are NaN/Inf (convergence failure)"
+, "Issue exporting splat from NerfStudio"
 771, "Issue calculating metrics"
 775, "Issue rendering trajectory video"
 776, "Issue extracting video thumbnail"
@@ -74,6 +74,10 @@ ERROR CODES
 787, "Issue converting ply to USDZ"
 788, "Issue converting ply to SPZ"
 795, "General error running the pipeline"
+800, "Issue generating or uploading collision voxel data"
+801, "Issue generating or uploading LOD SOG bundle"
+802, "Issue creating mesh extraction component"
+803, "Issue uploading mesh GLB to S3"
 """
 
 import re
@@ -104,7 +108,8 @@ from utils import (
     setup_local_debug, copy_to_local_output, print_container_version_info,
     update_dynamodb_metrics, update_component_phase_completion,
     parse_3dgrut_metrics_from_log, parse_gsplat_metrics_from_log,
-    send_task_success, send_task_failure, send_task_heartbeat
+    send_task_success, send_task_failure, send_task_heartbeat,
+    flatten_images_for_gsplat, remove_unobserved_images_for_gsplat
 )
 
 if __name__ == "__main__":
@@ -154,7 +159,16 @@ if __name__ == "__main__":
         ENABLE_MULTI_GPU = "false"
         LOCAL_DEBUG = os.environ.get('LOCAL_DEBUG', config.get('LOCAL_DEBUG', 'false')).lower() == 'true'
         ENABLE_TASK_TOKEN_CALLBACK = IS_BATCH and bool(TASK_TOKEN) and not LOCAL_DEBUG
-        ENABLE_DEPTH_LOSS = config.get('ENABLE_DEPTH_LOSS', 'false').lower() == 'true'
+        ENABLE_DEPTH_LOSS = config['MODEL'] == 'gsplat-depth' or config.get('ENABLE_DEPTH_LOSS', 'false').lower() == 'true'
+        GENERATE_COLLISION = config.get('GENERATE_COLLISION', 'false').lower() == 'true'
+        GENERATE_LOD = config.get('GENERATE_LOD', 'false').lower() == 'true'
+        GENERATE_MESH = config.get('GENERATE_MESH', 'true').lower() == 'true'
+
+        # Collision voxelization requires metric world scale to produce accurate collision geometry.
+        # Force PRESERVE_SCENE_SCALE on whenever GENERATE_COLLISION is enabled.
+        if GENERATE_COLLISION and config.get('PRESERVE_SCENE_SCALE', 'false').lower() != 'true':
+            config['PRESERVE_SCENE_SCALE'] = 'true'
+            print("GENERATE_COLLISION is enabled — forcing PRESERVE_SCENE_SCALE=true for accurate collision geometry")
 
         # Check if video or zip of images given
         VIDEO = validate_input_media(config['FILENAME'])
@@ -381,6 +395,10 @@ if __name__ == "__main__":
 
     if config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or config['MODEL'] == "splatfacto-mcmc":
         model = "splatfacto"
+    elif config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
+        model = config['MODEL']
+    elif config['MODEL'] == "gsplat-depth":
+        model = "splatfacto"
     else:
         model = config['MODEL']
     
@@ -400,6 +418,8 @@ if __name__ == "__main__":
     usdz_ply_path = os.path.join(output_path, "usdz.ply")
     sog_ply_path = os.path.join(output_path, "sog.ply")
     collision_mesh_path = os.path.join(output_path, "collision_mesh.ply")
+    voxel_path = os.path.join(output_path, "splat.voxel.json")
+    lod_dir = os.path.join(output_path, "lod")
 
     # For spherical, will have 6 views per 360 image using cube faces so will be 6x images
     config['MAX_NUM_IMAGES'] = str(int(config['MAX_NUM_IMAGES']))
@@ -995,8 +1015,16 @@ if __name__ == "__main__":
                     "-i", input_file_path,
                     "-o", image_path,
                     "-n", adjusted_max_images,
-                    "-ll", config['LOG_VERBOSITY'].upper()
+                    "-ll", config['LOG_VERBOSITY'].upper(),
+                    "-s", config['VIDEO_START_TIME']
                 ]
+                video_stop_time = str(config['VIDEO_STOP_TIME']).strip() if config['VIDEO_STOP_TIME'] is not None else ""
+                if video_stop_time and video_stop_time.lower() not in ['none', 'null', '', 'nan', '-1']:
+                    try:
+                        if float(video_stop_time) > 0:
+                            args.extend(["-e", video_stop_time])
+                    except ValueError:
+                        pass
                 pipeline.create_component(
                     name="VideoToImages",
                     comp_type=ComponentType.PRE_PROCESSING,
@@ -1122,14 +1150,14 @@ if __name__ == "__main__":
     try:
         if config['REMOVE_BACKGROUND'] == "true" and config['BACKGROUND_REMOVAL_MODEL'] != "sam2" and \
             config['RUN_RECON'] == "true":
-            model = "u2net"
+            bg_removal_model = "u2net"
 
             args = [
                 "-i", image_path,
                 "-o", image_path,
                 "-nt", str(pipeline.config.num_threads),
                 "-ng", str(pipeline.config.num_gpus),
-                "-m", model
+                "-m", bg_removal_model
             ]
 
             pipeline.create_component(
@@ -1165,17 +1193,17 @@ if __name__ == "__main__":
                 args.append("--remove_faces")
 
             if config['REMOVE_OBJECT'] == "true":
-                model = "u2net_human_seg"
+                bg_removal_model = "u2net_human_seg"
                 try:
                     objects_list = ast.literal_eval(config['OBJECT_REMOVAL_OBJECTS'])
                     if "human" in [obj.lower() for obj in objects_list]:
-                        model = "u2net_human_seg"
+                        bg_removal_model = "u2net_human_seg"
                 except (ValueError, SyntaxError):
                     if "human" in config['OBJECT_REMOVAL_OBJECTS'].lower():
-                        model = "u2net_human_seg"
+                        bg_removal_model = "u2net_human_seg"
                 args.extend(["--remove_object",
                              "--object_action", config['OBJECT_REMOVAL_ACTION'],
-                             "-m", model,
+                             "-m", bg_removal_model,
                              "-nt", str(pipeline.config.num_threads),
                              "-ng", str(pipeline.config.num_gpus),
                              "-gpu", str(USE_GPU)
@@ -1201,23 +1229,23 @@ if __name__ == "__main__":
     try:
         # Skip object removal if using spherical camera (handled in panorama_sfm.py)
         if config['REMOVE_OBJECT'] == "true" and config['RUN_RECON'] == "true" and config['SPHERICAL_CAMERA'] != "true":
-            model = None
+            bg_removal_model = None
             # OBJECT REMOVAL COMPONENT FOR HUMAN
             try:
                 objects_list = ast.literal_eval(config['OBJECT_REMOVAL_OBJECTS'])
                 if "human" in [obj.lower() for obj in objects_list]:
-                    model = "u2net_human_seg"
+                    bg_removal_model = "u2net_human_seg"
             except (ValueError, SyntaxError):
                 # Fallback to string check if parsing fails
                 if "human" in config['OBJECT_REMOVAL_OBJECTS'].lower():
-                    model = "u2net_human_seg"
-            if model is not None:
+                    bg_removal_model = "u2net_human_seg"
+            if bg_removal_model is not None:
                 args = [
                     "-i", image_path,
                     "-o", filter_output_dir,
                     "-nt", str(pipeline.config.num_threads),
                     "-ng", str(pipeline.config.num_gpus),
-                    "-m", model
+                    "-m", bg_removal_model
                 ]
                 pipeline.create_component(
                     name="RemoveObject",
@@ -1660,6 +1688,40 @@ if __name__ == "__main__":
         pipeline.report_error(755, error_message)
 
     ##################################
+    # PRE-PROCESS COMPONENT:
+    # Generate normals and aligned depth for DN-Splatter / AGS-Mesh
+    ##################################
+    try:
+        if config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh") and config['RUN_TRAIN'] == "true":
+            depth_dir = os.path.join(config['DATASET_PATH'], "depth")
+            if not os.path.isdir(depth_dir):
+                depth_dir = os.path.join(config['DATASET_PATH'], "depth_images")
+            has_sensor_depth = os.path.isdir(depth_dir) and any(
+                f.lower().endswith(('.png', '.jpg', '.npy'))
+                for f in os.listdir(depth_dir)
+            ) if os.path.isdir(depth_dir) else False
+            args = [
+                "--data-dir", config['DATASET_PATH'],
+                "--normal-format", "dsine",
+            ]
+            if has_sensor_depth:
+                log.info(f"DN-Splatter preprocess: sensor depth found in {depth_dir}, will inject depth_file_path entries")
+            if config['MODEL'] == "ags-mesh":
+                args.append("--generate-depth-masks")
+            pipeline.create_component(
+                name="DN-Splatter-Preprocess",
+                comp_type=ComponentType.RECONSTRUCTION,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="training/dn_splatter_preprocess.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=True
+            )
+    except Exception as e:
+        error_message = f"Issue creating DN-Splatter pre-processing component: {e}"
+        pipeline.report_error(756, error_message)
+
+    ##################################
     # TRAINING COMPONENT:
     # Point Cloud, Images, and Poses to 3D Gaussian Splat
     ##################################
@@ -1688,6 +1750,9 @@ if __name__ == "__main__":
                 ]
                 if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
                     args.extend(["--no-normalize-world-space", "--depth_lambda", "1e-4"])
+                if model == "mcmc":
+                    num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
+                    args.extend(["--mcmc.cap-max", str(num_gaussians)])
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -1715,6 +1780,81 @@ if __name__ == "__main__":
                     comp_environ=ComponentEnvironment.EXECUTABLE,
                     command="/opt/ml/code/training/run_gsplat_trainer.sh",
                     args=eval_args,
+                    cwd=current_dir_path,
+                    requires_gpu=True
+                )
+            # Single GPU dn-splatter / ags-mesh
+            elif ENABLE_MULTI_GPU == "false" and \
+                config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
+                # Detect whether sensor depth images are provided in a depth/ directory.
+                # Mode 1 (sensor depth): depth/ dir present → use EdgeAwareLogL1, normal-supervision=depth
+                # Mode 2 (mono depth):   no depth/ dir    → use PearsonDepth,       normal-supervision=mono
+                depth_dir = os.path.join(config['DATASET_PATH'], "depth")
+                if not os.path.isdir(depth_dir):
+                    depth_dir = os.path.join(config['DATASET_PATH'], "depth_images")
+                has_sensor_depth = os.path.isdir(depth_dir) and any(
+                    f.lower().endswith(('.png', '.jpg', '.npy'))
+                    for f in os.listdir(depth_dir)
+                ) if os.path.isdir(depth_dir) else False
+                log.info(f"DN-Splatter depth mode: {'sensor (depth/ dir found)' if has_sensor_depth else 'mono (no depth/ dir)'}")
+
+                args = [
+                    config['MODEL'],
+                    "--viewer.quit-on-train-completion=True",
+                    "--timestamp", TRAIN_EXPERIMENT_NAME,
+                    "--pipeline.model.use-depth-loss", "True",
+                    "--pipeline.model.use-normal-loss", "True",
+                    "--max-num-iterations", str(int(config['MAX_STEPS'])),
+                ]
+                # Use EdgeAwareLogL1 only when preprocess confirmed valid sensor depth
+                # (uint16 mm PNGs injected into transforms.json via .sensor_depth_valid marker).
+                # Otherwise use PearsonDepth which is scale-invariant for mono depths.
+                _sensor_depth_marker = os.path.join(config['DATASET_PATH'], ".sensor_depth_valid")
+                _has_valid_sensor_depth = os.path.exists(_sensor_depth_marker)
+                depth_loss_type = "EdgeAwareLogL1" if _has_valid_sensor_depth else "PearsonDepth"
+                depth_lambda = "0.2" if config['MODEL'] == "ags-mesh" else "0.3"
+                log.info(f"DN-Splatter depth loss: {depth_loss_type} (sensor_depth_valid={_has_valid_sensor_depth})")
+                args.extend([
+                    "--pipeline.model.depth-lambda", depth_lambda,
+                    "--pipeline.model.depth-loss-type", depth_loss_type,
+                    "--pipeline.model.normal-supervision", "mono",
+                ])
+                if config['MODEL'] != "ags-mesh":
+                    args.extend(["--pipeline.model.use-normal-tv-loss", "True"])
+                if config['LOG_VERBOSITY'] != "debug":
+                    args.extend([
+                        "--logging.local-writer.enable", "False",
+                        "--logging.profiler", "none"
+                    ])
+                args.extend([
+                    "normal-nerfstudio",
+                    "--data", config['DATASET_PATH'],
+                    "--downscale-factor", "1",
+                    "--load-3D-points", "True",
+                    "--load-normals", "True",
+                    "--normal-format", "dsine",
+                    # --load-depths True causes the dataparser to look for mono_depth/*_aligned.npy
+                    # as a fallback when no depth_file_path entries exist in transforms.json.
+                    # For sensor depth, depths load via transforms.json depth_file_path entries
+                    # unconditionally. Keep --load-depths True so the dataparser works correctly
+                    # in both modes.
+                    "--load-depths", "True",
+                ])
+                if has_sensor_depth:
+                    # Sensor depth is loaded via transforms.json depth_file_path entries;
+                    # normal-nerfstudio dataparser does not accept --depth-mode as a CLI arg.
+                    pass
+                if config['MODEL'] == "ags-mesh":
+                    # Only load confidence masks if valid sensor depth was injected
+                    _marker = os.path.join(config['DATASET_PATH'], ".sensor_depth_valid")
+                    if os.path.exists(_marker):
+                        args.extend(["--load-depth-confidence-masks", "True"])
+                pipeline.create_component(
+                    name="Train",
+                    comp_type=ComponentType.TRAINING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="training/run_dn_splatter_wrapper.py",
+                    args=args,
                     cwd=current_dir_path,
                     requires_gpu=True
                 )
@@ -1765,6 +1905,9 @@ if __name__ == "__main__":
                         "--pipeline.model.use-scale-regularization", "True",
                         "--max-num-iterations", str(int(config['MAX_STEPS']))
                     ])
+                        if config['MODEL'] == "splatfacto-mcmc":
+                            num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
+                            args.extend(["--pipeline.model.max-gs-num", str(num_gaussians)])
                         if isp_mode == "bilagrid":
                             args.extend(["--pipeline.model.use-bilateral-grid", "True"])
                         elif isp_mode == "ppisp":
@@ -1845,8 +1988,8 @@ if __name__ == "__main__":
                 #multi-gpu, use gsplat training strategy
                 num_gpus = int(pipeline.config.num_gpus)
                 batch_size = 1
-                #steps_scaler = 1.0 / num_gpus  # Scale by number of GPUs only
-                steps_scaler = 0.9576*(num_gpus*batch_size)**(-1.689)
+                steps_scaler = 1.0 / num_gpus  # Scale by number of GPUs only
+                #steps_scaler = 0.96*(num_gpus*batch_size)**(-1.689)
                 if config['MODEL'] == "splatfacto-mcmc":
                     model = "mcmc"
                 else:
@@ -1864,13 +2007,16 @@ if __name__ == "__main__":
                     #              # with NCCL all_reduce in multi-GPU distributed training.
                     #              # Re-enable once fixed: https://github.com/nerfstudio-project/gsplat/issues/910
                     "--eval_steps", str(int(config['MAX_STEPS'])),
-                    depth_loss_flag,
+                    #depth_loss_flag,
                     "--data-dir", config['DATASET_PATH']
                 ]
                 if ENABLE_DEPTH_LOSS:
                     args.extend(["--depth_lambda", "1e-3"])
                 if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
                     args.extend(["--no-normalize-world-space", "--depth_lambda", "1e-4"])
+                if model == "mcmc":
+                    num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
+                    args.extend(["--mcmc.cap-max", str(num_gaussians)])
                 if isp_mode == "bilagrid" or isp_mode == "ppisp":
                     log.info(f"ISP mode '{isp_mode}' not supported with multi-GPU gsplat, skipping")
                 pipeline.create_component(
@@ -2050,7 +2196,7 @@ if __name__ == "__main__":
                     # Use correct output path for resume training
                     if resume_training_active:
                         # Resume training - use config from outputs directory (written by nerfstudio after training)
-                        config_path = f"outputs/unnamed/splatfacto/{RESUME_TRAIN_EXPERIMENT_NAME}/config.yml"
+                        config_path = f"outputs/unnamed/{model}/{RESUME_TRAIN_EXPERIMENT_NAME}/config.yml"
                         args = [
                             "gaussian-splat",
                             "--load-config", config_path,
@@ -2059,7 +2205,7 @@ if __name__ == "__main__":
                         log.info(f"Resume training export using config: {config_path}")
                     else:
                         # Initial training - use config from outputs directory
-                        config_path = f"outputs/unnamed/splatfacto/{TRAIN_EXPERIMENT_NAME}/config.yml"
+                        config_path = f"outputs/unnamed/{model}/{TRAIN_EXPERIMENT_NAME}/config.yml"
                         args = [
                             "gaussian-splat",
                             "--load-config", config_path,
@@ -2108,7 +2254,8 @@ if __name__ == "__main__":
         # Nerfstudio models (non-multi-GPU)
         if ENABLE_MULTI_GPU == "false":
             if not ENABLE_DEPTH_LOSS and (config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
-                config['MODEL'] == "splatfacto-mcmc" or config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto-w-light"):
+                config['MODEL'] == "splatfacto-mcmc" or config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto-w-light" or \
+                config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh")):
                 if resume_training_active:
                     # Resume training - use config from dataset directory for splatfacto models
                     if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
@@ -2119,6 +2266,8 @@ if __name__ == "__main__":
                 else:
                     if config['MODEL'] == "splatfacto-w-light":
                         model = "splatfacto-w-light"
+                    elif config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
+                        model = config['MODEL']
                     else:
                         model = "splatfacto"
                     config_path = f"outputs/unnamed/{model}/{TRAIN_EXPERIMENT_NAME}/config.yml"
@@ -2168,12 +2317,15 @@ if __name__ == "__main__":
     try:
         if config['ENABLE_VIDEO_EXPORT'] == "true" and ENABLE_MULTI_GPU == "false":
             if not ENABLE_DEPTH_LOSS and (config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-mcmc" or \
-                config['MODEL'] == "splatfacto-big" or config['MODEL'] == "splatfacto-w-light"):
+                config['MODEL'] == "splatfacto-big" or config['MODEL'] == "splatfacto-w-light" or \
+                config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh")):
                 model = "splatfacto"
                 if config['MODEL'] == "splatfacto-w-light":
                     model = "splatfacto-w-light"
                 if config['MODEL'] == "nerfacto":
                     model = "nerfacto"
+                if config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
+                    model = config['MODEL']
                 # Use correct output path for resume training
                 if resume_training_active:
                     train_stage = RESUME_TRAIN_EXPERIMENT_NAME
@@ -2188,7 +2340,8 @@ if __name__ == "__main__":
                     "interpolate",
                     "--load-config", config_path,
                     "--output-path", os.path.join(output_path, "render.mp4"),
-                    "--frame-rate", "5"
+                    "--frame-rate", "24",
+                    "--interpolation-steps", "10"
                 ]
                 # Use wrapper for splatfacto-w-light
                 if config['MODEL'] == "splatfacto-w-light":
@@ -2318,16 +2471,15 @@ if __name__ == "__main__":
             if config['MODEL'] != "nerfacto":
                 args = [
                     ply_path,
-                    "--output", ply_path,
-                    "--level", "low",
-                    "--min-cluster", "100",
-                    "--no-confirm"
+                    ply_path,
+                    "--filter-floaters",
+                    "-w"
                 ]
                 pipeline.create_component(
                     name="Clean-Point-Cloud",
                     comp_type=ComponentType.POST_PROCESSING,
-                    comp_environ=ComponentEnvironment.PYTHON,
-                    command="post_processing/clean_point_cloud.py",
+                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                    command="splat-transform",
                     args=args,
                     cwd=current_dir_path,
                     requires_gpu=False
@@ -2441,14 +2593,9 @@ if __name__ == "__main__":
     try:
         if config['MODEL'] != "nerfacto":
             if config['MODEL'] not in ("3dgut", "3dgrt"):
-                preserve_scale = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
-                if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and preserve_scale:
-                    # gsplat with --no-normalize-world-space: raw COLMAP space
-                    # coord transform alone is sufficient, no additional rotation needed
-                    rotation = None
-                else:
-                    # nerfstudio OR normalized gsplat (align_principal_axes makes it OpenGL-like)
-                    rotation = '270,0,0'
+                # gsplat-depth uses --no-normalize-world-space (raw COLMAP/OpenCV space)
+                # nerfstudio models use OpenGL-normalized space
+                rotation = '-90,0,0' if ENABLE_DEPTH_LOSS else '270,0,180'
                 if rotation:
                     args = [
                         orig_ply_path,
@@ -2530,11 +2677,9 @@ if __name__ == "__main__":
     try:
         if config['ENABLE_SOG'] == "true" and config['MODEL'] != "nerfacto":
             if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
-                preserve_scale = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
-                if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and preserve_scale:
-                    rotation = None  # raw COLMAP: coord transform alone sufficient
-                else:
-                    rotation = '270,0,0'  # nerfstudio or normalized gsplat
+                # gsplat-depth uses --no-normalize-world-space (raw COLMAP/OpenCV space)
+                # nerfstudio models use OpenGL-normalized space
+                rotation = '-90,0,0' if ENABLE_DEPTH_LOSS else '270,0,180'
                 if rotation:
                     args = [
                         sog_ply_path,
@@ -2841,6 +2986,147 @@ if __name__ == "__main__":
 
     ##################################
     # POST-PROCESS COMPONENT:
+    # Generate collision voxel data from splat
+    ##################################
+    try:
+        if GENERATE_COLLISION and config['MODEL'] != "nerfacto":
+            args = [
+                "-i", orig_ply_path,
+                "-o", voxel_path,
+                "--scene-type", config.get('COLLISION_SCENE_TYPE', 'outdoor'),
+                "--seed-pos", config.get('COLLISION_SEED_POS', '0,0,0'),
+            ]
+            pipeline.create_component(
+                name="Generate-Collision",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="post_processing/generate_collision.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=True
+            )
+    except Exception as e:
+        error_message = f"Issue creating collision generation component: {e}"
+        pipeline.report_error(800, error_message)
+
+    ##################################
+    # POST-PROCESS COMPONENT:
+    # Export collision zip to S3
+    ##################################
+    try:
+        if GENERATE_COLLISION and config['MODEL'] != "nerfacto":
+            base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()
+            collision_zip_path = os.path.join(output_path, f"{base_name}-collision.zip")
+            pipeline.create_component(
+                name="S3-Export-Collision",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.EXECUTABLE,
+                command="aws",
+                args=["s3", "cp", collision_zip_path,
+                      f"{config['S3_OUTPUT']}/{config['UUID']}/{base_name}-collision.zip"],
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue uploading collision data to S3: {e}"
+        pipeline.report_error(800, error_message)
+
+    ##################################
+    # POST-PROCESS COMPONENT:
+    # Generate streamed LOD SOG bundle from splat
+    ##################################
+    try:
+        if GENERATE_LOD and config['MODEL'] != "nerfacto":
+            args = [
+                "-i", orig_ply_path,
+                "--output-dir", lod_dir,
+            ]
+            pipeline.create_component(
+                name="Generate-LOD",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="post_processing/generate_lod.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue creating LOD generation component: {e}"
+        pipeline.report_error(801, error_message)
+
+    ##################################
+    # POST-PROCESS COMPONENT:
+    # Export LOD zip to S3
+    ##################################
+    try:
+        if GENERATE_LOD and config['MODEL'] != "nerfacto":
+            base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()
+            lod_zip_path = os.path.join(output_path, f"{base_name}-lod.zip")
+            pipeline.create_component(
+                name="S3-Export-LOD",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.EXECUTABLE,
+                command="aws",
+                args=["s3", "cp", lod_zip_path,
+                      f"{config['S3_OUTPUT']}/{config['UUID']}/{base_name}-lod.zip"],
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue uploading LOD bundle to S3: {e}"
+        pipeline.report_error(801, error_message)
+
+    ##################################
+    # POST-PROCESS COMPONENT:
+    # Extract mesh from dn-splatter/ags-mesh model using IsoOctree TSDF fusion
+    ##################################
+    try:
+        if GENERATE_MESH and config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
+            mesh_ply_path = os.path.join(output_path, "mesh.ply")
+            mesh_glb_path = os.path.join(output_path, "mesh.glb")
+            model_config_path = f"outputs/unnamed/{config['MODEL']}/{TRAIN_EXPERIMENT_NAME}/config.yml"
+            args = [
+                "--config-path", model_config_path,
+                "--output-ply", mesh_ply_path,
+                "--output-glb", mesh_glb_path,
+            ]
+            pipeline.create_component(
+                name="Extract-Mesh",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="post_processing/extract_mesh.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=True
+            )
+    except Exception as e:
+        error_message = f"Issue creating mesh extraction component: {e}"
+        pipeline.report_error(802, error_message)
+
+    ##################################
+    # POST-PROCESS COMPONENT:
+    # Export mesh GLB to S3
+    ##################################
+    try:
+        if GENERATE_MESH and config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
+            mesh_glb_path = os.path.join(output_path, "mesh.glb")
+            base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()
+            pipeline.create_component(
+                name="S3-Export-Mesh",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.EXECUTABLE,
+                command="aws",
+                args=["s3", "cp", mesh_glb_path,
+                      f"{config['S3_OUTPUT']}/{config['UUID']}/{base_name}.mesh.glb"],
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue uploading mesh GLB to S3: {e}"
+        pipeline.report_error(803, error_message)
+
+    ##################################
+    # POST-PROCESS COMPONENT:
     # Create and upload model.tar.gz archive to S3
     ##################################
     try:
@@ -2901,7 +3187,8 @@ if __name__ == "__main__":
         ddb_table_name = os.environ.get('DDB_TABLE_NAME')
         log.info(f"DDB_TABLE_NAME from environment: {ddb_table_name}")
         
-        for i in range(0, pipeline.config.num_components, 1):
+        i = 0
+        while i < len(pipeline.components):
             component = pipeline.components[i]
             log.info(f"Running component: {component.name}")
             
@@ -2929,6 +3216,11 @@ if __name__ == "__main__":
                 log.info(f"{component.comp_type.name} started")
                 last_phase = component.comp_type.name
             match component.name:
+                case "DN-Splatter-Preprocess":
+                    # --has-sensor-depth is no longer used by dn_splatter_preprocess.py.
+                    # Sensor depth validation and depth_file_path injection happens
+                    # internally in preprocess. Just run the component.
+                    pipeline.run_component(i)
                 case "VideoToImages":
                     if config['RUN_RECON'] == "false" and config['RUN_TRAIN'] == "false":
                         continue
@@ -3124,6 +3416,21 @@ if __name__ == "__main__":
                         log.info(f"AUTO_MAPPER: {num_imgs} images -> selecting '{target_mapper}' mapper")
                         if target_mapper != config['RECON_SOFTWARE_NAME']:
                             config['RECON_SOFTWARE_NAME'] = target_mapper
+                            # Update DynamoDB to reflect the auto-selected mapper
+                            if ddb_table_name:
+                                try:
+                                    import boto3 as _boto3
+                                    _region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+                                    _ddb = _boto3.resource('dynamodb', region_name=_region)
+                                    _table = _ddb.Table(ddb_table_name)
+                                    _table.update_item(
+                                        Key={os.environ.get('DDB_KEY_NAME', 'uuid'): config['UUID']},
+                                        UpdateExpression='SET reconSoftwareName = :v',
+                                        ExpressionAttributeValues={':v': target_mapper}
+                                    )
+                                    log.info(f"AUTO_MAPPER: updated DDB reconSoftwareName to '{target_mapper}'")
+                                except Exception as _ddb_err:
+                                    log.warning(f"AUTO_MAPPER: failed to update DDB: {_ddb_err}")
                             # Remove existing mapper/viewgraph components
                             pipeline.components = [
                                 c for c in pipeline.components
@@ -3229,6 +3536,21 @@ if __name__ == "__main__":
                             if target_matcher and target_matcher != config['MATCHING_METHOD']:
                                 log.info(f"AUTO_MATCHER: overriding '{config['MATCHING_METHOD']}' -> '{target_matcher}'")
                                 config['MATCHING_METHOD'] = target_matcher
+                                # Update DynamoDB to reflect the auto-selected matcher
+                                if ddb_table_name:
+                                    try:
+                                        import boto3 as _boto3
+                                        _region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+                                        _ddb = _boto3.resource('dynamodb', region_name=_region)
+                                        _table = _ddb.Table(ddb_table_name)
+                                        _table.update_item(
+                                            Key={os.environ.get('DDB_KEY_NAME', 'uuid'): config['UUID']},
+                                            UpdateExpression='SET matchingMethod = :v',
+                                            ExpressionAttributeValues={':v': target_matcher}
+                                        )
+                                        log.info(f"AUTO_MATCHER: updated DDB matchingMethod to '{target_matcher}'")
+                                    except Exception as _ddb_err:
+                                        log.warning(f"AUTO_MATCHER: failed to update DDB: {_ddb_err}")
                                 # Find and replace the existing matcher component
                                 for j, c in enumerate(pipeline.components):
                                     if c.name == 'ColmapSfM-Feature-Matcher':
@@ -3311,7 +3633,17 @@ if __name__ == "__main__":
                 case "Nerfstudio-Export":
                     if LOCAL_DEBUG and config['RUN_RECON'] == "false" and config['RUN_TRAIN'] == "false":
                         continue
-                    pipeline.run_component(i)
+                    try:
+                        pipeline.run_component(i)
+                    except RuntimeError as e:
+                        captured = (e.args[1] if len(e.args) > 1 else '') or ''
+                        component_out = getattr(component, 'output', '') or ''
+                        combined = captured + component_out
+                        if 'NaN/Inf' in combined or 'All tensors must be numpy arrays' in combined:
+                            pipeline.report_error(766, "Gaussian splat training diverged: all Gaussians are NaN/Inf. "
+                                "Try reducing the learning rate, increasing the number of images, "
+                                "or improving image quality/coverage.")
+                        raise
                     # Clean up CUDA memory after export
                     cleanup_cuda_memory()
                 case "Train":
@@ -3322,6 +3654,22 @@ if __name__ == "__main__":
                         log.error(f"CRITICAL: Dataset missing before training: {config['DATASET_PATH']}")
                         raise RuntimeError(f"Dataset disappeared: {config['DATASET_PATH']}")
                     log.info(f"Dataset contents before training: {os.listdir(config['DATASET_PATH'])}")
+                    # For dn-splatter/ags-mesh: re-evaluate sensor depth at runtime and patch
+                    # training args if the registration-time detection was wrong (e.g. depth dir
+                    # was inside the zip and not yet extracted when args were built).
+                    if config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh") and ENABLE_MULTI_GPU == "false":
+                        _depth_dir = os.path.join(config['DATASET_PATH'], "depth")
+                        if not os.path.isdir(_depth_dir):
+                            _depth_dir = os.path.join(config['DATASET_PATH'], "depth_images")
+                        _has_sensor_depth = os.path.isdir(_depth_dir) and any(
+                            f.lower().endswith(('.png', '.jpg', '.npy'))
+                            for f in os.listdir(_depth_dir)
+                        ) if os.path.isdir(_depth_dir) else False
+                        log.info(f"DN-Splatter Train runtime depth mode: {'sensor' if _has_sensor_depth else 'mono'}")
+                        _args = component.args
+                        # Training always uses PearsonDepth + mono regardless of sensor depth.
+                        # Sensor depths load via transforms.json depth_file_path entries automatically.
+                        log.info(f"DN-Splatter Train runtime depth mode: {'sensor depth present (loads via transforms.json)' if _has_sensor_depth else 'mono only'}")
                     # Check image count and resolution at runtime to configure color correction
                     image_files = [f for f in os.listdir(image_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
                     num_images = len(image_files)
@@ -3352,7 +3700,8 @@ if __name__ == "__main__":
                                 component.args.insert(index, "0")
                                 component.args.insert(index, "--pipeline.datamanager.dataloader-num-workers")
                     if ENABLE_MULTI_GPU == "false":
-                        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and not ENABLE_DEPTH_LOSS:
+                        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and not ENABLE_DEPTH_LOSS and \
+                                config['MODEL'] not in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
                             if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
                                 config['RECON_SOFTWARE_NAME'] == "map_anything" or config['RECON_SOFTWARE_NAME'] == "hloc":
                                 # Ensure colmap/sparse structure exists for NerfStudio
@@ -3361,7 +3710,10 @@ if __name__ == "__main__":
                                 if os.path.exists(sparse_path) and os.listdir(sparse_path):
                                     # sparse/ has content - move it to colmap/sparse/
                                     if os.path.exists(sparse_path_out):
-                                        shutil.rmtree(sparse_path_out)
+                                        if os.path.islink(sparse_path_out):
+                                            os.unlink(sparse_path_out)
+                                        else:
+                                            shutil.rmtree(sparse_path_out)
                                     log.info(f"Moving sparse point cloud from {sparse_path} to {sparse_path_out}")
                                     os.makedirs(os.path.dirname(sparse_path_out), exist_ok=True)
                                     shutil.move(sparse_path, sparse_path_out)
@@ -3378,9 +3730,26 @@ if __name__ == "__main__":
                                 else:
                                     log.warning(f"colmap/sparse/0 does not exist, contents of colmap/sparse: {os.listdir(sparse_path_out) if os.path.exists(sparse_path_out) else 'N/A'}")                              
                         else: # 3dgrut
-                            if has_alpha_channel(os.path.join(image_path, os.listdir(image_path)[0])):
+                            _sample_img = next(
+                                (f for f in os.listdir(image_path)
+                                 if os.path.isfile(os.path.join(image_path, f))
+                                 and f.lower().endswith(('.png', '.jpg', '.jpeg'))),
+                                None
+                            )
+                            if _sample_img and has_alpha_channel(os.path.join(image_path, _sample_img)):
                                 process_images(image_path)
                     try:
+                        # For gsplat-depth: fix point_indices KeyError caused by rig/subdir image names.
+                        # gsplat's colmap.py keys point_indices by the image name in images.bin
+                        # (e.g. 'face_01/pano_011.png'). After clean_images_dir flattens subdirs,
+                        # the actual files are 'face_01_pano_011.png'. Flatten images.bin to match.
+                        if ENABLE_DEPTH_LOSS and ENABLE_MULTI_GPU == "false":
+                            _sparse_0 = os.path.join(config['DATASET_PATH'], "colmap", "sparse", "0")
+                            if not os.path.exists(_sparse_0):
+                                _sparse_0 = os.path.join(config['DATASET_PATH'], "sparse", "0")
+                            if os.path.exists(_sparse_0):
+                                flatten_images_for_gsplat(image_path, _sparse_0, log)
+                                remove_unobserved_images_for_gsplat(_sparse_0, log)
                         # Clean up CUDA memory before training
                         cleanup_cuda_memory()
                         pipeline.run_component(i)
@@ -3621,7 +3990,10 @@ if __name__ == "__main__":
                                 component.args = new_args
                                 log.info(f"Found {len(latest_ckpts)} checkpoint files for evaluation")
                     
-                    pipeline.run_component(i)
+                    try:
+                        pipeline.run_component(i)
+                    except RuntimeError as _metrics_err:
+                        log.warning(f"Nerfstudio-Metrics failed (non-fatal): {_metrics_err}")
                     
                     # Restore original CUDA setting
                     if component.name == "GSplat-Metrics":
@@ -3633,7 +4005,14 @@ if __name__ == "__main__":
                             with open(EVAL_METRIC_PATH, 'r') as f:
                                 metrics_data = json.load(f)
                             results = metrics_data.get('results', {})
-                            log.info(f"Evaluation Metrics - PSNR: {results.get('psnr', 'N/A'):.4f}, SSIM: {results.get('ssim', 'N/A'):.4f}, LPIPS: {results.get('lpips', 'N/A'):.4f}")
+                            # Handle both splatfacto (psnr) and dn-splatter (rgb_psnr) key formats
+                            psnr = results.get('psnr', results.get('rgb_psnr', None))
+                            ssim = results.get('ssim', results.get('rgb_ssim', None))
+                            lpips = results.get('lpips', results.get('rgb_lpips', None))
+                            psnr_str = f"{psnr:.4f}" if psnr is not None else 'N/A'
+                            ssim_str = f"{ssim:.4f}" if ssim is not None else 'N/A'
+                            lpips_str = f"{lpips:.4f}" if lpips is not None else 'N/A'
+                            log.info(f"Evaluation Metrics - PSNR: {psnr_str}, SSIM: {ssim_str}, LPIPS: {lpips_str}")
                         except Exception as e:
                             log.warning(f"Could not read evaluation metrics: {e}")
                     elif component.name == "3DGRUT-Metrics":
@@ -3676,6 +4055,14 @@ if __name__ == "__main__":
                                 results = metrics_data.get('results', {})
                                 log.info(f"Evaluation Metrics - PSNR: {results.get('psnr', 'N/A'):.4f}, SSIM: {results.get('ssim', 'N/A'):.4f}, LPIPS: {results.get('lpips', 'N/A'):.4f}")
                 case "S3-Export-Video" | "S3-Export-Spz" | "S3-Export-Usdz" | "S3-Export-Thumbnail" | "S3-Export-Ply" | "S3-Export-Sog":
+                    # Skip S3 upload gracefully if the source file doesn't exist
+                    # (e.g. video/thumbnail skipped when dn-splatter sensor-depth mode runs)
+                    if component.name in ("S3-Export-Video", "S3-Export-Thumbnail"):
+                        _src = component.args[2] if len(component.args) > 2 else ""
+                        if not os.path.exists(_src):
+                            log.info(f"Skipping {component.name}: source file not found: {_src}")
+                            i += 1
+                            continue
                     if LOCAL_DEBUG:
                         if component.name == "S3-Export-Video":
                             copy_to_local_output(os.path.join(output_path, "render.mp4"), config, 
@@ -3715,11 +4102,53 @@ if __name__ == "__main__":
                             config['ENABLE_SPZ'] == "true" and os.path.exists(orig_ply_path):
                         shutil.copy2(orig_ply_path, spz_ply_path)
                         log.info(f"Copied rotated orig.ply to spz.ply for gsplat SPZ")
+                case "S3-Export-Mesh":
+                    # Skip gracefully if mesh.glb wasn't produced (IsoOctree failed or was skipped)
+                    _mesh_glb = os.path.join(output_path, "mesh.glb")
+                    if not os.path.exists(_mesh_glb):
+                        log.info(f"Skipping S3-Export-Mesh: mesh.glb not found (mesh extraction was skipped)")
+                        i += 1
+                        continue
+                    pipeline.run_component(i)
+                case "S3-Export-Collision":
+                    # Zip all collision files into a single archive before uploading
+                    base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()
+                    collision_zip_path = os.path.join(output_path, f"{base_name}-collision.zip")
+                    try:
+                        import zipfile as _zipfile
+                        with _zipfile.ZipFile(collision_zip_path, 'w', _zipfile.ZIP_DEFLATED) as _zf:
+                            for _ext in [".voxel.json", ".voxel.bin", ".collision.glb"]:
+                                _src = os.path.join(output_path, f"splat{_ext}")
+                                if os.path.exists(_src):
+                                    _zf.write(_src, arcname=f"splat{_ext}")
+                        log.info(f"Created collision zip: {collision_zip_path} ({os.path.getsize(collision_zip_path)} bytes)")
+                    except Exception as _e:
+                        log.warning(f"Could not create collision zip: {_e}")
+                    pipeline.run_component(i)
+                case "S3-Export-LOD":
+                    # Zip all LOD files into a single archive before uploading
+                    base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()
+                    lod_zip_path = os.path.join(output_path, f"{base_name}-lod.zip")
+                    try:
+                        import zipfile as _zipfile
+                        with _zipfile.ZipFile(lod_zip_path, 'w', _zipfile.ZIP_DEFLATED) as _zf:
+                            if os.path.isdir(lod_dir):
+                                for _root, _dirs, _files in os.walk(lod_dir):
+                                    for _fname in _files:
+                                        _src = os.path.join(_root, _fname)
+                                        _arcname = os.path.relpath(_src, lod_dir)
+                                        _zf.write(_src, arcname=_arcname)
+                        log.info(f"Created LOD zip: {lod_zip_path} ({os.path.getsize(lod_zip_path)} bytes)")
+                    except Exception as _e:
+                        log.warning(f"Could not create LOD zip: {_e}")
+                    pipeline.run_component(i)
                 case _: # Default case, run Component
                     pipeline.run_component(i)
                     # After autoscale runs, normalize image dimensions
                     if component.name == "AutoscaleDataset":
                         resize_images_to_common_dimensions(image_path)
+
+            i += 1
 
         pipeline.session.status = Status.STOP
         log.info(f"Pipeline status changed to {pipeline.session.status}")
@@ -3776,6 +4205,38 @@ if __name__ == "__main__":
             log.info(f"Dataset: {len(summary_imgs)} images @ {summary_res}  |  Autogroup: {summary_group}  |  Autoscale: {summary_autoscale}")
         except Exception:
             pass
+        # Log splat summary (gaussian count, SH bands) using splat-transform --summary
+        try:
+            _summary_ply = orig_ply_path if os.path.exists(orig_ply_path) else ply_path
+            if os.path.exists(_summary_ply):
+                _summary_result = subprocess.run(
+                    ["splat-transform", _summary_ply, "--summary", "null"],
+                    capture_output=True, text=True
+                )
+                _summary_out = _summary_result.stdout + _summary_result.stderr
+                log.info(f"Splat Summary:\n{_summary_out}")
+                # Parse gaussian count and SH bands from summary output for DynamoDB
+                _splat_metrics = {}
+                for _line in _summary_out.splitlines():
+                    if "gaussians" in _line.lower() or "splats" in _line.lower():
+                        import re as _re
+                        _m = _re.search(r'(\d[\d,]*)', _line.replace(',', ''))
+                        if _m:
+                            _splat_metrics['gaussian_count'] = int(_m.group(1))
+                    if "sh" in _line.lower() and "band" in _line.lower():
+                        import re as _re
+                        _m = _re.search(r'(\d+)', _line)
+                        if _m:
+                            _splat_metrics['sh_bands'] = int(_m.group(1))
+                if _splat_metrics and ddb_table_name:
+                    update_dynamodb_metrics(
+                        uuid=config['UUID'],
+                        table_name=ddb_table_name,
+                        metrics=_splat_metrics,
+                        log=log
+                    )
+        except Exception as _e:
+            log.warning(f"Could not collect splat summary metrics: {_e}")
         # Update DynamoDB with final timing information only if table is configured
         if ddb_table_name:
             log.info(f"Updating DynamoDB metrics for UUID {config['UUID']}")
@@ -3795,9 +4256,9 @@ if __name__ == "__main__":
                     metrics_data = json.load(f)
                 results = metrics_data.get('results', {})
                 training_metrics = {
-                    'psnr': float(results.get('psnr', 0)),
-                    'ssim': float(results.get('ssim', 0)),
-                    'lpips': float(results.get('lpips', 0))
+                    'psnr': float(results.get('psnr', results.get('rgb_psnr', 0))),
+                    'ssim': float(results.get('ssim', results.get('rgb_ssim', 0))),
+                    'lpips': float(results.get('lpips', results.get('rgb_lpips', 0)))
                 }
                 if ddb_table_name:
                     log.info(f"Updating training metrics in DynamoDB for UUID {config['UUID']}")

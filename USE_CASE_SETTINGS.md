@@ -37,17 +37,15 @@
 
 #### Spherical Camera
 - When scanning outside-in, similar to scanning objects in an orbital path, a single monocular 4K camera is sufficient.
-- When capturing spaces inside-out (environments, not objects), we recommend using a spherical camera to gather imagery in 360 degrees.
+- When capturing spaces inside-out (environments, not objects), we recommend using a spherical camera to gather imagery in 360 degrees with at least 5.7k with 8k being preferred.
 - Using a spherical camera will greatly increase the number of input images without manual work and enable SfM to more effectively converge.
-- At the time of writing this, Colmap requires the input images to be in perspective. For this, we have implemented a robust algorithm that will automatically transform your equirectangular video/images into perspective images.
-- It is sometimes handy to remove views from the 360 image due to possibly camera person holding the camera. The "remove faces" option allows you to mask a view from the cubemap so the feature will not be in the output.
-- We have added a feature to optimize the cubemap views of the image sequence using connective images and view nodes to help SfM converge. Please see the `/source/container/src/pipeline/spherical/equirectangular_to_perspective.py` script for more details.
-- Be careful enabling `optimizing cubemap views` and masking views other than `up` or `down` as the algorithm leans on the horizontal views for connectivity.
+- At the time of writing this, Colmap requires the input images to be in perspective. For this, we have implemented a colmap sample algorithm that will automatically transform your equirectangular video/images into perspective images.
+- It is sometimes handy to remove views from the 360 image due to possibly camera person holding the camera. The "remove faces" option allows you to mask a view from the cubemap so the feature will not be in the output. For example for capturing using an Insta360 X5 on a selfie stick, as long as the person capturing the video is at the other end of the stick, you can remove the bottom cubemap and it will remove the person capturing the 360 video. If this is your intention, make sure to enable Tilt Recovery in the stabilization options for FlowState. Disable Direction Lock.
 
 ## General Camera Settings
 - Turn off auto white balance, adjust as needed for entire scene and lock it
 - Turn off HDR
-- Turn off auto exposure
+- Turn off auto exposure, adjust to balance 
 - Ensure there is good lighting
 - Spherical camera recommendations
     - Ensure you are either behind or under the camera with an invisible selfie stick
@@ -83,26 +81,37 @@ Perspective or spherical(equirectangular) images are supported for all methods b
         - a json in the format of [NeRFCapture](https://github.com/jc211/NeRFCapture/tree/main)/InstantNGP can be given and coordinate transform used (e.g. OpenGL, ARKit, ARCore, etc.)
 
 ### 5. Image Archive w/ Pose Priors and Point Cloud Prior
-- Not yet supported
+- .zip supported
+- colmap model
+    - a colmap reconstruction model in the form of .bin or .txt files can be given
+    - the points3d.txt file must contain your lidar point cloud and the points generated from pose-prior point triangulator in Z-forward, Y-down coordinate system
 
-### 6. Model Archive
+### 6. Splat Model Archive
 - .tar.gz is supported
 - a previous job can be resumed or used to export 3d assets
 
 ## General Scanning Techniques
 
-# Outside-In
+# Outside-In (Object Scanning)
 Use this technique to scan **objects**, or small contained spaces
-- In this mode, usually the capture sis 
+- In this mode, usually the capture system is focused on a specific object or group of objects
+- This can be thought of an observer on the outside of the object of interest, always looking into the object
+- For adequate capturing, rotate around the object at three different elevations: bottom, middle, top. Be sure to close the capture loop by ending the session where you started
+    - For rotating, you can use a turn-table to turn the object while capturing video of the object on a boom stand. If you do this, ensure you turn on the option to remove the background, otherwise the SfM model will not converge. If you don't have a turntable, just slowly walk around the object circling it.
+- Usually 300 frames or 1 minute video should be plenty to reconstruct the object
 
-# Inside-Out
-
+# Inside-Out (Environment Scanning)
+Use this technique to scan **environments**, or rooms
+- In this mode, usually the capture system is focused on capturing an environment
+- This can be thought of an observer on the inside of a room, always looking outward towards the walls
+- For adequate capturing, use a 360 camera on a selfie stick or drone to capture either video or a series of images
+- Usually 600 frames or 3 minute video should be plenty to reconstruct a room/environment
 
 ## Use Case Settings
-### Large Scene Reconstruction
+### Object Scanning
 
 ### Indoor Room Scanning
 
-### Object Scanning
-
 ### Outdoor Scanning
+
+### Large Scene Reconstruction

@@ -214,7 +214,7 @@ class Pipeline:
         self.session.log.info(f"Component command: {cmd_args}")
         
         # Determine if we need to capture output for this component
-        capture_output = self.components[index].name in ['3DGRUT-Metrics', 'GSplat-Metrics']
+        capture_output = self.components[index].name in ['3DGRUT-Metrics', 'GSplat-Metrics', 'Nerfstudio-Export']
             
         try:
             # Subprocess call is secure: uses list format (not shell=True) with validated arguments
@@ -248,7 +248,7 @@ class Pipeline:
                 print(f"Error message: {e.stderr.strip()}")
             if e.stdout is not None:
                 print(f"Output (if any): {e.stdout.strip()}")
-            raise RuntimeError(f"Component failed with return code {e.returncode}")
+            raise RuntimeError(f"Component failed with return code {e.returncode}", e.stdout or "")
         except Exception as e:
             self.session.log.error(f"An unexpected error occurred: {str(e)}")
             raise

@@ -591,11 +591,44 @@ def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
         conn = sqlite3.connect(colmap_db_path)
         cursor = conn.cursor()
 
+        # DEBUG: print full schema of pose_priors before doing anything
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        all_tables = [r[0] for r in cursor.fetchall()]
+        print(f"[POSE_PRIOR_DEBUG] All tables in DB: {all_tables}")
+        cursor.execute("PRAGMA table_info(pose_priors)")
+        schema_rows = cursor.fetchall()
+        print(f"[POSE_PRIOR_DEBUG] pose_priors PRAGMA rows: {schema_rows}")
+
         # First, clear any existing pose priors
         cursor.execute("DELETE FROM pose_priors")
 
+        # Detect schema version: COLMAP 4.x uses image_id (FK), 3.x uses image_name (text PK)
+        cursor.execute("PRAGMA table_info(pose_priors)")
+        pose_prior_cols = {row[1] for row in cursor.fetchall()}
+        print(f"[POSE_PRIOR_DEBUG] pose_prior_cols after DELETE: {pose_prior_cols}")
+        if not pose_prior_cols:
+            # pose_priors table missing entirely (old DB from zip) - create with 4.x schema
+            print("[POSE_PRIOR_DEBUG] pose_priors table missing - creating with 4.x schema")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS pose_priors (
+                    image_id INTEGER PRIMARY KEY NOT NULL,
+                    position BLOB,
+                    coordinate_system INTEGER NOT NULL,
+                    position_covariance BLOB,
+                    FOREIGN KEY(image_id) REFERENCES images(image_id) ON DELETE CASCADE
+                )
+            """)
+            pose_prior_cols = {'image_id'}
+        use_image_id_schema = "image_id" in pose_prior_cols
+        print(f"[POSE_PRIOR_DEBUG] use_image_id_schema={use_image_id_schema}, cols={pose_prior_cols}")
+
+        # Build a name -> image_id lookup from the images table (needed for 4.x schema)
+        name_to_image_id = {}
+        if use_image_id_schema:
+            cursor.execute("SELECT image_id, name FROM images")
+            name_to_image_id = {name: image_id for image_id, name in cursor.fetchall()}
+
         # Update the pose_priors table with the pose information
-        # COLMAP 4.x schema: primary key is image_name (text)
         for image_id, pose_data in image_poses.items():
             # Get translation
             tx, ty, tz = pose_data['translation']
@@ -615,8 +648,7 @@ def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
             R[2, 1] = 2 * qy * qz + 2 * qx * qw
             R[2, 2] = 1 - 2 * qx**2 - 2 * qy**2
             
-            # COLMAP uses a different convention: camera-to-world vs world-to-camera
-            # We need to invert the transformation
+            # Invert the transformation (camera-to-world -> world-to-camera)
             R_inv = R.transpose()
             t_inv = -R_inv @ np.array([tx, ty, tz])
             
@@ -631,11 +663,24 @@ def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
             # Use coordinate system 1 (COLMAP world coordinate system)
             coordinate_system = 1
 
-            cursor.execute("""
-                INSERT OR REPLACE INTO pose_priors
-                (image_name, position, coordinate_system, position_covariance)
-                VALUES (?, ?, ?, ?)
-            """, (pose_data['name'], position_blob, coordinate_system, covariance_blob))  # nosemgrep
+            if use_image_id_schema:
+                # COLMAP 4.x: pose_priors(image_id INTEGER PK, ...)
+                db_image_id = name_to_image_id.get(pose_data['name'])
+                if db_image_id is None:
+                    print("Warning: image not found in database, skipping pose prior for", pose_data['name'])
+                    continue
+                cursor.execute("""
+                    INSERT OR REPLACE INTO pose_priors
+                    (image_id, position, coordinate_system, position_covariance)
+                    VALUES (?, ?, ?, ?)
+                """, (db_image_id, position_blob, coordinate_system, covariance_blob))  # nosemgrep
+            else:
+                # COLMAP 3.x: pose_priors(image_name TEXT PK, ...)
+                cursor.execute("""
+                    INSERT OR REPLACE INTO pose_priors
+                    (image_name, position, coordinate_system, position_covariance)
+                    VALUES (?, ?, ?, ?)
+                """, (pose_data['name'], position_blob, coordinate_system, covariance_blob))  # nosemgrep
 
             if cursor.rowcount == 0:
                 print("Warning: Failed to insert pose prior for image", pose_data['name'])
@@ -648,7 +693,7 @@ def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
         return True
         
     except Exception as e:
-        print(f"Error updating COLMAP database with pose priors: {str(e)}")
+        print(f"Warning (non-fatal): Could not update pose priors in COLMAP database: {str(e)}")
         import traceback
         traceback.print_exc()
         return False
