@@ -61,6 +61,11 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda-${CUDA_VERSION}/lib64:${LD_LIBRARY_PATH}
 ENV OPTIX_FORCE_DEPRECATED_LAUNCHER=1
 ENV CUDA_MODULE_LOADING=LAZY
 
+# Expose compute + graphics + utility caps so the NVIDIA Container Toolkit
+# projects the host's NVIDIA driver libraries and Vulkan ICD into the
+# container at runtime.
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility
+
 # Ensures that Python outputs everything that's printed directly to the terminal (so logs can be seen in real-time)
 ENV PYTHONUNBUFFERED=TRUE
 
@@ -159,6 +164,11 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     libvulkan1 \
     libvulkan-dev \
     mesa-vulkan-drivers \
+    libgl1 \
+    libglvnd0 \
+    libglx0 \
+    libegl1 \
+    libxext6 \
     libboost-thread-dev \
     libboost-regex-dev \
     libtiff-dev \
@@ -269,9 +279,9 @@ RUN git clone https://github.com/nerfstudio-project/gsplat.git --recursive \
     && pip install --force-reinstall imageio tqdm \
     && cd ${CODE_PATH}
 
-#COPY ./src/pipeline/training/patch_gsplat.py ${CODE_PATH}/
-#RUN python3 ${CODE_PATH}/patch_gsplat.py ${CODE_PATH} \
-#    && rm ${CODE_PATH}/patch_gsplat.py
+COPY ./src/pipeline/training/patch_gsplat.py ${CODE_PATH}/
+RUN python3 ${CODE_PATH}/patch_gsplat.py ${CODE_PATH} \
+    && rm ${CODE_PATH}/patch_gsplat.py
 
 # Install DN-Splatter (dn-splatter + ags-mesh models)
 ENV DN_SPLATTER_HASH="main"
@@ -598,6 +608,6 @@ RUN echo "=== VERSION VERIFICATION ===" \
 # Hot-patch layer: copied last so all slow dependency layers stay cached during
 # active development. These overwrite the versions installed earlier in the build.
 # Once stable, the earlier COPY can be removed and this layer kept as the canonical one.
-COPY src/pipeline/training/dn_model_patched.py          ${CODE_PATH}/dn-splatter/dn_splatter/dn_model.py
-COPY src/pipeline/training/dn_splatter_preprocess.py    ${CODE_PATH}/training/dn_splatter_preprocess.py
-COPY src/main.py                                        ${CODE_PATH}/main.py
+#COPY src/pipeline/training/dn_model_patched.py          ${CODE_PATH}/dn-splatter/dn_splatter/dn_model.py
+#COPY src/pipeline/training/dn_splatter_preprocess.py    ${CODE_PATH}/training/dn_splatter_preprocess.py
+#COPY src/main.py                                        ${CODE_PATH}/main.py

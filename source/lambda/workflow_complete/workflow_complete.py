@@ -267,6 +267,7 @@ def get_cloudwatch_logs(training_job_name, is_batch_job=False, log_stream_name=N
             'selectors.py',
             '_utils/signal_handling.py',
             'OOM errors or segfault',
+            'failed with return code',
             'UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled.',
             'PERFORMANCE WARNING:',
             'Pairs read done',

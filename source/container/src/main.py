@@ -109,7 +109,8 @@ from utils import (
     update_dynamodb_metrics, update_component_phase_completion,
     parse_3dgrut_metrics_from_log, parse_gsplat_metrics_from_log,
     send_task_success, send_task_failure, send_task_heartbeat,
-    flatten_images_for_gsplat, remove_unobserved_images_for_gsplat
+    flatten_images_for_gsplat, remove_unobserved_images_for_gsplat,
+    remove_fully_masked_images_for_gsplat
 )
 
 if __name__ == "__main__":
@@ -3750,6 +3751,24 @@ if __name__ == "__main__":
                             if os.path.exists(_sparse_0):
                                 flatten_images_for_gsplat(image_path, _sparse_0, log)
                                 remove_unobserved_images_for_gsplat(_sparse_0, log)
+                                # Flatten masks/ to match flattened image names.
+                                # patch_gsplat.py looks up masks by imdata[k].name which is now
+                                # 'face_00_pano_001.png' after flattening, so masks must also be flat.
+                                _masks_dir = os.path.join(config['DATASET_PATH'], 'masks')
+                                if os.path.isdir(_masks_dir):
+                                    for _sub in list(os.listdir(_masks_dir)):
+                                        _sub_path = os.path.join(_masks_dir, _sub)
+                                        if os.path.isdir(_sub_path):
+                                            for _mfile in os.listdir(_sub_path):
+                                                _src = os.path.join(_sub_path, _mfile)
+                                                _dst = os.path.join(_masks_dir, f"{_sub}_{_mfile}")
+                                                os.rename(_src, _dst)
+                                            shutil.rmtree(_sub_path)
+                                    log.info(f"Flattened masks/ directory for gsplat-depth")
+                                    # Remove images where the mask covers all pixels
+                                    remove_fully_masked_images_for_gsplat(
+                                        image_path, _sparse_0, _masks_dir, log
+                                    )
                         # Clean up CUDA memory before training
                         cleanup_cuda_memory()
                         pipeline.run_component(i)
@@ -4142,6 +4161,77 @@ if __name__ == "__main__":
                     except Exception as _e:
                         log.warning(f"Could not create LOD zip: {_e}")
                     pipeline.run_component(i)
+                case "Clean-Point-Cloud":
+                    # splat-transform --filter-floaters default voxel size is 0.05m.
+                    # For large scenes this creates too many voxels and SIGSEGV from
+                    # WebGPU buffer limits. Compute safe voxel size from PLY bbox.
+                    # Safe limit ~2M voxels empirically; scale up voxel size if needed.
+                    try:
+                        import struct as _struct
+                        _ply = component.args[0]  # input PLY path
+                        _voxel_size = 0.05  # default
+                        if os.path.isfile(_ply):
+                            try:
+                                import numpy as _np
+                                with open(_ply, 'rb') as _pf:
+                                    _header = b''
+                                    while True:
+                                        _line = _pf.readline()
+                                        _header += _line
+                                        if _line.strip() == b'end_header':
+                                            break
+                                    _header_str = _header.decode('ascii', errors='ignore')
+                                    _num_verts = 0
+                                    _props = []
+                                    for _hl in _header_str.splitlines():
+                                        if _hl.startswith('element vertex'):
+                                            _num_verts = int(_hl.split()[-1])
+                                        elif _hl.startswith('property float x') or _hl.startswith('property float32 x'):
+                                            _props.append('x')
+                                        elif _hl.startswith('property float y') or _hl.startswith('property float32 y'):
+                                            _props.append('y')
+                                        elif _hl.startswith('property float z') or _hl.startswith('property float32 z'):
+                                            _props.append('z')
+                                    if _num_verts > 0 and len(_props) >= 3:
+                                        # Sample up to 50K gaussians to estimate bbox
+                                        _step = max(1, _num_verts // 50000)
+                                        _row_bytes = 4 * 3  # at minimum x,y,z floats — estimate stride
+                                        # Read all vertex data and stride through it
+                                        _raw = _pf.read()
+                                        # Estimate bytes per vertex from total data
+                                        _stride = len(_raw) // _num_verts if _num_verts else 1
+                                        _xs, _ys, _zs = [], [], []
+                                        for _vi in range(0, _num_verts, _step):
+                                            _off = _vi * _stride
+                                            if _off + 12 <= len(_raw):
+                                                _x, _y, _z = _struct.unpack_from('<fff', _raw, _off)
+                                                if not (_np.isnan(_x) or _np.isinf(_x)):
+                                                    _xs.append(_x); _ys.append(_y); _zs.append(_z)
+                                        if _xs:
+                                            _extent_x = max(_xs) - min(_xs)
+                                            _extent_y = max(_ys) - min(_ys)
+                                            _extent_z = max(_zs) - min(_zs)
+                                            # Target ~2M voxels max
+                                            _target_voxels = 2_000_000
+                                            _min_size = (_extent_x * _extent_y * _extent_z / _target_voxels) ** (1/3)
+                                            _voxel_size = max(0.05, round(_min_size * 20) / 20)  # round to nearest 0.05m
+                                            _est_voxels = int((_extent_x / _voxel_size) * (_extent_y / _voxel_size) * (_extent_z / _voxel_size))
+                                            log.info(f"Clean-Point-Cloud: scene {_extent_x:.1f}x{_extent_y:.1f}x{_extent_z:.1f}m, "
+                                                     f"voxel_size={_voxel_size}m (~{_est_voxels//1000}K voxels)")
+                                            if _voxel_size > 0.05:
+                                                # Update args with explicit voxel size
+                                                _ff_idx = component.args.index('--filter-floaters')
+                                                component.args[_ff_idx] = f'--filter-floaters={_voxel_size}'
+                            except Exception as _bbox_err:
+                                log.warning(f"Clean-Point-Cloud: bbox estimation failed ({_bbox_err}), using default 0.05m")
+                        pipeline.run_component(i)
+                    except RuntimeError as _clean_err:
+                        log.warning(f"Clean-Point-Cloud failed (non-fatal, skipping): {_clean_err}")
+                case "Generate-LOD":
+                    try:
+                        pipeline.run_component(i)
+                    except RuntimeError as _lod_err:
+                        log.warning(f"Generate-LOD failed (non-fatal, skipping): {_lod_err}")
                 case _: # Default case, run Component
                     pipeline.run_component(i)
                     # After autoscale runs, normalize image dimensions

@@ -1454,6 +1454,82 @@ def remove_unobserved_images_for_gsplat(sparse_0_path, log):
     log.info(f"remove_unobserved_images_for_gsplat: kept {len(kept)}/{num_images} images")
 
 
+def remove_fully_masked_images_for_gsplat(image_path, sparse_0_path, masks_dir, log):
+    """
+    Remove images from images.bin (and from disk) where the segmentation mask
+    covers all pixels — i.e. there are no valid (unmasked) pixels to train on.
+
+    Args:
+        image_path:    Path to images/ directory
+        sparse_0_path: Path to colmap/sparse/0 containing images.bin
+        masks_dir:     Path to masks/ directory (flat, after flattening)
+        log:           Logger instance
+    """
+    import struct
+    import cv2
+
+    if not os.path.isdir(masks_dir):
+        return
+
+    images_bin = os.path.join(sparse_0_path, "images.bin")
+    if not os.path.exists(images_bin):
+        return
+
+    with open(images_bin, "rb") as f:
+        num_images = struct.unpack("<Q", f.read(8))[0]
+        records = []
+        for _ in range(num_images):
+            image_id = struct.unpack("<I", f.read(4))[0]
+            qvec = struct.unpack("<4d", f.read(32))
+            tvec = struct.unpack("<3d", f.read(24))
+            camera_id = struct.unpack("<I", f.read(4))[0]
+            name_bytes = b""
+            while True:
+                c = f.read(1)
+                if c == b"\x00":
+                    break
+                name_bytes += c
+            name = name_bytes.decode("utf-8")
+            num_pts = struct.unpack("<Q", f.read(8))[0]
+            points2d_raw = f.read(num_pts * 24) if num_pts else b""
+            records.append((image_id, qvec, tvec, camera_id, name, num_pts, points2d_raw))
+
+    fully_masked = []
+    for _, _, _, _, name, _, _ in records:
+        mask_path = os.path.join(masks_dir, name)
+        if os.path.isfile(mask_path):
+            m = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            if m is not None and not (m > 127).any():
+                fully_masked.append(name)
+
+    if not fully_masked:
+        log.info("remove_fully_masked_images_for_gsplat: no fully-masked images found")
+        return
+
+    log.info(f"remove_fully_masked_images_for_gsplat: removing {len(fully_masked)} fully-masked images: {fully_masked}")
+
+    kept = [r for r in records if r[4] not in fully_masked]
+    shutil.copy2(images_bin, images_bin + ".bak_fullymask")
+    with open(images_bin, "wb") as f:
+        f.write(struct.pack("<Q", len(kept)))
+        for image_id, qvec, tvec, camera_id, name, num_pts, points2d_raw in kept:
+            f.write(struct.pack("<I", image_id))
+            f.write(struct.pack("<4d", *qvec))
+            f.write(struct.pack("<3d", *tvec))
+            f.write(struct.pack("<I", camera_id))
+            f.write(name.encode("utf-8") + b"\x00")
+            f.write(struct.pack("<Q", num_pts))
+            f.write(points2d_raw)
+
+    # Remove image files from disk so the dataloader doesn't try to open them
+    for name in fully_masked:
+        img_file = os.path.join(image_path, name)
+        if os.path.isfile(img_file):
+            os.remove(img_file)
+
+    log.info(f"remove_fully_masked_images_for_gsplat: kept {len(kept)}/{num_images} images")
+
+
 def rebuild_points3d_tracks_for_gsplat(sparse_0_path, log):
     """
     Rebuild points3D.bin track data from images.bin point2D->point3D_id references.

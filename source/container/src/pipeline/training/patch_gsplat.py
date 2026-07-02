@@ -42,7 +42,10 @@ injection = '''# Load per-image segmentation masks from masks/ directory
                 _mpath = os.path.join(seg_masks_dir, _img_name)
                 if os.path.isfile(_mpath):
                     _m = _iio.imread(_mpath)
+                    if _m.ndim == 3:
+                        _m = _m[..., 0]  # take first channel if RGB/RGBA
                     seg_mask_dict[_img_name] = (_m > 127).astype(bool)
+        print(f"[Seg masks] Loaded {len(seg_mask_dict)} masks from {seg_masks_dir}")
         self.seg_mask_dict = seg_mask_dict
 
         '''
@@ -58,6 +61,9 @@ with open(path) as f:
 old = "        mask = self.parser.mask_dict[camera_id]"
 new = """        mask = self.parser.mask_dict[camera_id]
         seg_mask = self.parser.seg_mask_dict.get(self.parser.image_names[index])
+        if seg_mask is None:
+            # Fallback: try basename in case image_names has a path prefix
+            seg_mask = self.parser.seg_mask_dict.get(os.path.basename(self.parser.image_names[index]))
         if seg_mask is not None:
             seg_mask = seg_mask.astype(bool)
             mask = (mask & seg_mask) if mask is not None else seg_mask"""
@@ -67,18 +73,35 @@ with open(path, "w") as f:
     f.write(src)
 print("Patched colmap.py: seg_mask merged into mask in Dataset.__getitem__")
 
-# --- Patch 3: simple_trainer.py — guard depth loss against empty depths ---
-# When an image has no 3D point observations, depths_gt is empty and
-# 1.0 / depths_gt produces NaN. Initialize depthloss=0 before the block
-# so the desc line at the end of the loop always has a valid value,
-# then skip the computation when depths_gt is empty.
+# --- Patch 3: simple_trainer.py — guard depth loss against empty depths and zero values ---
+# 1. When depths_gt is empty (no 3D point observations), skip depth loss.
+# 2. When predicted or gt depth is 0, filter before depth_l1_loss (1/0 = inf -> NaN).
 path = f"{code_path}/gsplat/examples/simple_trainer.py"
 with open(path) as f:
     src = f.read()
-old = "            if cfg.depth_loss:\n                # query depths from depth map"
-new = "            depthloss = torch.tensor(0.0, device=device)\n            if cfg.depth_loss and depths_gt.numel() > 0:\n                # query depths from depth map"
-assert old in src, f"Patch 3 anchor not found in {path}"
+old3 = "            if cfg.depth_loss:\n                # query depths from depth map"
+new3 = "            depthloss = torch.tensor(0.0, device=device)\n            if cfg.depth_loss and depths_gt.numel() > 0:\n                # query depths from depth map"
+assert old3 in src, f"Patch 3 anchor not found in {path}"
+src = src.replace(old3, new3)
+old3b = "                depthloss = depth_l1_loss(\n                    depths, depths_gt, scene_scale=self.scene_scale\n                )"
+new3b = "                valid = (depths > 0) & (depths_gt > 0)\n                if valid.any():\n                    depthloss = depth_l1_loss(\n                        depths[valid], depths_gt[valid], scene_scale=self.scene_scale\n                    )\n                else:\n                    depthloss = torch.tensor(0.0, device=device)"
+assert old3b in src, f"Patch 3b anchor not found in {path}"
+src = src.replace(old3b, new3b)
+with open(path, "w") as f:
+    f.write(src)
+print("Patched simple_trainer.py: depth loss guarded against empty/zero depths")
+
+# --- Patch 4: simple_trainer.py — guard L1/SSIM loss against all-masked images ---
+# When a segmentation mask covers all pixels, colors[masks] and pixels[masks]
+# are empty tensors and .mean() returns NaN, corrupting training.
+# Fully-masked images are removed from the dataset before training, but guard
+# here as a safety net for any edge cases.
+with open(path) as f:
+    src = f.read()
+old = "            if masks is not None:\n                # Exclude masked pixels (e.g. ego vehicle) from L1.\n                # For SSIM (patch-based), zero out both sides at masked locations\n                # so masked patches don't pull colors toward an arbitrary value.\n                l1loss = l1_loss(colors[masks], pixels[masks]).mean()\n                colors_ssim = colors * masks[..., None]\n                pixels_ssim = pixels * masks[..., None]\n            else:\n                l1loss = l1_loss(colors, pixels).mean()\n                colors_ssim = colors\n                pixels_ssim = pixels"
+new = "            if masks is not None and masks.any():\n                # Exclude masked pixels (e.g. ego vehicle) from L1.\n                # For SSIM (patch-based), zero out both sides at masked locations\n                # so masked patches don't pull colors toward an arbitrary value.\n                l1loss = l1_loss(colors[masks], pixels[masks]).mean()\n                colors_ssim = colors * masks[..., None]\n                pixels_ssim = pixels * masks[..., None]\n            elif masks is not None and not masks.any():\n                # All pixels masked — skip loss for this image to avoid NaN from mean([]).\n                l1loss = torch.tensor(0.0, device=device)\n                colors_ssim = colors\n                pixels_ssim = pixels\n            else:\n                l1loss = l1_loss(colors, pixels).mean()\n                colors_ssim = colors\n                pixels_ssim = pixels"
+assert old in src, f"Patch 4 anchor not found in {path}"
 src = src.replace(old, new)
 with open(path, "w") as f:
     f.write(src)
-print("Patched simple_trainer.py: depth loss guarded against empty depths")
+print("Patched simple_trainer.py: L1/SSIM loss guarded against all-masked images")
