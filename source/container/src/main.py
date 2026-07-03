@@ -3711,7 +3711,13 @@ if __name__ == "__main__":
                                 # Ensure colmap/sparse structure exists for NerfStudio
                                 log.info('Running Training...')
                                 sparse_path_out = os.path.join(config['DATASET_PATH'], "colmap", "sparse")
-                                if os.path.exists(sparse_path) and os.listdir(sparse_path):
+                                if colmap_zip_found and os.path.exists(sparse_path_out):
+                                    # colmap/sparse/ already populated from zip extraction — skip move
+                                    log.info(f"colmap/sparse/ already populated from zip, skipping sparse/ move")
+                                elif os.path.exists(sparse_path) and os.listdir(sparse_path) and \
+                                        any(os.listdir(os.path.join(sparse_path, d))
+                                            for d in os.listdir(sparse_path)
+                                            if os.path.isdir(os.path.join(sparse_path, d))):
                                     # sparse/ has content - move it to colmap/sparse/
                                     if os.path.exists(sparse_path_out):
                                         if os.path.islink(sparse_path_out):
