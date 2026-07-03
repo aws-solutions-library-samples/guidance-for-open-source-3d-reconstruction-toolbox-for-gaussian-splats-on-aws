@@ -203,9 +203,16 @@ def recommend(num_images, stats, has_gps, has_pose_priors):
     signal = stats['sequential_signal']
     med_con = stats['median_consecutive']
 
-    if has_gps or has_pose_priors:
-        reason = "GPS EXIF detected" if has_gps else "pose priors enabled"
-        return "spatial", reason
+    if has_gps:
+        return "spatial", "GPS EXIF detected"
+
+    if has_pose_priors:
+        # Pose priors drive the triangulator/mapper, not the feature matcher.
+        # spatial_matcher reads GPS from the DB — it cannot use poses from images.txt.
+        # Use exhaustive for small sets, vocab for large ones.
+        if num_images > VOCAB_IMAGE_THRESH:
+            return "vocab", "pose priors enabled, large dataset — vocab for feature matching"
+        return "exhaustive", "pose priors enabled — exhaustive for feature matching"
 
     if signal >= SEQUENTIAL_SIGNAL_THRESH and med_con >= SEQUENTIAL_MEDIAN_THRESH:
         return "sequential", (

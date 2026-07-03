@@ -390,6 +390,7 @@ if __name__ == "__main__":
         colmap_db_path = os.path.join('/tmp', 'colmap_database.db')
     else:
         colmap_db_path = os.path.join(config['DATASET_PATH'], "database.db")
+    os.environ['COLMAP_DB_PATH'] = colmap_db_path
     transforms_in_path = os.path.join(config['DATASET_PATH'], "transforms-in.json")
     transforms_out_path = os.path.join(config['DATASET_PATH'], "transforms.json")
     colmap_vocab_path = os.path.join(config['CODE_PATH'], "vocab_tree_flickr100K_words32K.bin")
@@ -1074,7 +1075,9 @@ if __name__ == "__main__":
         # Autogroup Images by Prefix
     ##################################
     try:
-        if config.get('AUTOGROUP_IMAGES', 'false') == 'true' and config['RUN_RECON'] == 'true':
+        if config.get('AUTOGROUP_IMAGES', 'false') == 'true' and config['RUN_RECON'] == 'true' and \
+                config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'false' and \
+                config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'false':
             log.info(f"Creating AutogroupImages component: target_name={config.get('AUTOGROUP_TARGET_NAME', '')}")
             args = [
                 "-i", image_path,

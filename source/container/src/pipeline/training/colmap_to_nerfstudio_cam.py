@@ -50,9 +50,18 @@ parser.add_argument(
 args = parser.parse_args()
 
 path = str(args.data_dir)
-# Support both sparse/0 (direct) and colmap/sparse/0 (NerfStudio layout)
-_sparse_candidate = f"{path}/colmap/sparse/0"
-sparse_path = _sparse_candidate if os.path.isdir(_sparse_candidate) else f"{path}/sparse/0"
+# Support both sparse/0 (direct) and colmap/sparse/0 (NerfStudio layout).
+# Prefer colmap/sparse/0 only when it actually contains COLMAP binary files;
+# otherwise fall back to sparse/0 (Glomap writes there before main.py moves it).
+_colmap_candidate = f"{path}/colmap/sparse/0"
+_sparse_candidate = f"{path}/sparse/0"
+if os.path.isdir(_colmap_candidate) and os.path.isfile(os.path.join(_colmap_candidate, "cameras.bin")):
+    sparse_path = _colmap_candidate
+elif os.path.isdir(_sparse_candidate) and os.path.isfile(os.path.join(_sparse_candidate, "cameras.bin")):
+    sparse_path = _sparse_candidate
+else:
+    # Neither has cameras.bin yet — fall back to whichever directory exists
+    sparse_path = _colmap_candidate if os.path.isdir(_colmap_candidate) else _sparse_candidate
 ply_path = f"{sparse_path}/sparse.ply"
 
 if os.path.isdir(path):
