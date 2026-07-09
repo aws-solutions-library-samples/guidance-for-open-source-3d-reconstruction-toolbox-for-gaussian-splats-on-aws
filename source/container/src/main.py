@@ -497,8 +497,10 @@ if __name__ == "__main__":
             
             # Check if extracted content is in a subdirectory
             temp_contents = os.listdir(temp_path)
+            log.info(f"Zip extracted contents (top-level): {temp_contents}")
             if len(temp_contents) == 1 and os.path.isdir(os.path.join(temp_path, temp_contents[0])):
                 extract_source = os.path.join(temp_path, temp_contents[0])
+                log.info(f"Single subdir detected, extract_source={extract_source}, contents={os.listdir(extract_source)[:10]}")
             else:
                 extract_source = temp_path
             
@@ -608,13 +610,34 @@ if __name__ == "__main__":
         
         # Ensure colmap/sparse structure exists for NerfStudio (not needed for 3DGRUT or depth loss)
         if colmap_zip_found and config['MODEL'] not in ('3dgrt', '3dgut') and not ENABLE_DEPTH_LOSS:
-            if not os.path.exists(os.path.join(config['DATASET_PATH'], 'colmap', 'sparse')):
+            colmap_sparse_0 = os.path.join(config['DATASET_PATH'], 'colmap', 'sparse', '0')
+            colmap_sparse_0_populated = os.path.isdir(colmap_sparse_0) and bool(os.listdir(colmap_sparse_0))
+            if not colmap_sparse_0_populated:
                 if os.path.exists(os.path.join(config['DATASET_PATH'], 'sparse')):
-                    colmap_dir = os.path.join(config['DATASET_PATH'], 'colmap')
-                    os.makedirs(colmap_dir, exist_ok=True)
-                    shutil.move(os.path.join(config['DATASET_PATH'], 'sparse'), 
-                               os.path.join(colmap_dir, 'sparse'))
-                    log.info(f"Moved sparse/ to colmap/sparse/ for NerfStudio compatibility")
+                    # Only move sparse/ if it actually has files in its subdirectories
+                    _sparse = os.path.join(config['DATASET_PATH'], 'sparse')
+                    _sparse_has_files = any(
+                        os.listdir(os.path.join(_sparse, d))
+                        for d in os.listdir(_sparse)
+                        if os.path.isdir(os.path.join(_sparse, d))
+                    ) if os.listdir(_sparse) else False
+                    if _sparse_has_files:
+                        colmap_dir = os.path.join(config['DATASET_PATH'], 'colmap')
+                        os.makedirs(colmap_dir, exist_ok=True)
+                        _dst = os.path.join(colmap_dir, 'sparse')
+                        if os.path.exists(_dst):
+                            shutil.rmtree(_dst)
+                        shutil.move(_sparse,  _dst)
+                        log.info(f"Moved sparse/ to colmap/sparse/ for NerfStudio compatibility")
+                    else:
+                        log.info("sparse/ is empty placeholder, skipping move to colmap/sparse/")
+                # Also check if colmap/sparse/0 exists in the extracted zip content
+                # (zip may have colmap/sparse/0 directly without a top-level sparse/)
+                _colmap_sparse_src = os.path.join(config['DATASET_PATH'], 'colmap', 'sparse', '0')
+                if os.path.isdir(_colmap_sparse_src) and os.listdir(_colmap_sparse_src):
+                    log.info(f"Found populated colmap/sparse/0 from zip: {os.listdir(_colmap_sparse_src)[:5]}")
+            else:
+                log.info(f"colmap/sparse/0 already populated ({len(os.listdir(colmap_sparse_0))} files), skipping sparse/ move")
             
             log.info(f"Successfully processed COLMAP reconstruction from {config['FILENAME']}")
             log.info(f"Dataset contents: {os.listdir(config['DATASET_PATH'])}")
@@ -624,6 +647,28 @@ if __name__ == "__main__":
                 log.info(f"colmap/sparse/0 contents: {os.listdir(sparse_0)}")
             else:
                 log.warning(f"colmap/sparse/0 does not exist after extraction")
+            # If images/ is empty but colmap/images/ has files, copy them over
+            _img_dir = os.path.join(config['DATASET_PATH'], 'images')
+            _colmap_img_dir = os.path.join(config['DATASET_PATH'], 'colmap', 'images')
+            _img_empty = not os.path.isdir(_img_dir) or not any(
+                f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                for f in os.listdir(_img_dir)
+                if os.path.isfile(os.path.join(_img_dir, f))
+            ) if os.path.isdir(_img_dir) else True
+            if _img_empty and os.path.isdir(_colmap_img_dir):
+                os.makedirs(_img_dir, exist_ok=True)
+                _copied = 0
+                for _f in os.listdir(_colmap_img_dir):
+                    if _f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        shutil.copy2(os.path.join(_colmap_img_dir, _f), os.path.join(_img_dir, _f))
+                        _copied += 1
+                log.info(f"Copied {_copied} images from colmap/images/ to images/")
+            # If transforms.json is missing but transforms-in.json exists, use it
+            _transforms = os.path.join(config['DATASET_PATH'], 'transforms.json')
+            _transforms_in = os.path.join(config['DATASET_PATH'], 'transforms-in.json')
+            if not os.path.exists(_transforms) and os.path.exists(_transforms_in):
+                shutil.copy2(_transforms_in, _transforms)
+                log.info(f"Copied transforms-in.json to transforms.json")
 
     if model_tar_found:
         log.info(f"Detected model archive: {config['FILENAME']} for resuming training")
@@ -1796,11 +1841,26 @@ if __name__ == "__main__":
                 depth_dir = os.path.join(config['DATASET_PATH'], "depth")
                 if not os.path.isdir(depth_dir):
                     depth_dir = os.path.join(config['DATASET_PATH'], "depth_images")
-                has_sensor_depth = os.path.isdir(depth_dir) and any(
-                    f.lower().endswith(('.png', '.jpg', '.npy'))
-                    for f in os.listdir(depth_dir)
-                ) if os.path.isdir(depth_dir) else False
-                log.info(f"DN-Splatter depth mode: {'sensor (depth/ dir found)' if has_sensor_depth else 'mono (no depth/ dir)'}")
+                has_sensor_depth = False
+                if os.path.isdir(depth_dir):
+                    _depth_samples = [f for f in os.listdir(depth_dir)
+                                      if f.lower().endswith(('.png', '.jpg', '.npy'))]
+                    if _depth_samples:
+                        import cv2 as _cv2_check
+                        _s = _cv2_check.imread(
+                            os.path.join(depth_dir, _depth_samples[0]),
+                            _cv2_check.IMREAD_ANYDEPTH
+                        )
+                        if _s is not None and str(_s.dtype) == 'uint16':
+                            _mm_max = float(_s.max()) * 0.001
+                            _mm_min = float(_s[_s > 0].min()) * 0.001 if (_s > 0).any() else 0
+                            has_sensor_depth = 0.1 <= _mm_min and _mm_max <= 1000.0
+                # Also check depth_sensor/ written by preprocess after converting mono depth
+                if not has_sensor_depth:
+                    _ds_dir = os.path.join(config['DATASET_PATH'], "depth_sensor")
+                    if os.path.isdir(_ds_dir) and any(f.endswith('.png') for f in os.listdir(_ds_dir)):
+                        has_sensor_depth = True
+                log.info(f"DN-Splatter depth mode: {'sensor (valid uint16)' if has_sensor_depth else 'mono (no valid sensor depth)'}")
 
                 args = [
                     config['MODEL'],
@@ -1810,21 +1870,18 @@ if __name__ == "__main__":
                     "--pipeline.model.use-normal-loss", "True",
                     "--max-num-iterations", str(int(config['MAX_STEPS'])),
                 ]
-                # Use EdgeAwareLogL1 only when preprocess confirmed valid sensor depth
-                # (uint16 mm PNGs injected into transforms.json via .sensor_depth_valid marker).
-                # Otherwise use PearsonDepth which is scale-invariant for mono depths.
-                _sensor_depth_marker = os.path.join(config['DATASET_PATH'], ".sensor_depth_valid")
-                _has_valid_sensor_depth = os.path.exists(_sensor_depth_marker)
-                depth_loss_type = "EdgeAwareLogL1" if _has_valid_sensor_depth else "PearsonDepth"
+                # EdgeAwareLogL1 is numerically stable for both sensor and mono depth.
+                # PearsonDepth can produce NaN gradients when depth variance is near zero.
+                depth_loss_type = "EdgeAwareLogL1"
                 depth_lambda = "0.2" if config['MODEL'] == "ags-mesh" else "0.3"
-                log.info(f"DN-Splatter depth loss: {depth_loss_type} (sensor_depth_valid={_has_valid_sensor_depth})")
+                normal_supervision = "depth" if has_sensor_depth else "mono"
+                log.info(f"DN-Splatter depth loss: {depth_loss_type}, normal-supervision: {normal_supervision}")
                 args.extend([
                     "--pipeline.model.depth-lambda", depth_lambda,
                     "--pipeline.model.depth-loss-type", depth_loss_type,
-                    "--pipeline.model.normal-supervision", "mono",
+                    "--pipeline.model.normal-supervision", normal_supervision,
+                    "--pipeline.model.use-normal-tv-loss", "True",
                 ])
-                if config['MODEL'] != "ags-mesh":
-                    args.extend(["--pipeline.model.use-normal-tv-loss", "True"])
                 if config['LOG_VERBOSITY'] != "debug":
                     args.extend([
                         "--logging.local-writer.enable", "False",
@@ -1833,15 +1890,9 @@ if __name__ == "__main__":
                 args.extend([
                     "normal-nerfstudio",
                     "--data", config['DATASET_PATH'],
-                    "--downscale-factor", "1",
                     "--load-3D-points", "True",
                     "--load-normals", "True",
                     "--normal-format", "dsine",
-                    # --load-depths True causes the dataparser to look for mono_depth/*_aligned.npy
-                    # as a fallback when no depth_file_path entries exist in transforms.json.
-                    # For sensor depth, depths load via transforms.json depth_file_path entries
-                    # unconditionally. Keep --load-depths True so the dataparser works correctly
-                    # in both modes.
                     "--load-depths", "True",
                 ])
                 if has_sensor_depth:
@@ -3662,18 +3713,22 @@ if __name__ == "__main__":
                     # training args if the registration-time detection was wrong (e.g. depth dir
                     # was inside the zip and not yet extracted when args were built).
                     if config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh") and ENABLE_MULTI_GPU == "false":
-                        _depth_dir = os.path.join(config['DATASET_PATH'], "depth")
-                        if not os.path.isdir(_depth_dir):
-                            _depth_dir = os.path.join(config['DATASET_PATH'], "depth_images")
-                        _has_sensor_depth = os.path.isdir(_depth_dir) and any(
-                            f.lower().endswith(('.png', '.jpg', '.npy'))
-                            for f in os.listdir(_depth_dir)
-                        ) if os.path.isdir(_depth_dir) else False
+                        # Re-evaluate sensor depth at runtime — depth_sensor/ is created by
+                        # preprocess after pipeline creation, so the build-time detection may
+                        # have been wrong (uint8 files present but not yet converted).
+                        _depth_sensor_dir = os.path.join(config['DATASET_PATH'], "depth_sensor")
+                        _has_sensor_depth = os.path.isdir(_depth_sensor_dir) and any(
+                            f.endswith('.png') for f in os.listdir(_depth_sensor_dir)
+                        )
+                        _normal_supervision = "depth" if _has_sensor_depth else "mono"
                         log.info(f"DN-Splatter Train runtime depth mode: {'sensor' if _has_sensor_depth else 'mono'}")
+                        log.info(f"DN-Splatter Train runtime normal-supervision: {_normal_supervision}")
+                        # Patch normal-supervision in component args
                         _args = component.args
-                        # Training always uses PearsonDepth + mono regardless of sensor depth.
-                        # Sensor depths load via transforms.json depth_file_path entries automatically.
-                        log.info(f"DN-Splatter Train runtime depth mode: {'sensor depth present (loads via transforms.json)' if _has_sensor_depth else 'mono only'}")
+                        for _j, _arg in enumerate(_args):
+                            if _arg == "--pipeline.model.normal-supervision" and _j + 1 < len(_args):
+                                _args[_j + 1] = _normal_supervision
+                                break
                     # Check image count and resolution at runtime to configure color correction
                     image_files = [f for f in os.listdir(image_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
                     num_images = len(image_files)
@@ -4137,7 +4192,11 @@ if __name__ == "__main__":
                         log.info(f"Skipping S3-Export-Mesh: mesh.glb not found (mesh extraction was skipped)")
                         i += 1
                         continue
-                    pipeline.run_component(i)
+                    if LOCAL_DEBUG:
+                        copy_to_local_output(_mesh_glb, config,
+                                             f"{str(os.path.splitext(config['FILENAME'])[0]).lower()}.mesh.glb", log)
+                    else:
+                        pipeline.run_component(i)
                 case "S3-Export-Collision":
                     # Zip all collision files into a single archive before uploading
                     base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()

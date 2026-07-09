@@ -49,14 +49,14 @@ class PanoRenderOptions:
 
 PANO_RENDER_OPTIONS: dict[str, PanoRenderOptions] = {
     "overlapping": PanoRenderOptions(
-        num_steps_yaw=4,
-        pitches_deg=(-35.0, 0.0, 35.0),
+        num_steps_yaw=6,
+        pitches_deg=(-60.0, -30.0, 0.0, 30.0, 60.0),
         hfov_deg=90.0,
         vfov_deg=90.0,
     ),
     # Cubemap without top and bottom images.
     "non-overlapping": PanoRenderOptions(
-        num_steps_yaw=4,
+        num_steps_yaw=6,
         pitches_deg=(0.0,),
         hfov_deg=90.0,
         vfov_deg=90.0,
@@ -107,10 +107,16 @@ def create_virtual_camera(
     pano_height: int,
     hfov_deg: float,
     vfov_deg: float,
+    max_dim: int = 1600,
 ) -> pycolmap.Camera:
-    """Create a virtual perspective camera."""
+    """Create a virtual perspective camera, capped at max_dim to keep feature extraction tractable."""
     image_width = int(pano_width * hfov_deg / 360)
     image_height = int(pano_height * vfov_deg / 180)
+    # Cap resolution — very high-res ERPs produce huge virtual cameras that
+    # overwhelm SIFT and COLMAP matching without improving reconstruction quality.
+    scale = min(1.0, max_dim / max(image_width, image_height))
+    image_width = int(image_width * scale)
+    image_height = int(image_height * scale)
     focal = image_width / (2 * np.tan(np.deg2rad(hfov_deg) / 2))
     return pycolmap.Camera.create_from_model_id(
         camera_id=0,
@@ -157,7 +163,7 @@ def get_virtual_rotations(
     cams_from_pano_r = []
     yaws = np.linspace(0, 360, num_steps_yaw, endpoint=False)
     for pitch_deg in pitches_deg:
-        yaw_offset = (360 / num_steps_yaw / 2) if pitch_deg > 0 else 0
+        yaw_offset = (360 / num_steps_yaw / 2) if pitch_deg != 0 else 0
         for yaw_deg in yaws + yaw_offset:
             cam_from_pano_r = Rotation.from_euler(
                 "XY", [-pitch_deg, -yaw_deg], degrees=True
@@ -266,13 +272,13 @@ class PanoProcessor:
             xy_in_pano = xy_in_pano.reshape(
                 self._camera.width, self._camera.height, 2
             ).astype(np.float32)
-            xy_in_pano -= 0.5
+            xy_in_pano -= 0.5  # COLMAP to OpenCV pixel origin.
             x_coords, y_coords = np.moveaxis(xy_in_pano, [0, 1, 2], [2, 1, 0])
             image = cv2.remap(
                 pano_image,
                 x_coords,
                 y_coords,
-                cv2.INTER_LINEAR,
+                cv2.INTER_LANCZOS4,
                 borderMode=cv2.BORDER_WRAP,
             )
             closest_camera = np.argmax(
@@ -284,6 +290,10 @@ class PanoProcessor:
                 .reshape(self._camera.width, self._camera.height)
                 .transpose()
             )
+            # Dilate the mask by a few pixels to avoid thin unmasked seams at
+            # camera boundaries, which would leave feature-extraction gaps.
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            mask = cv2.dilate(mask, kernel)
 
             image_name = self.rig_config.cameras[cam_idx].image_prefix + pano_name
             mask_name = f"{image_name}.png"
@@ -528,12 +538,25 @@ def run(args: argparse.Namespace) -> None:
 
             logging.info("Perspective images replaced with object-removed versions")
 
-    pycolmap.extract_features(
-        database_path,
-        image_dir,
-        reader_options=pycolmap.ImageReaderOptions(mask_path=mask_dir),
-        camera_mode=pycolmap.CameraMode.PER_FOLDER,
-    )
+    # pycolmap 4.0.4+ uses extraction_options; older versions use sift_options
+    try:
+        pycolmap.extract_features(
+            database_path,
+            image_dir,
+            reader_options=pycolmap.ImageReaderOptions(mask_path=mask_dir),
+            extraction_options=pycolmap.FeatureExtractionOptions(
+                sift=pycolmap.SiftExtractionOptions(max_num_features=16384)
+            ),
+            camera_mode=pycolmap.CameraMode.PER_FOLDER,
+        )
+    except (TypeError, AttributeError):
+        pycolmap.extract_features(
+            database_path,
+            image_dir,
+            reader_options=pycolmap.ImageReaderOptions(mask_path=mask_dir),
+            sift_options=pycolmap.SiftExtractionOptions(max_num_features=16384),
+            camera_mode=pycolmap.CameraMode.PER_FOLDER,
+        )
 
     with pycolmap.Database.open(database_path) as db:
         pycolmap.apply_rig_config([rig_config], db)
@@ -546,7 +569,10 @@ def run(args: argparse.Namespace) -> None:
         loop_detection = os.path.exists(VOCAB_TREE_PATH)
         if not loop_detection:
             logging.warning(f"Vocab tree not found at {VOCAB_TREE_PATH}, disabling loop detection")
-        pairing_opts = pycolmap.SequentialPairingOptions(loop_detection=loop_detection)
+        pairing_opts = pycolmap.SequentialPairingOptions(
+            loop_detection=loop_detection,
+            overlap=10,
+        )
         if loop_detection:
             pairing_opts.vocab_tree_path = VOCAB_TREE_PATH
         pycolmap.match_sequential(

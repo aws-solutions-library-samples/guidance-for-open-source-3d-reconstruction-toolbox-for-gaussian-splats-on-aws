@@ -29,6 +29,7 @@ try:
 except ImportError:
     print("Please install gsplat>=1.5.0")
 from gsplat.cuda._torch_impl import _quat_to_rotmat as quat_to_rotmat
+from gsplat.strategy import DefaultStrategy
 from nerfstudio.cameras.camera_optimizers import CameraOptimizer, CameraOptimizerConfig
 from nerfstudio.cameras.cameras import Cameras
 from nerfstudio.data.scene_box import OrientedBox
@@ -133,19 +134,17 @@ class DNSplatterModel(SplatfactoModel):
 
     def populate_modules(self):
         if self.seed_points is not None and not self.config.random_init:
-            means = torch.nn.Parameter(self.seed_points[0])  # (Location, Color)
+            means = torch.nn.Parameter(self.seed_points[0].float())  # (Location, Color)
         else:
             means = torch.nn.Parameter((torch.rand((500000, 3)) - 0.5) * 10)
         CONSOLE.log(f"Number of initial seed points {means.shape[0]}")
-        self.xys_grad_norm = None
-        self.max_2Dsize = None
         dim_sh = num_sh_bases(self.config.sh_degree)
         num_points = means.shape[0]
 
         if self.seed_points is not None and not self.config.random_init:
             shs = torch.zeros((self.seed_points[1].shape[0], dim_sh, 3)).float().cuda()
             if self.config.sh_degree > 0:
-                shs[:, 0, :3] = RGB2SH(self.seed_points[1] / 255)
+                shs[:, 0, :3] = RGB2SH(self.seed_points[1].float() / 255)
                 shs[:, 1:, 3:] = 0.0
             else:
                 CONSOLE.log("use color only optimization with sigmoid activation")
@@ -203,9 +202,8 @@ class DNSplatterModel(SplatfactoModel):
                 self.normals_seed = self.normals_seed / torch.norm(
                     self.normals_seed, dim=-1, keepdim=True
                 )
-                normals = torch.nn.Parameter(self.normals_seed.detach())
-                scales = torch.log(avg_dist.repeat(1, 3))
-                scales[:, 2] = torch.log((avg_dist / 10)[:, 0])
+                normals = torch.nn.Parameter(self.normals_seed.detach().float())
+                scales = torch.log(avg_dist.repeat(1, 3)).float()
                 scales = torch.nn.Parameter(scales.detach())
                 quats = torch.zeros(len(self.normals_seed), 4)
                 mat = rotate_vector_to_vector(
@@ -215,7 +213,7 @@ class DNSplatterModel(SplatfactoModel):
                     self.normals_seed,
                 )
                 quats = matrix_to_quaternion(mat)
-                quats = torch.nn.Parameter(quats.detach())
+                quats = torch.nn.Parameter(quats.detach().float())
             else:
                 scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 3)))
                 quats = torch.nn.Parameter(random_quat_tensor(num_points))
@@ -267,6 +265,26 @@ class DNSplatterModel(SplatfactoModel):
         if not self.config.use_normal_loss:
             self.regularization_strategy.normal_loss = None
 
+        # Initialize gsplat densification strategy (required by step_post_backward)
+        self.strategy = DefaultStrategy(
+            prune_opa=self.config.cull_alpha_thresh,
+            grow_grad2d=self.config.densify_grad_thresh / 4.0 if self.config.use_absgrad else self.config.densify_grad_thresh,
+            grow_scale3d=self.config.densify_size_thresh,
+            grow_scale2d=self.config.split_screen_size,
+            prune_scale3d=self.config.cull_scale_thresh,
+            prune_scale2d=self.config.cull_screen_size,
+            refine_scale2d_stop_iter=self.config.stop_screen_size_at,
+            refine_start_iter=self.config.warmup_length,
+            refine_stop_iter=self.config.stop_split_at,
+            reset_every=self.config.reset_alpha_every * self.config.refine_every,
+            refine_every=self.config.refine_every,
+            pause_refine_after_reset=self.num_train_data + self.config.refine_every,
+            absgrad=self.config.use_absgrad,
+            revised_opacity=False,
+            verbose=True,
+        )
+        self.strategy_state = self.strategy.initialize_state(scene_scale=1.0)
+
     @property
     def normals(self):
         return self.gauss_params["normals"]
@@ -298,179 +316,56 @@ class DNSplatterModel(SplatfactoModel):
         # Remove the first neighbor (the point itself) and return
         return distances[:, 1:], indices[:, 1:]
 
-    def after_train(self, step: int):
-        # Accumulate xys_grad_norm, vis_counts, and max_2Dsize for densification.
-        # Implemented directly because SplatfactoModel.after_train does not exist in
-        # the installed nerfstudio version — super() raises AttributeError at runtime.
-        with torch.no_grad():
-            if self.radii.shape[0] > 0 if self.radii.dim() > 0 else True:
-                # Visible Gaussians mask — normalize to 1D [N]
-                radii = self.radii
-                if radii.dim() == 0:
-                    # scalar radii — skip densification this step
-                    return
-                if radii.dim() > 1:
-                    radii = radii.squeeze()
-                if radii.dim() == 0:
-                    return  # squeezed to scalar, skip
-                visible = (radii > 0).view(-1)  # guarantee 1D [N] boolean
-                # Accumulate 2D gradient norms for densification threshold
-                if self.xys.grad is not None:
-                    if self.config.use_absgrad:
-                        absgrad = self.xys.absgrad
-                    else:
-                        absgrad = self.xys.grad
-                    # Normalize to [N, 2]: gsplat returns [1,N,2], [1,N], [N,2], or [N] depending on version
-                    while absgrad.dim() > 2:
-                        absgrad = absgrad[0]
-                    if absgrad.dim() == 2 and absgrad.shape[0] == 1:
-                        absgrad = absgrad[0]  # [1, N] -> [N]
-                    if absgrad.dim() == 1:
-                        absgrad = absgrad.unsqueeze(-1).expand(-1, 2)  # [N] -> [N, 2]
-                    # Safe indexing: absgrad is [N,2], visible is [N]
-                    # Truncate or pad if sizes diverged (should not happen but guard anyway)
-                    if absgrad.shape[0] != visible.shape[0]:
-                        min_n = min(absgrad.shape[0], visible.shape[0])
-                        absgrad = absgrad[:min_n]
-                        visible = visible[:min_n]
-                        if self.xys_grad_norm is not None and self.xys_grad_norm.shape[0] != min_n:
-                            self.xys_grad_norm = torch.zeros(min_n, device=self.device)
-                            self.vis_counts = torch.zeros(min_n, device=self.device)
-                        if self.max_2Dsize is not None and self.max_2Dsize.shape[0] != min_n:
-                            self.max_2Dsize = torch.zeros(min_n, device=self.device)
-                        if radii.shape[0] != min_n:
-                            radii = radii[:min_n]
-                    visible_absgrad = absgrad[visible]  # [M, 2] or [M]
-                    grads = visible_absgrad.norm(dim=-1) if visible_absgrad.dim() == 2 else visible_absgrad.abs()
-                    if self.xys_grad_norm is None or self.xys_grad_norm.shape[0] != visible.shape[0]:
-                        self.xys_grad_norm = torch.zeros(visible.shape[0], device=self.device)
-                        self.vis_counts = torch.zeros(visible.shape[0], device=self.device)
-                    self.xys_grad_norm[visible] += grads
-                    self.vis_counts[visible] += 1
-                # Track max 2D radius per Gaussian for screen-size culling
-                if self.max_2Dsize is None or self.max_2Dsize.shape[0] != visible.shape[0]:
-                    self.max_2Dsize = torch.zeros(visible.shape[0], device=self.device)
-                self.max_2Dsize[visible] = torch.max(
-                    self.max_2Dsize[visible],
-                    radii[visible] / float(max(self.last_size[0], self.last_size[1]))
-                )
-
-    def refinement_after(self, optimizers: Optimizers, step):
+    def step_post_backward(self, step):
         assert step == self.step
-        if self.step <= self.config.warmup_length:
-            return
-        with torch.no_grad():
-            # Offset all the opacity reset logic by refine_every so that we don't
-            # save checkpoints right when the opacity is reset (saves every 2k)
-            # then cull
-            # only split/cull if we've seen every image since opacity reset
-            reset_interval = self.config.reset_alpha_every * self.config.refine_every
-            do_densification = (
-                self.step < self.config.stop_split_at
-                and self.step % reset_interval
-                > self.num_train_data + self.config.refine_every
+        # gsplat sets .absgrad on the internal saved tensor in the CUDA backward,
+        # not on info["means2d"]. Copy it over so _update_state can read it.
+        means2d = self.info.get("means2d")
+        if means2d is not None and not hasattr(means2d, "absgrad") and means2d.grad is not None:
+            means2d.absgrad = means2d.grad.abs()
+
+        # Temporarily exclude 'normals' from gauss_params during strategy update
+        # since gsplat's split/duplicate ops don't understand it as a geometric param.
+        normals_param = self.gauss_params.pop("normals")
+        try:
+            self.strategy.step_post_backward(
+                params=self.gauss_params,
+                optimizers=self.optimizers,
+                state=self.strategy_state,
+                step=self.step,
+                info=self.info,
+                packed=False,
             )
-            if do_densification:
-                # then we densify
-                assert (
-                    self.xys_grad_norm is not None
-                    and self.vis_counts is not None
-                    and self.max_2Dsize is not None
-                )
-                avg_grad_norm = (
-                    (self.xys_grad_norm / self.vis_counts)
-                    * 0.5
-                    * max(self.last_size[0], self.last_size[1])
-                )
-                high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
-                splits = (
-                    self.scales.exp().max(dim=-1).values
-                    > self.config.densify_size_thresh
-                ).squeeze()
-                if self.step < self.config.stop_screen_size_at:
-                    splits |= (
-                        self.max_2Dsize > self.config.split_screen_size
-                    ).squeeze()
-                splits &= high_grads
-                nsamps = self.config.n_split_samples
-                split_params = self.split_gaussians(splits, nsamps)
-
-                dups = (
-                    self.scales.exp().max(dim=-1).values
-                    <= self.config.densify_size_thresh
-                ).squeeze()
-                dups &= high_grads
-                dup_params = self.dup_gaussians(dups)
-                for name, param in self.gauss_params.items():
-                    self.gauss_params[name] = torch.nn.Parameter(
-                        torch.cat(
-                            [param.detach(), split_params[name], dup_params[name]],
-                            dim=0,
-                        )
+        finally:
+            # Re-insert normals, resized to match new Gaussian count if densification occurred
+            n_new = len(self.gauss_params["means"])
+            n_old = len(normals_param)
+            if n_new != n_old:
+                if n_new > n_old:
+                    # Densification grew the count — pad normals with zeros
+                    extra = torch.zeros(n_new - n_old, 3, device=normals_param.device, dtype=normals_param.dtype)
+                    new_normals = torch.nn.Parameter(
+                        torch.cat([normals_param.detach(), extra], dim=0)
                     )
-                # append zeros to the max_2Dsize tensor
-                self.max_2Dsize = torch.cat(
-                    [
-                        self.max_2Dsize,
-                        torch.zeros_like(split_params["scales"][:, 0]),
-                        torch.zeros_like(dup_params["scales"][:, 0]),
-                    ],
-                    dim=0,
-                )
-
-                split_idcs = torch.where(splits)[0]
-                self.dup_in_all_optim(optimizers, split_idcs, nsamps)
-
-                dup_idcs = torch.where(dups)[0]
-                self.dup_in_all_optim(optimizers, dup_idcs, 1)
-
-                # After a guassian is split into two new gaussians, the original one should also be pruned.
-                splits_mask = torch.cat(
-                    (
-                        splits,
-                        torch.zeros(
-                            nsamps * splits.sum() + dups.sum(),
-                            device=self.device,
-                            dtype=torch.bool,
-                        ),
-                    )
-                )
-
-                deleted_mask = self.cull_gaussians(splits_mask)
-            elif (
-                self.step >= self.config.stop_split_at
-                and self.config.continue_cull_post_densification
-            ):
-                deleted_mask = self.cull_gaussians()
-            else:
-                # if we donot allow culling post refinement, no more gaussians will be pruned.
-                deleted_mask = None
-
-            if deleted_mask is not None:
-                self.remove_from_all_optim(optimizers, deleted_mask)
-
-            if (
-                self.step < self.config.stop_split_at
-                and self.step % reset_interval == self.config.refine_every
-            ):
-                # Reset value is set to be twice of the cull_alpha_thresh
-                reset_value = self.config.cull_alpha_thresh * 2.0
-                self.opacities.data = torch.clamp(
-                    self.opacities.data,
-                    max=torch.logit(
-                        torch.tensor(reset_value, device=self.device)
-                    ).item(),
-                )
-                # reset the exp of optimizer
-                optim = optimizers.optimizers["opacities"]
-                param = optim.param_groups[0]["params"][0]
-                param_state = optim.state[param]
-                param_state["exp_avg"] = torch.zeros_like(param_state["exp_avg"])
-                param_state["exp_avg_sq"] = torch.zeros_like(param_state["exp_avg_sq"])
-
-            self.xys_grad_norm = None
-            self.vis_counts = None
-            self.max_2Dsize = None
+                else:
+                    # Pruning shrank the count — the strategy already removed rows from
+                    # all other params via remove_from_all_optim. We need to match that
+                    # mask but don't have it here, so truncate to n_new as a safe fallback.
+                    new_normals = torch.nn.Parameter(normals_param.detach()[:n_new])
+                normals_param = new_normals
+                if "normals" in self.optimizers:
+                    opt = self.optimizers["normals"]
+                    old_param = opt.param_groups[0]["params"][0]
+                    param_state = opt.state.pop(old_param, {})
+                    for k, v in param_state.items():
+                        if k != "step" and isinstance(v, torch.Tensor) and v.shape[0] == n_old:
+                            if n_new > n_old:
+                                param_state[k] = torch.cat([v, torch.zeros(n_new - n_old, *v.shape[1:], device=v.device, dtype=v.dtype)], dim=0)
+                            else:
+                                param_state[k] = v[:n_new]
+                    opt.param_groups[0]["params"] = [normals_param]
+                    opt.state[normals_param] = param_state
+            self.gauss_params["normals"] = normals_param
 
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
         # Here we explicitly use the means, scales as parameters so that the user can override this function and
@@ -579,7 +474,7 @@ class DNSplatterModel(SplatfactoModel):
             colors_crop = torch.sigmoid(colors_crop)
             sh_degree_to_use = None
 
-        render, alpha, info = rasterization(
+        render, alpha, self.info = rasterization(
             means=means_crop,
             quats=quats_crop / quats_crop.norm(dim=-1, keepdim=True),
             scales=torch.exp(scales_crop).float(),
@@ -596,26 +491,21 @@ class DNSplatterModel(SplatfactoModel):
             render_mode=render_mode,
             sh_degree=sh_degree_to_use,
             sparse_grad=False,
-            absgrad=True,
+            absgrad=isinstance(self.strategy, DefaultStrategy) and self.strategy.absgrad,
             rasterize_mode=self.config.rasterize_mode,
-            # set some threshold to disregrad small gaussians for faster rendering.
-            # radius_clip=3.0,
         )
-        if self.training and info["means2d"].requires_grad:
-            info["means2d"].retain_grad()
-        self.xys = info["means2d"]  # [1, N, 2]
-        self.radii = info["radii"][0]  # [N]
+        if self.training:
+            self.strategy.step_pre_backward(
+                self.gauss_params, self.optimizers, self.strategy_state, self.step, self.info
+            )
         alpha = alpha[:, ...]
-        self.depths = info["depths"]
-        self.conics = info["conics"]
-        self.num_tiles_hit = info["tiles_per_gauss"]
 
         background = self._get_background_color()
         rgb = render[:, ..., :3] + (1 - alpha) * background
         rgb = torch.clamp(rgb, 0.0, 1.0)
 
         # visible gaussians
-        self.vis_indices = torch.where(self.radii > 0)[0]
+        self.vis_indices = torch.where(self.info["radii"][0].max(dim=-1).values > 0 if self.info["radii"][0].dim() == 2 else self.info["radii"][0] > 0)[0]
 
         if render_mode == "RGB+ED":
             depth_im = render[:, ..., 3:4]
@@ -1030,9 +920,12 @@ class DNSplatterModel(SplatfactoModel):
                 args=[training_callback_attributes.optimizers],
             )
         )
-        # after_train does not exist in the installed nerfstudio/gsplat version.
-        # refinement_after raises errors because vis_counts/max_2Dsize are never
-        # populated without after_train. Both disabled to match working reference.
+        cbs.append(
+            TrainingCallback(
+                [TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+                self.step_post_backward,
+            )
+        )
         return cbs
 
     def sample_points_in_gaussians(

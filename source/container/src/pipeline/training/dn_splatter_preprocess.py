@@ -191,6 +191,27 @@ def main():
     if os.path.exists(images_dir):
         clean_images_dir(images_dir)
 
+    # If images/ is empty, search for images in common alternative locations
+    # (e.g. colmap/images/ when the zip was a COLMAP reconstruction export)
+    if not os.path.isdir(images_dir) or not any(
+        f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        for f in os.listdir(images_dir)
+        if os.path.isfile(os.path.join(images_dir, f))
+    ):
+        for alt in ['colmap/images', 'colmap/images/images']:
+            alt_path = os.path.join(data_dir, alt)
+            if os.path.isdir(alt_path) and any(
+                f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                for f in os.listdir(alt_path)
+                if os.path.isfile(os.path.join(alt_path, f))
+            ):
+                print(f"images/ is empty, copying images from {alt_path}")
+                os.makedirs(images_dir, exist_ok=True)
+                for f in os.listdir(alt_path):
+                    if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        shutil.copy2(os.path.join(alt_path, f), os.path.join(images_dir, f))
+                break
+
     # Ensure colmap/sparse structure for depth alignment
     ensure_colmap_sparse_link(data_dir)
 
@@ -218,6 +239,20 @@ def main():
                     print(f"WARNING: Could not generate sparse.ply: {e}")
 
     ensure_sparse_ply(data_dir)
+
+    # Ensure sparse/0/ mirrors colmap/sparse/0/ so NerfStudio's default colmap_path
+    # (colmap/sparse/0) and any ply_file_path entries in transforms.json that point
+    # to sparse/0/sparse.ply both resolve correctly.
+    _colmap_s0 = os.path.join(data_dir, "colmap", "sparse", "0")
+    _sparse_s0 = os.path.join(data_dir, "sparse", "0")
+    if os.path.isdir(_colmap_s0) and os.listdir(_colmap_s0):
+        os.makedirs(_sparse_s0, exist_ok=True)
+        for _f in os.listdir(_colmap_s0):
+            _src = os.path.join(_colmap_s0, _f)
+            _dst = os.path.join(_sparse_s0, _f)
+            if not os.path.exists(_dst):
+                os.symlink(_src, _dst)
+        print(f"Linked colmap/sparse/0/ files into sparse/0/ ({len(os.listdir(_colmap_s0))} files)")
 
     # Patch dn_model.py: combined_depth_normalized is only set inside
     # 'if sensor_depth in batch' but referenced unconditionally at line 956.
@@ -296,6 +331,39 @@ def main():
               f"remaining={len(clean_frames)}")
 
     sanitize_transforms_json(data_dir)
+
+    # Patch normal_nerfstudio.py: replace natsorted with sorted for normal file paths.
+    # natsorted can order files differently than the image list, causing normals from
+    # one image to be applied to a different image, severely degrading quality.
+    def _patch_normal_nerfstudio():
+        path = "/opt/ml/code/dn-splatter/dn_splatter/data/normal_nerfstudio.py"
+        try:
+            with open(path, 'r') as f:
+                src = f.read()
+            patched = src.replace(
+                'return natsorted(glob.glob(f"{self.normal_save_dir}/*.png"))',
+                'return sorted(glob.glob(f"{self.normal_save_dir}/*.png"))'
+            )
+            # Also fix mono depth path ordering for the same reason
+            patched = patched.replace(
+                'depth_paths = natsorted(\n            glob.glob(f"{self.config.data}/mono_depth/*_aligned.npy")',
+                'depth_paths = sorted(\n            glob.glob(f"{self.config.data}/mono_depth/*_aligned.npy")'
+            ).replace(
+                'depth_paths = natsorted(glob.glob(f"{self.config.data}/mono_depth/*.npy"))',
+                'depth_paths = sorted(glob.glob(f"{self.config.data}/mono_depth/*.npy"))'
+            )
+            if patched != src:
+                with open(path, 'w') as f:
+                    f.write(patched)
+                print("Patched normal_nerfstudio.py: natsorted -> sorted for normal file paths")
+            # Evict cached module so the patch takes effect
+            import sys
+            for mod in list(sys.modules.keys()):
+                if 'normal_nerfstudio' in mod:
+                    del sys.modules[mod]
+        except Exception as e:
+            print(f"WARNING: Could not patch normal_nerfstudio.py: {e}")
+    _patch_normal_nerfstudio()
 
     # Generate monocular normals
     if not args.skip_normals:
@@ -385,7 +453,11 @@ def main():
                     print(f"WARNING: Could not match sensor depth files to transforms.json frames. Falling back to mono depth.")
 
             else:
-                print(f"INFO: Using scale-aligned mono depth (mono_depth/*_aligned.npy).")
+                # Sensor depth rejected (e.g. uint8 ARKit maps).
+                # After alignment, convert mono_depth/*_aligned.npy -> uint16 mm PNGs
+                # so dn-splatter can use them as proper sensor depth supervision.
+                print(f"INFO: Sensor depth rejected. Will convert aligned mono depth to uint16 mm PNGs after alignment.")
+                _convert_mono_to_sensor = True
         else:
             print(f"INFO: No depth files found in {_depth_dir}. Using mono depth.")
 
@@ -542,13 +614,20 @@ def main():
                 mono_already_done = os.path.isdir(mono_depth_dir) and \
                     any(f.endswith(".npy") for f in os.listdir(mono_depth_dir))
                 if not mono_already_done:
-                    depth_aligner = ColmapToAlignedMonoDepths(
-                        data=Path(data_dir),
-                        skip_colmap_to_depths=True,
-                        skip_mono_depth_creation=False,
-                        skip_alignment=True,
-                    )
-                    depth_aligner.main()
+                    _img_dir = os.path.join(data_dir, "images")
+                    if os.path.isdir(_img_dir) and any(
+                        f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                        for f in os.listdir(_img_dir)
+                    ):
+                        depth_aligner = ColmapToAlignedMonoDepths(
+                            data=Path(data_dir),
+                            skip_colmap_to_depths=True,
+                            skip_mono_depth_creation=False,
+                            skip_alignment=True,
+                        )
+                        depth_aligner.main()
+                    else:
+                        print(f"WARNING: images/ is empty, skipping mono depth generation")
                 else:
                     print(f"INFO: mono_depth already exists ({mono_depth_dir}), skipping re-generation.")
         else:
@@ -566,6 +645,43 @@ def main():
     # Only run when sensor depth exists — depth_normal_consistency.py requires
     # depth_file_path in every transforms.json frame, which is only injected
     # when a depth/ or depth_images/ directory is present.
+    # Convert aligned mono depth to uint16 mm PNGs and inject as depth_file_path
+    # when sensor depth was rejected (e.g. uint8 ARKit maps).
+    # This gives dn-splatter proper metric depth supervision from the SFM-aligned mono depth.
+    if locals().get('_convert_mono_to_sensor', False):
+        import numpy as np
+        import cv2 as _cv2
+        _mono_depth_dir = os.path.join(data_dir, "mono_depth")
+        _sensor_out_dir = os.path.join(data_dir, "depth_sensor")
+        os.makedirs(_sensor_out_dir, exist_ok=True)
+        _aligned_files = sorted([f for f in os.listdir(_mono_depth_dir) if f.endswith('_aligned.npy')])
+        _converted = 0
+        for _af in _aligned_files:
+            _stem = _af.replace('_aligned.npy', '')
+            _depth_m = np.load(os.path.join(_mono_depth_dir, _af)).squeeze().astype(np.float32)
+            # Convert meters to uint16 mm, clip to valid uint16 range
+            _depth_mm = np.clip(_depth_m * 1000.0, 0, 65535).astype(np.uint16)
+            _cv2.imwrite(os.path.join(_sensor_out_dir, f"{_stem}.png"), _depth_mm)
+            _converted += 1
+        print(f"Converted {_converted} aligned mono depth maps to uint16 mm PNGs in depth_sensor/")
+        # Inject depth_file_path into transforms.json
+        if _converted > 0 and os.path.isfile(_transforms_path):
+            with open(_transforms_path, 'r') as _f:
+                _transforms = _json.load(_f)
+            _injected = 0
+            for _frame in _transforms.get('frames', []):
+                if 'depth_file_path' not in _frame:
+                    _img_stem = os.path.splitext(os.path.basename(_frame.get('file_path', '')))[0]
+                    _png = os.path.join(_sensor_out_dir, f"{_img_stem}.png")
+                    if os.path.exists(_png):
+                        _frame['depth_file_path'] = f"depth_sensor/{_img_stem}.png"
+                        _injected += 1
+            if _injected > 0:
+                with open(_transforms_path, 'w') as _f:
+                    _json.dump(_transforms, _f, indent=2)
+                print(f"Injected depth_file_path into {_injected} frames from depth_sensor/")
+                open(os.path.join(data_dir, '.sensor_depth_valid'), 'w').close()
+
     # Only generate depth-normal consistency masks when valid sensor depth was confirmed
     # (depth_file_path entries injected, marked by .sensor_depth_valid).
     # depth_normal_consistency.py requires depth_file_path in every frame.
