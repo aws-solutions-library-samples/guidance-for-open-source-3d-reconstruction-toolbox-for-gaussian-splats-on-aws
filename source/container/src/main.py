@@ -766,68 +766,9 @@ if __name__ == "__main__":
             if os.path.exists(config_yml_src): # only for Nerfstudio
                 # For splatfacto models, keep config.yml in dataset directory and update it there
                 if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
-                    log.info(f"Keeping config.yml in dataset directory for splatfacto: {config_yml_src}")
-                    
-                    # Update config.yml for resume training directly in dataset directory using text replacement
-                    try:
-                        with open(config_yml_src, 'r') as f:
-                            config_content = f.read()
-
-                        # Find latest checkpoint for load_checkpoint field
-                        ckpt_files = sorted([f for f in os.listdir(model_src_dir) if f.endswith('.ckpt')])
-                        if ckpt_files:
-                            latest_ckpt = os.path.join(model_src_dir, ckpt_files[-1])
-                            
-                            # Update load_checkpoint in config
-                            config_content = re.sub(
-                                r'load_checkpoint: null',
-                                f'load_checkpoint: !!python/object/apply:pathlib.PosixPath\n  - {latest_ckpt}',
-                                config_content
-                            )
-                        
-                        # Compute total iterations = checkpoint step + additional steps
-                        # so nerfstudio continues from where it left off rather than restarting
-                        ckpt_step = 0
-                        if ckpt_files:
-                            _m = re.search(r'step-(\d+)\.ckpt$', ckpt_files[-1])
-                            if _m:
-                                ckpt_step = int(_m.group(1)) + 1  # +1 because step is 0-indexed
-                        additional_steps = max(int(config['MAX_STEPS']), 9000)
-                        total_iterations = ckpt_step + additional_steps
-                        log.info(f"Resume training: checkpoint_step={ckpt_step}, additional_steps={additional_steps}, total_iterations={total_iterations}")
-                        
-                        # Update max_num_iterations using text replacement
-                        config_content = re.sub(r'max_num_iterations: \d+', f'max_num_iterations: {total_iterations}', config_content)
-
-                        # Update timestamp using text replacement
-                        config_content = re.sub(r'timestamp: [^\n]+', f'timestamp: {RESUME_TRAIN_EXPERIMENT_NAME}', config_content)
-                        
-                        # Set load_scheduler to false
-                        config_content = re.sub(r'load_scheduler: \w+', 'load_scheduler: false', config_content)
-                        
-                        # Update dataset path using text replacement
-                        config_content = re.sub(r'data: !!python/object/apply:pathlib\.PosixPath\s*\n\s*-[^\n]*(?:\n\s*-[^\n]*)*', 
-                                              f'data: !!python/object/apply:pathlib.PosixPath\n      - {config["DATASET_PATH"]}', 
-                                              config_content, flags=re.MULTILINE)
-                        
-                        # Update checkpoint path to point to dataset directory
-                        checkpoint_path = os.path.join(config['DATASET_PATH'], 'nerfstudio_models')
-                        config_content = re.sub(r'outputs/unnamed/splatfacto/[^/]+/nerfstudio_models', 
-                                              checkpoint_path.replace('\\', '/'),
-                                              config_content)
-                        
-                        with open(config_yml_src, 'w') as f:
-                            f.write(config_content)
-                        
-                        log.info(f"""
-                                Updated config.yml in dataset directory:
-                                load_checkpoint={latest_ckpt if ckpt_files else 'null'},
-                                max_num_iterations={total_iterations},
-                                timestamp={RESUME_TRAIN_EXPERIMENT_NAME},
-                                data_path={config['DATASET_PATH']}
-                                """)
-                    except Exception as e:
-                        log.warning(f"Failed to update config.yml: {e}")
+                    log.info(f"Keeping nerfstudio_models and config.yml in dataset directory for splatfacto resume: {model_src_dir}")
+                    ckpt_files = sorted([f for f in os.listdir(model_src_dir) if f.endswith('.ckpt')])
+                    log.info(f"Splatfacto resume checkpoint files found at: {ckpt_files}")
                 else:
                     # For other models, move to code directory
                     os.makedirs(os.path.dirname(model_config_path), exist_ok=True)
@@ -1353,12 +1294,30 @@ if __name__ == "__main__":
                 log.info("Using spherical camera processing with panorama_sfm.py")
             elif config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
                 config['RECON_SOFTWARE_NAME'] == "hloc":
+                # Scale SIFT extraction to image resolution
+                REF_MAX_IMAGE_SIZE = 3200
+                REF_MAX_NUM_FEATURES = 8192
+                sample_images = [f for f in os.listdir(image_path)
+                                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                if sample_images:
+                    with Image.open(os.path.join(image_path, sample_images[0])) as img:
+                        sift_max_image_size = max(img.width, img.height)
+                    scale_factor = (sift_max_image_size / REF_MAX_IMAGE_SIZE) ** 2
+                    sift_max_num_features = min(int(REF_MAX_NUM_FEATURES * scale_factor), 65536)
+                else:
+                    sift_max_image_size = REF_MAX_IMAGE_SIZE
+                    sift_max_num_features = REF_MAX_NUM_FEATURES
+                log.info(f"SIFT extraction: max_image_size={sift_max_image_size}, "
+                         f"max_num_features={sift_max_num_features}")
+
                 # FEATURE EXTRACTOR COMPONENT
                 args = [
                     "feature_extractor",
                     "--database_path", colmap_db_path,
                     "--image_path", image_path,
-                    "--ImageReader.single_camera", "1"
+                    "--ImageReader.single_camera", "1",
+                    "--SiftExtraction.max_image_size", str(sift_max_image_size),
+                    "--SiftExtraction.max_num_features", str(sift_max_num_features)
                 ]
                 if ENABLE_MULTI_GPU == "true" or \
                     config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
@@ -1874,13 +1833,20 @@ if __name__ == "__main__":
                 # PearsonDepth can produce NaN gradients when depth variance is near zero.
                 depth_loss_type = "EdgeAwareLogL1"
                 depth_lambda = "0.2" if config['MODEL'] == "ags-mesh" else "0.3"
-                normal_supervision = "depth" if has_sensor_depth else "mono"
-                log.info(f"DN-Splatter depth loss: {depth_loss_type}, normal-supervision: {normal_supervision}")
+                # Always use mono normals from dsine — they provide stronger supervision
+                # on planar surfaces than depth-derived normals (which are self-referencing).
+                normal_supervision = "mono"
+                # Stop densification at ~67% of training to allow a polish phase
+                stop_split_at = int(int(config['MAX_STEPS']) * 0.67)
+                log.info(f"DN-Splatter depth loss: {depth_loss_type}, normal-supervision: {normal_supervision}, stop-split-at: {stop_split_at}")
+                normal_lambda = "0.2" if config['MODEL'] == "ags-mesh" else "0.1"
                 args.extend([
                     "--pipeline.model.depth-lambda", depth_lambda,
                     "--pipeline.model.depth-loss-type", depth_loss_type,
                     "--pipeline.model.normal-supervision", normal_supervision,
+                    "--pipeline.model.normal-lambda", normal_lambda,
                     "--pipeline.model.use-normal-tv-loss", "True",
+                    "--pipeline.model.stop-split-at", str(stop_split_at),
                 ])
                 if config['LOG_VERBOSITY'] != "debug":
                     args.extend([
@@ -1934,24 +1900,38 @@ if __name__ == "__main__":
                 elif config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
                     config['MODEL'] == "splatfacto-mcmc":
                     if config['RUN_RECON'] == "false" and not colmap_zip_found: # Resume training
-                       # For splatfacto resume training, config.yml was already updated during extraction
-                        dataset_config_path = os.path.join(config['DATASET_PATH'], "config.yml")
                         dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
-                        has_config = os.path.exists(dataset_config_path)
                         has_ckpt = os.path.exists(dataset_models_path) and any(
                             f.endswith('.ckpt') for f in os.listdir(dataset_models_path)
                         ) if os.path.exists(dataset_models_path) else False
-                        
-                        if has_config and has_ckpt:
+
+                        if has_ckpt:
                             resume_training_active = True
-                            # Update model paths to point to the resume training output directory
                             model_ckpt_path = os.path.join(config['CODE_PATH'], "outputs", "unnamed", model, RESUME_TRAIN_EXPERIMENT_NAME, model_dir_name)
                             model_config_path = os.path.join(config['CODE_PATH'], "outputs", "unnamed", model, RESUME_TRAIN_EXPERIMENT_NAME, "config.yml")
+                            additional_steps = max(int(config['MAX_STEPS']), 9000)
+                            ckpt_files = sorted([f for f in os.listdir(dataset_models_path) if f.endswith('.ckpt')])
+                            ckpt_step = 0
+                            if ckpt_files:
+                                _m = re.search(r'step-(\d+)\.ckpt$', ckpt_files[-1])
+                                if _m:
+                                    ckpt_step = int(_m.group(1)) + 1
+                            total_iterations = ckpt_step + additional_steps
+                            stop_split_at = ckpt_step + int(additional_steps * 0.67)
                             args.extend([
-                                "--load-config", dataset_config_path,
+                                "--load-dir", dataset_models_path,
+                                "--load-scheduler", "False",
+                                "--timestamp", RESUME_TRAIN_EXPERIMENT_NAME,
+                                "--pipeline.model.use-scale-regularization", "True",
+                                "--pipeline.model.use-bilateral-grid", "True",
+                                "--pipeline.model.stop-split-at", str(stop_split_at),
+                                "--max-num-iterations", str(total_iterations),
+                                "--steps-per-save", str(total_iterations),
                             ])
-                            log.info(f"Resume training using config: {dataset_config_path}")
-                            log.info(f"Resume training: max_num_iterations set to checkpoint_step + additional_steps in config.yml")
+                            if config['MODEL'] == "splatfacto-mcmc":
+                                num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
+                                args.extend(["--pipeline.model.max-gs-num", str(num_gaussians)])
+                            log.info(f"Resume training: loading weights from {dataset_models_path}, fresh optimizer/scheduler, steps {ckpt_step}-{total_iterations}, densify until {stop_split_at}")
                     else:
                         # Initial training (either RUN_RECON=true or colmap_zip_found)
                         isp_mode = config.get('THREED_ISP', 'none').lower()
@@ -2008,26 +1988,18 @@ if __name__ == "__main__":
                     command = "ns-train"
 
                 auto_scale_value = "True" if config.get('PRESERVE_SCENE_SCALE', 'false') == 'false' else "False"
-                # When resuming via --load-config the dataparser subcommand is already
-                # encoded in config.yml; re-specifying it causes ns-train to ignore the checkpoint.
-                is_splatfacto_resume = (
-                    config['RUN_RECON'] == "false" and
-                    not colmap_zip_found and
-                    config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc")
-                )
-                if not is_splatfacto_resume:
-                    args.extend([
-                        data_model,
-                        "--data", config['DATASET_PATH'],
-                        "--downscale-factor", "1",
-                        "--auto-scale-poses", auto_scale_value
-                    ])
-                    if auto_scale_value == "True":
-                         args.extend(["--center-method", "poses"]) #poses,focus,none
-                    if ZIP_HAS_MASKS:
-                        masks_path = os.path.join(config['DATASET_PATH'], 'masks')
-                        args.extend(["--masks-path", masks_path])
-                        log.info(f"Enabling mask training from zip: {masks_path}")
+                args.extend([
+                    data_model,
+                    "--data", config['DATASET_PATH'],
+                    "--downscale-factor", "1",
+                    "--auto-scale-poses", auto_scale_value
+                ])
+                if auto_scale_value == "True":
+                    args.extend(["--center-method", "poses"])
+                if ZIP_HAS_MASKS:
+                    masks_path = os.path.join(config['DATASET_PATH'], 'masks')
+                    args.extend(["--masks-path", masks_path])
+                    log.info(f"Enabling mask training from zip: {masks_path}")
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -3133,17 +3105,23 @@ if __name__ == "__main__":
 
     ##################################
     # POST-PROCESS COMPONENT:
-    # Extract mesh from dn-splatter/ags-mesh model using IsoOctree TSDF fusion
+    # Extract mesh from dn-splatter/ags-mesh model
     ##################################
     try:
         if GENERATE_MESH and config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
             mesh_ply_path = os.path.join(output_path, "mesh.ply")
             mesh_glb_path = os.path.join(output_path, "mesh.glb")
             model_config_path = f"outputs/unnamed/{config['MODEL']}/{TRAIN_EXPERIMENT_NAME}/config.yml"
+            mesh_method = "o3dtsdf"
             args = [
                 "--config-path", model_config_path,
                 "--output-ply", mesh_ply_path,
                 "--output-glb", mesh_glb_path,
+                "--method", mesh_method,
+                "--poisson-depth", "9",
+                "--total-points", "2000000",
+                "--voxel-size", config.get('MESH_VOXEL_SIZE', '0.004'),
+                "--sdf-trunc", config.get('MESH_SDF_TRUNC', '0.02'),
             ]
             pipeline.create_component(
                 name="Extract-Mesh",
@@ -3720,7 +3698,8 @@ if __name__ == "__main__":
                         _has_sensor_depth = os.path.isdir(_depth_sensor_dir) and any(
                             f.endswith('.png') for f in os.listdir(_depth_sensor_dir)
                         )
-                        _normal_supervision = "depth" if _has_sensor_depth else "mono"
+                        # Always use mono normals — dsine provides stronger planar supervision
+                        _normal_supervision = "mono"
                         log.info(f"DN-Splatter Train runtime depth mode: {'sensor' if _has_sensor_depth else 'mono'}")
                         log.info(f"DN-Splatter Train runtime normal-supervision: {_normal_supervision}")
                         # Patch normal-supervision in component args

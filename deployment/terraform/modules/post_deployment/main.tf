@@ -335,20 +335,26 @@ resource "null_resource" "codebuild_trigger" {
   count = var.enable_code_build_container_build == "true" ? 1 : 0
 
   triggers = {
-    run_at = timestamp()
+    source_hash = data.archive_file.docker_source[0].output_md5
+    run_at      = timestamp()
   }
 
   provisioner "local-exec" {
     command = <<-EOT
-      BUILD_ID=$(aws codebuild start-build --project-name ${aws_codebuild_project.docker_build[0].name} --region ${var.region} --query 'build.id' --output text)
+      BUILD_ID=$(aws codebuild start-build \
+        --project-name ${aws_codebuild_project.docker_build[0].name} \
+        --region ${var.region} \
+        --source-location-override "${local.bucket_name}/codebuild/docker_source.zip" \
+        --source-type-override S3 \
+        --query 'build.id' --output text)
       echo "Started CodeBuild: $BUILD_ID"
       while true; do
         STATUS=$(aws codebuild batch-get-builds --ids "$BUILD_ID" --region ${var.region} --query 'builds[0].buildStatus' --output text)
         PHASE=$(aws codebuild batch-get-builds --ids "$BUILD_ID" --region ${var.region} --query 'builds[0].currentPhase' --output text)
         echo "Status: $STATUS | Phase: $PHASE"
-        if [ "$STATUS" = "SUCCEEDED" ]; then echo "✅ Build succeeded"; break; fi
+        if [ "$STATUS" = "SUCCEEDED" ]; then echo "Build succeeded"; break; fi
         if [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "FAULT" ] || [ "$STATUS" = "STOPPED" ] || [ "$STATUS" = "TIMED_OUT" ]; then
-          echo "❌ Build failed: $STATUS"; exit 1
+          echo "Build failed: $STATUS"; exit 1
         fi
         sleep 30
       done

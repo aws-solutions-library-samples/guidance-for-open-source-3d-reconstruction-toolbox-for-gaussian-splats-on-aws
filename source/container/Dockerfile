@@ -253,6 +253,9 @@ ENV Ceres_DIR=${CODE_PATH}/ceres-bin
 ENV cudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/13/cmake/cudss
 
 # Install NerfStudio from source to get get full access to repo files
+# Includes patch to purge stale optimizer state before checkpoint save —
+# gsplat densification (split/prune) leaves dangling entries causing KeyError.
+COPY ./src/pipeline/training/patch_optimizer_save.py /tmp/patch_optimizer_save.py
 RUN git clone https://github.com/nerfstudio-project/nerfstudio.git \
     && cd ${CODE_PATH}/nerfstudio \
     && git reset --hard ${NERFSTUDIO_HASH} \
@@ -262,6 +265,8 @@ RUN git clone https://github.com/nerfstudio-project/nerfstudio.git \
     && sed -i '/gsplat/s/^/# /' pyproject.toml \
     && sed -i '/# TODO(1480) enable when pycolmap windows wheels are available/,+1d' pyproject.toml \
     && sed -i '/@torch_compile()/d' nerfstudio/models/splatfacto.py \
+    && cp /tmp/patch_optimizer_save.py nerfstudio/engine/patch_optimizer_save.py \
+    && sed -i '/^from __future__ import annotations/a from nerfstudio.engine import patch_optimizer_save  # noqa: F401' nerfstudio/engine/trainer.py \
     && pip install -e . \
     && cd ${CODE_PATH}
 
@@ -526,58 +531,55 @@ RUN mkdir -p /opt/gsplat_pycolmap \
     && rm -rf /opt/gsplat_pycolmap/numpy* /opt/gsplat_pycolmap/scipy* \
     && pip install --target=/opt/gsplat_pycolmap --upgrade 'numpy==1.26.4'
 
-# The main entrypoint and arguments are added into the container in the State Machine (e.g. ENTRYPOINT [ "python", "main.py" ])
 # Copy over application files
-RUN mkdir -p ${CODE_PATH}/reconstruction
-RUN mkdir -p ${CODE_PATH}/training
-RUN mkdir -p ${CODE_PATH}/spherical
-RUN mkdir -p ${CODE_PATH}/pre_processing/segmentation
-RUN mkdir -p ${CODE_PATH}/pre_processing/video
-RUN mkdir -p ${CODE_PATH}/post_processing
-
-COPY ./src/entrypoint.sh                                                            ${CODE_PATH}
-RUN chmod +x ${CODE_PATH}/entrypoint.sh
-COPY ./src/main.py                                                                  ${CODE_PATH}
-COPY ./src/config.json                                                              ${CODE_PATH}
-COPY ./src/pipeline/pipeline.py                                                     ${CODE_PATH}
-COPY ./src/pipeline/utils.py                                                        ${CODE_PATH}
-COPY ./src/pipeline/reconstruction/extract_poses_imgs.py                            ${CODE_PATH}/reconstruction
-COPY ./src/pipeline/reconstruction/process_pose_transforms.py                       ${CODE_PATH}/reconstruction
-COPY ./src/pipeline/reconstruction/update_camera_model.py                           ${CODE_PATH}/reconstruction
-COPY ./src/pipeline/reconstruction/convert_cameras_to_pinhole.py                    ${CODE_PATH}/reconstruction
-COPY ./src/pipeline/reconstruction/run_map_anything.py                              ${CODE_PATH}/reconstruction
-COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py                            ${CODE_PATH}/training
-COPY ./src/pipeline/training/dn_splatter_preprocess.py                               ${CODE_PATH}/training
-COPY ./src/pipeline/training/run_gsplat_trainer.sh                                  ${CODE_PATH}/training
-RUN chmod +x ${CODE_PATH}/training/run_gsplat_trainer.sh
-COPY ./src/pipeline/reconstruction/spherical/panorama_sfm.py                        ${CODE_PATH}/spherical
-COPY ./src/pipeline/pre_processing/segmentation/remove_object_using_mask.py         ${CODE_PATH}/pre_processing/segmentation
-COPY ./src/pipeline/pre_processing/segmentation/remove_background.py                ${CODE_PATH}/pre_processing/segmentation
-COPY ./src/pipeline/pre_processing/segmentation/erase_object_using_mask.py          ${CODE_PATH}/pre_processing/segmentation
-COPY ./src/pipeline/pre_processing/segmentation/remove_background_sam2.py           ${CODE_PATH}/sam
-COPY ./src/pipeline/pre_processing/video/simple_video_to_images.py                  ${CODE_PATH}/pre_processing/video
-COPY ./src/pipeline/pre_processing/video/sharp_video_to_images.py                   ${CODE_PATH}/pre_processing/video
-COPY ./src/pipeline/pre_processing/video/rotate_portrait_images.py                  ${CODE_PATH}/pre_processing/video
-COPY ./src/pipeline/pre_processing/autoscale_dataset.py                             ${CODE_PATH}/pre_processing
-COPY ./src/pipeline/pre_processing/autogroup_images.py                              ${CODE_PATH}/pre_processing
-COPY ./src/pipeline/pre_processing/auto_matcher.py                                  ${CODE_PATH}/pre_processing
-COPY ./src/pipeline/post_processing/rotate_splat.py                                 ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/mirror_splat.py                                 ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/gsplat_pt_to_ply.py                             ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/crop_splat.py                                   ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/extract_center_cube.py                          ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/refine_center_object.py                         ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/coordinate_systems.py                           ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/remove_ply_comments.py                          ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/clean_point_cloud.py                            ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/extract_video_thumbnail.py                      ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/images_to_video.py                              ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/create_derivative_plys.py                       ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/convert_ply_to_sog.py                           ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/create_collision_mesh.py                        ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/generate_collision.py                           ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/generate_lod.py                                ${CODE_PATH}/post_processing
-COPY ./src/pipeline/post_processing/extract_mesh.py                                ${CODE_PATH}/post_processing
+RUN mkdir -p ${CODE_PATH}/reconstruction ${CODE_PATH}/training ${CODE_PATH}/spherical \
+    ${CODE_PATH}/pre_processing/segmentation ${CODE_PATH}/pre_processing/video \
+    ${CODE_PATH}/post_processing ${CODE_PATH}/sam
+# Copy application source — grouped to minimize layers
+COPY ./src/entrypoint.sh ./src/main.py ./src/config.json ./src/pipeline/pipeline.py ./src/pipeline/utils.py ${CODE_PATH}/
+COPY ./src/pipeline/reconstruction/extract_poses_imgs.py \
+     ./src/pipeline/reconstruction/process_pose_transforms.py \
+     ./src/pipeline/reconstruction/update_camera_model.py \
+     ./src/pipeline/reconstruction/convert_cameras_to_pinhole.py \
+     ./src/pipeline/reconstruction/run_map_anything.py \
+     ${CODE_PATH}/reconstruction/
+COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py \
+     ./src/pipeline/training/dn_splatter_preprocess.py \
+     ./src/pipeline/training/run_gsplat_trainer.sh \
+     ${CODE_PATH}/training/
+COPY ./src/pipeline/reconstruction/spherical/panorama_sfm.py ${CODE_PATH}/spherical/
+COPY ./src/pipeline/pre_processing/segmentation/remove_object_using_mask.py \
+     ./src/pipeline/pre_processing/segmentation/remove_background.py \
+     ./src/pipeline/pre_processing/segmentation/erase_object_using_mask.py \
+     ${CODE_PATH}/pre_processing/segmentation/
+COPY ./src/pipeline/pre_processing/segmentation/remove_background_sam2.py ${CODE_PATH}/sam/
+COPY ./src/pipeline/pre_processing/video/simple_video_to_images.py \
+     ./src/pipeline/pre_processing/video/sharp_video_to_images.py \
+     ./src/pipeline/pre_processing/video/rotate_portrait_images.py \
+     ${CODE_PATH}/pre_processing/video/
+COPY ./src/pipeline/pre_processing/autoscale_dataset.py \
+     ./src/pipeline/pre_processing/autogroup_images.py \
+     ./src/pipeline/pre_processing/auto_matcher.py \
+     ${CODE_PATH}/pre_processing/
+COPY ./src/pipeline/post_processing/rotate_splat.py \
+     ./src/pipeline/post_processing/mirror_splat.py \
+     ./src/pipeline/post_processing/gsplat_pt_to_ply.py \
+     ./src/pipeline/post_processing/crop_splat.py \
+     ./src/pipeline/post_processing/extract_center_cube.py \
+     ./src/pipeline/post_processing/refine_center_object.py \
+     ./src/pipeline/post_processing/coordinate_systems.py \
+     ./src/pipeline/post_processing/remove_ply_comments.py \
+     ./src/pipeline/post_processing/clean_point_cloud.py \
+     ./src/pipeline/post_processing/extract_video_thumbnail.py \
+     ./src/pipeline/post_processing/images_to_video.py \
+     ./src/pipeline/post_processing/create_derivative_plys.py \
+     ./src/pipeline/post_processing/convert_ply_to_sog.py \
+     ./src/pipeline/post_processing/create_collision_mesh.py \
+     ./src/pipeline/post_processing/generate_collision.py \
+     ./src/pipeline/post_processing/generate_lod.py \
+     ./src/pipeline/post_processing/extract_mesh.py \
+     ${CODE_PATH}/post_processing/
+RUN chmod +x ${CODE_PATH}/entrypoint.sh ${CODE_PATH}/training/run_gsplat_trainer.sh
 
 # Verify installed versions match expected versions
 RUN echo "=== VERSION VERIFICATION ===" \

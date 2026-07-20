@@ -69,6 +69,7 @@ Content-Type: multipart/mixed; boundary="==MYBOUNDARY=="
 Content-Type: text/x-shellscript; charset="us-ascii"
 
 #!/bin/bash
+echo 'ECS_IMAGE_PULL_BEHAVIOR=always' >> /etc/ecs/ecs.config
 mkdir -p /mnt/workspace
 chown ecs-agent:ecs-agent /mnt/workspace
 chmod 775 /mnt/workspace

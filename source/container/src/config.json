@@ -47,6 +47,8 @@
     "COLLISION_SEED_POS": "0,0,0",
     "GENERATE_LOD": "false",
     "GENERATE_MESH": "true",
+    "MESH_VOXEL_SIZE": "0.004",
+    "MESH_SDF_TRUNC": "0.02",
     "PRESERVE_SCENE_SCALE": "false",
     "ENABLE_FL_HEURISTIC": "false",
     "FL_HEURISTIC_VALUE": "1.2",

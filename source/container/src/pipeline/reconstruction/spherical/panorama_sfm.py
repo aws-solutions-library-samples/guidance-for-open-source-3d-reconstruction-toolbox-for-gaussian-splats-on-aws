@@ -281,19 +281,22 @@ class PanoProcessor:
                 cv2.INTER_LANCZOS4,
                 borderMode=cv2.BORDER_WRAP,
             )
-            closest_camera = np.argmax(
-                rays_in_pano @ self.cam_centers_in_pano.T, -1
-            )
-            mask = (
-                ((closest_camera == cam_idx) * 255)
-                .astype(np.uint8)
-                .reshape(self._camera.width, self._camera.height)
-                .transpose()
-            )
-            # Dilate the mask by a few pixels to avoid thin unmasked seams at
-            # camera boundaries, which would leave feature-extraction gaps.
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-            mask = cv2.dilate(mask, kernel)
+            # Soft mask: include pixels where this camera's dot product is within
+            # a margin of the best camera's. This avoids hard binary boundaries
+            # (which create vertical banding) and produces a smooth feathered edge.
+            similarities = rays_in_pano @ self.cam_centers_in_pano.T
+            best_score = similarities.max(axis=-1)
+            cam_score = similarities[:, cam_idx]
+            # Margin: pixels within this cosine-distance of the best camera are included.
+            # 0.02 ≈ 8° angular margin at the boundary.
+            margin = 0.02
+            mask_flat = ((best_score - cam_score) <= margin).astype(np.uint8) * 255
+            mask = mask_flat.reshape(
+                self._camera.width, self._camera.height
+            ).transpose()
+            # Gaussian blur to feather the boundary smoothly instead of a hard edge
+            blur_size = max(7, int(self._camera.width * 0.01) | 1)
+            mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
 
             image_name = self.rig_config.cameras[cam_idx].image_prefix + pano_name
             mask_name = f"{image_name}.png"
