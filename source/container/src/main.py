@@ -1315,9 +1315,9 @@ if __name__ == "__main__":
                     "feature_extractor",
                     "--database_path", colmap_db_path,
                     "--image_path", image_path,
-                    "--ImageReader.single_camera", "1",
-                    "--SiftExtraction.max_image_size", str(sift_max_image_size),
-                    "--SiftExtraction.max_num_features", str(sift_max_num_features)
+                    "--ImageReader.single_camera", "1"
+                    #"--SiftExtraction.max_image_size", str(sift_max_image_size),
+                    #"--SiftExtraction.max_num_features", str(sift_max_num_features)
                 ]
                 if ENABLE_MULTI_GPU == "true" or \
                     config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
