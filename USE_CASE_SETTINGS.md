@@ -59,9 +59,12 @@
         - Interval
             - Turn OFF "Automatic Horizontal Correction" in the stabilization options
             - Optional: Turn ON "Clarity Plus" at default setting
+            - Optional: Increase contrast and brightness slightly
         - Video
             - Turn ON "Enable Tilt Recovery" in the stabilization options for FlowState
             - Turn OFF "Direction Lock"
+        - Stitching
+            - Use AI Model stitching instead of FlowState to reduce artifacts
     - Use at least 5.7K resolution panomara images (8K preferred)
 
 ## Input Methods
@@ -113,16 +116,19 @@ Use this technique to scan **a single object**, or small contained space
         - If you do this, ensure you turn on the option to remove the background, otherwise the SfM model will not converge.
         - If you don't have a turntable, just slowly walk around the object circling it.
         - Ensure there is contrast between the capture subject and the background
-- Usually 300 frames or 2 minute video should be plenty to reconstruct the object
+- Usually 300 frames or 2 minute video should be plenty to reconstruct the object, use up to 600 for higher quality output
 
 # Inside-Out (Environment Scanning)
 Use this technique to scan **environments**, or rooms
 - In this mode, usually the capture system is focused on capturing an environment
 - This can be thought of an observer on the inside of a room, always looking outward towards the walls
 - For adequate capturing, use a 360 camera on a selfie stick or drone to capture either video or a series of images
+    - For example, use a selfie stick extending 4' (0.3m) from chest
+    - Start at high feature area, stand near center of room and extend camera out
+    - Always keep one of the fisheye cameras directly pointed at the features of interest (e.g. countertop, object, painting on wall etc.). Avoid capturing the feature rich areas at the dual-camera stitch seam.
+    - 3 Elevations, start with mid (4'/0.3m) recording slowly rotating in circle. Once a revolution is complete, cross the room and capture up high (7'/2.1m) going in opposite direction as first revolution. Once complete revolution, repeat for low (2'/0.6m) elevation.
+    - Lastly, complete one final revolution focusing on the points of interest
 - For perspective
-    - Usually 300 frames or 5 minute video should be plenty to reconstruct a small room/environment
+    - Usually 500 frames or 5 minute video should be plenty to reconstruct a small room/environment
 - For spherical
-    - Usually 50 frames or 3 minute video should be plenty to reconstruct a small room/environment
-
-# Large Scene Reconstruction - TODO
+    - Usually 150 frames or 3 minute video should be plenty to reconstruct a small room/environment
