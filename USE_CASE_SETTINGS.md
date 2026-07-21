@@ -53,7 +53,8 @@
 - Ensure there is good lighting
 - Spherical camera recommendations
     - Ensure you are either behind or under the camera with a selfie stick, or use a drone
-    - Use interval recording instead of video to alleviate blur
+    - Use interval recording instead of video to increase quality
+    - Use stabilization (FlowState) to reduce motion blur in video
     - Optional: Bump up the "Exposure Compensation (EV)" by one level (+0.3) to brighten the scene
     - Export Settings
         - Interval
@@ -107,7 +108,7 @@ Perspective or spherical(equirectangular/panoramic) images are supported for all
 
 ## General Scanning Techniques
 
-### Outside-In (Object Scanning)
+### Object Scanning (Outside-In)
 Use this technique to scan **a single object**, or small contained space
 - In this mode, usually the capture system is focused on a specific object or group of objects
 - This can be thought of an observer on the outside of the object of interest, always with object in view
@@ -118,7 +119,7 @@ Use this technique to scan **a single object**, or small contained space
         - Ensure there is contrast between the capture subject and the background
 - Usually 300 frames or 2 minute video should be plenty to reconstruct the object, use up to 600 for higher quality output
 
-### Inside-Out (Environment Scanning)
+### Environment Scanning (Inside-Out)
 Use this technique to scan **environments**, or rooms
 - In this mode, usually the capture system is focused on capturing an environment
 - This can be thought of an observer on the inside of a room, always looking outward towards the walls
