@@ -215,7 +215,7 @@ RUN wget https://developer.download.nvidia.com/compute/cudss/${CUDSS_VERSION}/lo
     && dpkg -i cudss-local-repo-ubuntu2204-${CUDSS_VERSION}_${CUDSS_VERSION}-1_amd64.deb \
     && cp /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/cudss-*-keyring.gpg /usr/share/keyrings/ \
     && apt-get update \
-    && apt-get -y install cudss \
+    && apt-get -y install cudss=${CUDSS_VERSION}-1 \
     && cd ${CODE_PATH}
 
 # Build Ceres with cuDSS support
