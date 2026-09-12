@@ -42,7 +42,7 @@ def build_command(input_ply: str, output_voxel: str, scene_type: str, seed_pos: 
     elif scene_type == "outdoor":
         cmd += ["--voxel-floor-fill", "--voxel-carve"]
     # object: no fill or carve — bare voxelization only
-    cmd += ["-K", "smooth", "-w", output_voxel]
+    cmd += ["--overwrite", output_voxel, "--collision-mesh", "smooth"]
     return cmd
 
 

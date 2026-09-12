@@ -45,23 +45,27 @@ class PanoRenderOptions:
     pitches_deg: Sequence[float]
     hfov_deg: float
     vfov_deg: float
+    max_dim: int = 0
 
 
-PANO_RENDER_OPTIONS: dict[str, PanoRenderOptions] = {
-    "overlapping": PanoRenderOptions(
-        num_steps_yaw=6,
-        pitches_deg=(-60.0, -30.0, 0.0, 30.0, 60.0),
-        hfov_deg=90.0,
-        vfov_deg=90.0,
-    ),
-    # Cubemap without top and bottom images.
-    "non-overlapping": PanoRenderOptions(
-        num_steps_yaw=6,
-        pitches_deg=(0.0,),
-        hfov_deg=90.0,
-        vfov_deg=90.0,
-    ),
+# Aliases so users can pass intuitive names like 'up'/'down' in addition to 'top'/'bottom'
+CUBEMAP_FACE_ALIASES: dict[str, str] = {
+    "up": "top",
+    "down": "bottom",
+    "forward": "front",
+    "backward": "back",
 }
+
+# 4 equatorial faces + top + bottom, matching COLMAP's native panorama_sfm approach.
+CUBEMAP_FACES: dict[str, tuple[float, float]] = {
+    "front":  (0.0,   0.0),
+    "right":  (0.0,  90.0),
+    "back":   (0.0, 180.0),
+    "left":   (0.0, 270.0),
+    "top":    (90.0,  0.0),
+    "bottom": (-90.0, 0.0),
+}
+
 
 
 def get_frames_with_valid_rigid_objects(
@@ -107,16 +111,17 @@ def create_virtual_camera(
     pano_height: int,
     hfov_deg: float,
     vfov_deg: float,
-    max_dim: int = 1600,
+    max_dim: int = 0,
 ) -> pycolmap.Camera:
-    """Create a virtual perspective camera, capped at max_dim to keep feature extraction tractable."""
+    """Create a virtual perspective camera from panorama dimensions.
+    If max_dim > 0, caps the longest side to keep memory usage tractable.
+    """
     image_width = int(pano_width * hfov_deg / 360)
     image_height = int(pano_height * vfov_deg / 180)
-    # Cap resolution — very high-res ERPs produce huge virtual cameras that
-    # overwhelm SIFT and COLMAP matching without improving reconstruction quality.
-    scale = min(1.0, max_dim / max(image_width, image_height))
-    image_width = int(image_width * scale)
-    image_height = int(image_height * scale)
+    if max_dim > 0:
+        scale = min(1.0, max_dim / max(image_width, image_height))
+        image_width = int(image_width * scale)
+        image_height = int(image_height * scale)
     focal = image_width / (2 * np.tan(np.deg2rad(hfov_deg) / 2))
     return pycolmap.Camera.create_from_model_id(
         camera_id=0,
@@ -207,13 +212,14 @@ class PanoProcessor:
         output_image_dir: Path,
         mask_dir: Path,
         render_options: PanoRenderOptions,
+        cams_from_pano_rotation: Sequence[npt.NDArray[np.floating]] | None = None,
     ):
         self.render_options = render_options
         self.pano_image_dir = pano_image_dir
         self.output_image_dir = output_image_dir
         self.mask_dir = mask_dir
 
-        self.cams_from_pano_rotation = get_virtual_rotations(
+        self.cams_from_pano_rotation = cams_from_pano_rotation if cams_from_pano_rotation is not None else get_virtual_rotations(
             num_steps_yaw=render_options.num_steps_yaw,
             pitches_deg=render_options.pitches_deg,
         )
@@ -273,7 +279,9 @@ class PanoProcessor:
                 self._camera.width, self._camera.height, 2
             ).astype(np.float32)
             xy_in_pano -= 0.5  # COLMAP to OpenCV pixel origin.
-            x_coords, y_coords = np.moveaxis(xy_in_pano, [0, 1, 2], [2, 1, 0])
+            # rays are ordered (W, H) from get_virtual_camera_rays; transpose to (H, W) for cv2.remap
+            x_coords = xy_in_pano[:, :, 0].T
+            y_coords = xy_in_pano[:, :, 1].T
             image = cv2.remap(
                 pano_image,
                 x_coords,
@@ -293,7 +301,7 @@ class PanoProcessor:
             mask_flat = ((best_score - cam_score) <= margin).astype(np.uint8) * 255
             mask = mask_flat.reshape(
                 self._camera.width, self._camera.height
-            ).transpose()
+            ).T
             # Gaussian blur to feather the boundary smoothly instead of a hard edge
             blur_size = max(7, int(self._camera.width * 0.01) | 1)
             mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
@@ -317,9 +325,11 @@ def render_perspective_images(
     output_image_dir: Path,
     mask_dir: Path,
     render_options: PanoRenderOptions,
+    cams_from_pano_rotation: Sequence[npt.NDArray[np.floating]] | None = None,
 ) -> pycolmap.RigConfig:
     processor = PanoProcessor(
-        pano_image_dir, output_image_dir, mask_dir, render_options
+        pano_image_dir, output_image_dir, mask_dir, render_options,
+        cams_from_pano_rotation=cams_from_pano_rotation,
     )
     num_panos = len(pano_image_names)
     max_workers = min(32, (os.cpu_count() or 2) - 1)
@@ -367,13 +377,33 @@ def run(args: argparse.Namespace) -> None:
     )
     logging.info(f"Found {len(pano_image_names)} ERP images in {pano_image_dir}.")
 
-    render_type = "non-overlapping" if args.remove_faces else "overlapping"
+    exclude = {CUBEMAP_FACE_ALIASES.get(f.strip().lower(), f.strip().lower()) for f in args.exclude_faces.split(",")} if args.exclude_faces else set()
+    active_faces = {name: angles for name, angles in CUBEMAP_FACES.items() if name not in exclude}
+    if not active_faces:
+        raise ValueError(f"All cubemap faces excluded — nothing to render. exclude_faces={args.exclude_faces}")
+    logging.info(f"Cubemap faces: active={sorted(active_faces)}, excluded={sorted(exclude)}")
+
+    # Build one rotation per active face directly from CUBEMAP_FACES pitch/yaw.
+    # This gives exactly 6 cameras max (one per face), never multiplying top/bottom by num_steps_yaw.
+    cams_from_pano_rotation = [
+        Rotation.from_euler("XY", [-pitch, -yaw], degrees=True).as_matrix()
+        for name, (pitch, yaw) in CUBEMAP_FACES.items()
+        if name in active_faces
+    ]
+    render_opts = PanoRenderOptions(
+        num_steps_yaw=len(active_faces),
+        pitches_deg=tuple(p for p, _ in active_faces.values()),
+        hfov_deg=90.0,
+        vfov_deg=90.0,
+        max_dim=getattr(args, 'max_dim', 0),
+    )
     rig_config = render_perspective_images(
         pano_image_names,
         pano_image_dir,
         image_dir,
         mask_dir,
-        PANO_RENDER_OPTIONS[render_type],
+        render_opts,
+        cams_from_pano_rotation=cams_from_pano_rotation,
     )
 
     if args.remove_object:
@@ -542,14 +572,16 @@ def run(args: argparse.Namespace) -> None:
             logging.info("Perspective images replaced with object-removed versions")
 
     # pycolmap 4.0.4+ uses extraction_options; older versions use sift_options
+    sift_opts = pycolmap.SiftExtractionOptions(
+        max_num_features=args.max_num_features,
+        estimate_affine_shape=args.enhanced_feature_extraction,
+    )
     try:
         pycolmap.extract_features(
             database_path,
             image_dir,
             reader_options=pycolmap.ImageReaderOptions(mask_path=mask_dir),
-            extraction_options=pycolmap.FeatureExtractionOptions(
-                sift=pycolmap.SiftExtractionOptions(max_num_features=16384)
-            ),
+            extraction_options=pycolmap.FeatureExtractionOptions(sift=sift_opts),
             camera_mode=pycolmap.CameraMode.PER_FOLDER,
         )
     except (TypeError, AttributeError):
@@ -557,7 +589,7 @@ def run(args: argparse.Namespace) -> None:
             database_path,
             image_dir,
             reader_options=pycolmap.ImageReaderOptions(mask_path=mask_dir),
-            sift_options=pycolmap.SiftExtractionOptions(max_num_features=16384),
+            sift_options=sift_opts,
             camera_mode=pycolmap.CameraMode.PER_FOLDER,
         )
 
@@ -619,9 +651,9 @@ if __name__ == "__main__":
         choices=["sequential", "exhaustive", "vocabtree", "spatial"],
     )
     parser.add_argument(
-        "--remove_faces",
-        action="store_true",
-        help="Use non-overlapping render mode to exclude top/bottom cube faces",
+        "--exclude_faces",
+        default="",
+        help="Comma-separated cubemap faces to exclude: front,right,back,left,top,bottom",
     )
     parser.add_argument(
         "--remove_object",
@@ -635,4 +667,6 @@ if __name__ == "__main__":
     parser.add_argument("-nt", "--num_threads", type=int, default=32)
     parser.add_argument("-ng", "--num_gpus", type=int, default=1)
     parser.add_argument("-gpu", "--use_gpu", default="true")
+    parser.add_argument("--max_num_features", type=int, default=16384)
+    parser.add_argument("--enhanced_feature_extraction", action="store_true")
     run(parser.parse_args())

@@ -906,6 +906,7 @@ def create_advanced_settings_tab():
                         "splatfacto-big",
                         "splatfacto-mcmc",
                         "splatfacto-w-light",
+                        "splatfacto-depth",
                         "3dgut",
                         "3dgrt",
                         "nerfacto",

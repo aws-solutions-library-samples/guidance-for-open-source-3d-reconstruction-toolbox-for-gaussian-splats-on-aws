@@ -122,6 +122,10 @@ def compute_target_resolution(num_images: int, vram_budget_gb: float,
     new_w = max(int(orig_width * scale) & ~1, 2)
     new_h = max(int(orig_height * scale) & ~1, 2)
 
+    # Preserve exact 2:1 ratio for equirectangular panoramas
+    if orig_width == orig_height * 2:
+        new_h = new_w // 2
+
     # Enforce minimum resolution floor
     if min(new_w, new_h) < MIN_EDGE:
         scale_up = MIN_EDGE / min(orig_width, orig_height)
@@ -210,7 +214,14 @@ def main():
     parser.add_argument("-i", "--image-dir", required=True, help="Path to images directory")
     parser.add_argument("-m", "--mode", default="RESIZE", choices=["RESIZE", "DROPOUT"],
                         help="Autoscale mode: RESIZE or DROPOUT")
+    parser.add_argument("--spherical", action="store_true",
+                        help="Input is equirectangular panoramas: enforce 5760px minimum width")
     args = parser.parse_args()
+
+    # Spherical panoramas need higher minimum resolution — perspective projection
+    # crops are derived from the ERP, so downscaling too aggressively loses detail.
+    # 5760px wide (5.7K) is the minimum to preserve adequate crop quality.
+    SPHERICAL_MIN_WIDTH = 5760
 
     image_files = get_image_files(args.image_dir)
     if not image_files:
@@ -232,21 +243,37 @@ def main():
           f"({orig_w * orig_h / 1e6:.2f} Mpx), Est. VRAM: {estimated_vram:.2f} GB")
 
     if estimated_vram <= vram_budget:
-        # Still cap to 4K even if VRAM is fine
-        cap_w, cap_h = cap_to_4k(orig_w, orig_h)
-        if cap_w != orig_w or cap_h != orig_h:
-            print(f"Resolution exceeds 4K cap, downscaling to {cap_w}x{cap_h}")
-            resize_images(image_files, cap_w, cap_h)
+        # For spherical, skip the 4K cap — keep at original resolution down to 5.7K minimum
+        if args.spherical:
+            if orig_w > SPHERICAL_MIN_WIDTH:
+                # Still cap at original, no downscale needed
+                print(f"Spherical dataset fits in VRAM at {orig_w}x{orig_h}, no autoscaling needed")
+            else:
+                print(f"Spherical dataset fits in VRAM, no autoscaling needed")
         else:
-            print("Dataset fits in VRAM, no autoscaling needed")
+            cap_w, cap_h = cap_to_4k(orig_w, orig_h)
+            if cap_w != orig_w or cap_h != orig_h:
+                print(f"Resolution exceeds 4K cap, downscaling to {cap_w}x{cap_h}")
+                resize_images(image_files, cap_w, cap_h)
+            else:
+                print("Dataset fits in VRAM, no autoscaling needed")
         return
 
     print(f"Dataset exceeds VRAM budget by {estimated_vram - vram_budget:.2f} GB, mode={args.mode}")
 
     if args.mode == "RESIZE":
         target_w, target_h = compute_target_resolution(num_images, vram_budget, orig_w, orig_h)
-        # Also enforce 4K ceiling on the computed target
-        target_w, target_h = cap_to_4k(target_w, target_h)
+        if args.spherical:
+            # Enforce 5.7K minimum for spherical — do not downscale below this
+            if target_w < SPHERICAL_MIN_WIDTH:
+                target_w = SPHERICAL_MIN_WIDTH
+                target_h = target_w // 2  # preserve 2:1 ratio
+                print(f"Spherical minimum resolution enforced: {target_w}x{target_h}")
+            # Preserve exact 2:1 ratio
+            target_h = target_w // 2
+        else:
+            # Enforce 4K ceiling for non-spherical
+            target_w, target_h = cap_to_4k(target_w, target_h)
         print(f"Target resolution: {target_w}x{target_h} "
               f"({target_w * target_h / 1e6:.2f} Mpx)")
         resize_images(image_files, target_w, target_h)

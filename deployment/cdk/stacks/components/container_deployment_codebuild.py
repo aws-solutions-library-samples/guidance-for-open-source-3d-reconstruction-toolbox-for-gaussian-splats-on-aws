@@ -171,7 +171,7 @@ class ContainerDeploymentCodeBuild(Construct):
                         }
                     ]
                 },
-                physical_resource_id=cr.PhysicalResourceId.of(f"docker-build-{ecr_repo_name}"),
+                physical_resource_id=cr.PhysicalResourceId.of(f"docker-build-{ecr_repo_name}-{docker_asset.asset_hash}"),
                 output_paths=["build.id"]
             ),
             policy=cr.AwsCustomResourcePolicy.from_statements([

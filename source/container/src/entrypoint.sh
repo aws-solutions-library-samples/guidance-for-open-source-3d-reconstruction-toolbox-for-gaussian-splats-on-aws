@@ -28,6 +28,11 @@
 
 set -o pipefail
 
+# Must be set before PyTorch's CUDA allocator initializes (first CUDA op).
+# Reduces OOM errors on large scenes by allowing the allocator to grow
+# segments incrementally rather than pre-allocating large contiguous blocks.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 python /opt/ml/code/main.py "$@"
 EXIT_CODE=$?
 

@@ -155,10 +155,27 @@ def extract_zip(zip_path: Union[str, Path], use_transforms: str) -> bool:
                 if filename == 'transforms.json':
                     target_path = extract_dir / filename
                     transforms_found = True
-                elif file.startswith('sparse/'):
-                    # Handle files in sparse directory
-                    relative_path = Path(file)
-                    target_path = extract_dir / relative_path
+                elif 'sparse' in path_parts:
+                    # Handle COLMAP sparse files in any zip layout:
+                    # - sparse/0/cameras.bin  -> extract_dir/sparse/0/cameras.bin
+                    # - cameras.bin (flat)    -> extract_dir/sparse/0/cameras.bin
+                    # Skip bare directory entries (no extension, not a known file)
+                    colmap_files = {'cameras.bin', 'images.bin', 'points3D.bin',
+                                    'cameras.txt', 'images.txt', 'points3D.txt',
+                                    'sparse.ply', 'database.db'}
+                    if filename in colmap_files or '.' in filename:
+                        sparse_idx = list(path_parts).index('sparse')
+                        # path_parts[sparse_idx:] gives ('sparse', '0', 'cameras.bin')
+                        relative_path = Path(*path_parts[sparse_idx:])
+                        target_path = extract_dir / relative_path
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                    else:
+                        # bare directory entry like 'sparse' or 'sparse/0' — skip
+                        continue
+                elif filename in {'cameras.bin', 'images.bin', 'points3D.bin',
+                                  'cameras.txt', 'images.txt', 'points3D.txt'}:
+                    # Bare COLMAP files at zip root with no sparse/ prefix
+                    target_path = extract_dir / 'sparse' / '0' / filename
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                 elif 'depth' in filename.lower():
                     target_path = depth_dir / filename

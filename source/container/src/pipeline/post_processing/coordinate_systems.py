@@ -52,7 +52,7 @@ def main():
         args.input,
         args.output,
         f'--rotate={rotation}',
-        '-w'
+        '--overwrite'
     ]
     
     result = subprocess.run(cmd, check=True)

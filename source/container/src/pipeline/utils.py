@@ -295,39 +295,68 @@ def resize_images_to_common_dimensions(image_dir):
     print(f"Resized {resized_count}/{len(image_files)} images to {target_w}x{target_h}")
     return (target_w, target_h)
 
+# COLMAP camera model id -> name mapping
+_COLMAP_CAMERA_MODEL_NAMES = {
+    0: 'SIMPLE_PINHOLE', 1: 'PINHOLE', 2: 'SIMPLE_RADIAL', 3: 'RADIAL',
+    4: 'OPENCV', 5: 'OPENCV_FISHEYE', 6: 'FULL_OPENCV', 7: 'FOV',
+    8: 'SIMPLE_RADIAL_FISHEYE', 9: 'RADIAL_FISHEYE', 10: 'THIN_PRISM_FISHEYE'
+}
+
+def _read_camera_params_from_bin(cameras_bin_path):
+    """Read camera parameters from binary cameras.bin file"""
+    import struct
+    with open(cameras_bin_path, 'rb') as f:
+        num_cameras = struct.unpack('<Q', f.read(8))[0]
+        if num_cameras == 0:
+            return None
+        camera_id = struct.unpack('<I', f.read(4))[0]
+        model_id = struct.unpack('<I', f.read(4))[0]
+        width = struct.unpack('<Q', f.read(8))[0]
+        height = struct.unpack('<Q', f.read(8))[0]
+        model_name = _COLMAP_CAMERA_MODEL_NAMES.get(model_id, 'PINHOLE')
+        # Number of params per model (matches COLMAP source: src/colmap/camera/models.h)
+        # SIMPLE_PINHOLE=3(f,cx,cy), PINHOLE=4(fx,fy,cx,cy), SIMPLE_RADIAL=4(f,cx,cy,k)
+        # RADIAL=5, OPENCV=8, OPENCV_FISHEYE=8, FULL_OPENCV=12, FOV=5
+        # SIMPLE_RADIAL_FISHEYE=4, RADIAL_FISHEYE=5, THIN_PRISM_FISHEYE=12
+        num_params = {0: 3, 1: 4, 2: 4, 3: 5, 4: 8, 5: 8, 6: 12,
+                      7: 5, 8: 4, 9: 5, 10: 12}.get(model_id, 4)
+        print(f"[cameras.bin] model_id={model_id} ({model_name}), num_params={num_params}, w={width}, h={height}")
+        params = struct.unpack(f'<{num_params}d', f.read(num_params * 8))
+    return {
+        'id': camera_id,
+        'model': model_name,
+        'width': int(width),
+        'height': int(height),
+        'params_str': ','.join(str(p) for p in params)
+    }
+
 def read_camera_params_from_file(cameras_txt_path):
-    """Read camera parameters from cameras.txt file"""
+    """Read camera parameters from cameras.txt or cameras.bin file"""
     try:
+        # Fall back to .bin if .txt doesn't exist
+        if not os.path.exists(cameras_txt_path):
+            bin_path = cameras_txt_path.replace('cameras.txt', 'cameras.bin')
+            if os.path.exists(bin_path):
+                return _read_camera_params_from_bin(bin_path)
+            raise FileNotFoundError(cameras_txt_path)
+
         with open(cameras_txt_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
-            
+
         for line in lines:
             line = line.strip()
             if line.startswith('#') or not line:
                 continue
-                
-            # Parse camera line
-            # Format: CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]
             parts = line.split()
             if len(parts) >= 5:
                 camera_id = int(parts[0])
                 model = parts[1]
                 width = int(parts[2])
                 height = int(parts[3])
-                
-                # Get the parameters - they might be comma-separated or space-separated
                 params_str = ' '.join(parts[4:])
-
-                # First, normalize the input by replacing commas with spaces
                 normalized_params = params_str.replace(',', ' ')
-
-                # Split by whitespace to get individual parameters
                 param_list = normalized_params.split()
-
-                # Join the parameters with commas to create the final comma-separated list
                 comma_separated = ','.join(param_list)
-
-                # Return the first camera entry
                 return {
                     'id': camera_id,
                     'model': model,
@@ -335,7 +364,6 @@ def read_camera_params_from_file(cameras_txt_path):
                     'height': height,
                     'params_str': comma_separated
                 }
-        
         return None
     except Exception as e:
         print(f"Error Code 700: error reading camera parameters from file: {str(e)}")

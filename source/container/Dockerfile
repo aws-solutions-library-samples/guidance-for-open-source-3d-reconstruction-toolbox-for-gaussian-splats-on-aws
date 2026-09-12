@@ -22,39 +22,40 @@
 # building splats using NerfStudio, GSplat, Colmap, etc
 
 # nosemgrep: dockerfile-source-not-pinned
-FROM pytorch/pytorch:2.9.1-cuda13.0-cudnn9-devel
+FROM pytorch/pytorch:2.12.1-cuda13.2-cudnn9-devel
 
 # Pinned versions
 ENV PYTHON_VERSION="3.12.0"
 ENV PYTHON_VERSION_="3.12"
-ENV CUDA_VERSION="13.0"
-ENV CUDA_VERSION_="130"
-ENV CUDSS_VERSION="0.7.1"
-ENV TORCH_VERSION="2.9.1"
-ENV TORCH_VISION_VERSION="0.24.1"
+ENV CUDA_VERSION="13.2"
+ENV CUDA_VERSION_="132"
+ENV CUDSS_VERSION="0.8.0"
+ENV CUDSS_PATCH_VERSION="0.8.0.10"
+ENV TORCH_VERSION="2.12.1"
+ENV TORCH_VISION_VERSION="0.27.1"
 ENV CMAKE_VERSION="3.30.3"
-ENV NODE_VERSION="22"
-ENV EIGEN_VERSION="3.4"
-ENV COLMAP_VERSION="4.0.4"
-ENV SPLAT_TRANSFORM_VERSION="2.5.2"
-ENV MAPANYTHING_VERSION="1.1.2"
-ENV SPZ_VERSION="2.1.0"
-ENV OPENEXR_VERSION="3.1.5"
-ENV OPENIMAGEIO_VERSION="2.5.13.0"
+ENV NODE_VERSION="24"
+ENV EIGEN_VERSION="3.4.0"
+ENV COLMAP_VERSION="4.1.1"
+ENV SPLAT_TRANSFORM_VERSION="3.3.3"
+ENV MAPANYTHING_VERSION="1.1.3"
+ENV SPZ_VERSION="3.0.0"
+ENV OPENEXR_VERSION="3.4.15"
+ENV OPENIMAGEIO_VERSION="2.5.19.1"
 
 # Pinned versions
-ENV CERES_HASH="0ba987acaf9e8674070f116ed624edf017d2b630"
+ENV CERES_HASH="fe351d5ab8cbc574f33456376bf5aa90d3162d5d"
 ENV NERFSTUDIO_HASH="50e0e3c70c775e89333256213363badbf074f29d"
-ENV GSPLAT_HASH="4e52698e45eaaed929ed3a5065e96a688d085df6"
-ENV THREEDGRUT_HASH="9846a28babb2171802907017c44d3adaa927f4e4"
-ENV BGREMOVER_HASH="d6278fef141d1669e5fffbbc4cf185edfdc89cf9"
+ENV GSPLAT_HASH="90d7b4b349e379ccf9ee6a8cef76aa40f48bb32e"
+ENV THREEDGRUT_HASH="a37ef721012dea0f29c0fcfff2d525023b4e854a"
+ENV BGREMOVER_HASH="fa480627829759b902f8c233388d7aa67ab38099"
 ENV SAM2_HASH="2b90b9f5ceec907a1c18123530e92e794ad901a4"
 
 # Only build for supported GPU architectures
 # G4dn=7.5, P4d=8.0, g5=8.6, g6/g6e=8.9
 ENV TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9"
 ENV TCNN_CUDA_ARCHITECTURES=75;80;86;89
-ENV NINJA_JOBS=2
+ENV NINJA_JOBS=1
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/lib
 ENV PATH=/usr/local/cuda-${CUDA_VERSION}/bin:${PATH}
 ENV LD_LIBRARY_PATH=/usr/local/cuda-${CUDA_VERSION}/lib64:${LD_LIBRARY_PATH}
@@ -138,10 +139,12 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     libmetis-dev \
     libgoogle-glog-dev \
     libgtest-dev \
+    libgmock-dev \
     libsqlite3-dev \
     libglew-dev \
     qtbase5-dev \
     libqt5opengl5-dev \
+    libqt5svg5-dev \
     libcgal-dev \
     libopenimageio-dev \
 # Building from source for specific version    libceres-dev \
@@ -152,6 +155,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     gcc-10 g++-10 \
     gfortran \
     libssl-dev \
+    libcurl4-openssl-dev \
     libbz2-dev \
     libexpat1-dev \
     zlib1g-dev \
@@ -177,35 +181,18 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     libraw-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python version and make it the default
-RUN cd /usr/src \
-    && wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz \
-    && tar -xzf Python-${PYTHON_VERSION}.tgz \
-    && cd Python-${PYTHON_VERSION} \
-    && ./configure --enable-optimizations --with-openssl=/usr --prefix=/usr/local --with-system-ffi --with-system-expat --enable-loadable-sqlite-extensions \
-    && make -j $(nproc) \
-    && make altinstall \
-    && cd /usr/src && rm -rf Python-${PYTHON_VERSION}*
-
-# Create explicit symlinks
-RUN ln -sf /usr/local/bin/python${PYTHON_VERSION_} /usr/local/bin/python3 \
-    && ln -sf /usr/local/bin/python3 /usr/local/bin/python \
-    && ln -sf /usr/local/bin/pip${PYTHON_VERSION_} /usr/local/bin/pip3 \
-    && ln -sf /usr/local/bin/pip3 /usr/local/bin/pip
-
-# Update PATH and PYTHONPATH to ensure our Python is used first
-ENV PATH=/usr/local/bin:${PATH}
-ENV PYTHONPATH=/usr/local/lib/python${PYTHON_VERSION_}/site-packages:/usr/local/lib/python${PYTHON_VERSION_}/dist-packages:${CODE_PATH}
+# Use base image Python 3.12 and PyTorch 2.12.1+cu132 directly (already in dist-packages)
+ENV PYTHONPATH=/usr/local/lib/python${PYTHON_VERSION_}/dist-packages:${CODE_PATH}
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 WORKDIR ${CODE_PATH}
 
-# Install PyTorch for CUDA 13.0 (required after custom Python install)
-RUN pip install torch==${TORCH_VERSION}+cu${CUDA_VERSION_} torchvision==${TORCH_VISION_VERSION}+cu${CUDA_VERSION_} torchaudio==${TORCH_VERSION}+cu${CUDA_VERSION_} --index-url https://download.pytorch.org/whl/cu${CUDA_VERSION_}
-
-# Downgrade setuptools to <v70, otherwise will get ImportError: cannot import name 'packaging' from 'pkg_resources'
-RUN pip install "typing-extensions>=4.10.0" "setuptools<70.0.0" wheel packaging ninja
+# setuptools<70 avoids 'cannot import name packaging from pkg_resources'; keep pkg_resources available
+RUN pip install "typing-extensions>=4.10.0" "setuptools>=59.6.0,<70.0.0" wheel packaging ninja
 
 # Install tiny-cuda-nn latest stable (requires torch to be installed first)
-RUN pip install git+https://github.com/NVlabs/tiny-cuda-nn.git#subdirectory=bindings/torch
+# libcuda.so stub is required for linking but not in the default linker search path
+RUN LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LIBRARY_PATH} \
+    pip install --no-build-isolation git+https://github.com/NVlabs/tiny-cuda-nn.git#subdirectory=bindings/torch
 
 # Install Cmake and Eigen
 RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.sh \
@@ -216,7 +203,7 @@ RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cm
     && git clone --single-branch --depth=1 --branch ${EIGEN_VERSION} https://gitlab.com/libeigen/eigen.git \
     && mkdir -p ${CODE_PATH}/eigen/build \
     && cd ${CODE_PATH}/eigen/build \
-    && cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="/usr/local/bin/eigen/${EIGEN_VERSION}" \
+    && cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
     && make install \
     && cd ${CODE_PATH}
 
@@ -226,13 +213,14 @@ RUN wget https://developer.download.nvidia.com/compute/cudss/${CUDSS_VERSION}/lo
     && cp /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/cudss-*-keyring.gpg /usr/share/keyrings/ \
     && apt-get update \
     && dpkg --force-overwrite -i \
-        /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/libcudss0-cuda-13_${CUDSS_VERSION}.4-1_amd64.deb \
-        /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/libcudss0-dev-cuda-13_${CUDSS_VERSION}.4-1_amd64.deb \
-        /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/libcudss0-static-cuda-13_${CUDSS_VERSION}.4-1_amd64.deb \
+        /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/libcudss0-cuda-13_${CUDSS_PATCH_VERSION}-1_amd64.deb \
+        /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/libcudss0-dev-cuda-13_${CUDSS_PATCH_VERSION}-1_amd64.deb \
+        /var/cudss-local-repo-ubuntu2204-${CUDSS_VERSION}/libcudss0-static-cuda-13_${CUDSS_PATCH_VERSION}-1_amd64.deb \
     && apt-mark hold libcudss0-cuda-13 libcudss0-dev-cuda-13 libcudss0-static-cuda-13 \
     && echo "/usr/lib/x86_64-linux-gnu/libcudss/13" > /etc/ld.so.conf.d/cudss.conf \
     && ldconfig \
     && ln -sf /usr/include/libcudss/13/cudss.h /usr/include/cudss.h \
+    && ln -sf /usr/include/libcudss/13/cudss_data_types.h /usr/include/cudss_data_types.h \
     && ln -sf /usr/include/libcudss/13/cudss_threading_interface.h /usr/include/cudss_threading_interface.h \
     && ln -sf /usr/include/libcudss/13/cudss_distributed_interface.h /usr/include/cudss_distributed_interface.h \
     && cd ${CODE_PATH}
@@ -244,11 +232,11 @@ RUN git clone https://github.com/ceres-solver/ceres-solver.git --recursive \
     && cd ${CODE_PATH} \
     && mkdir ceres-bin && cd ceres-bin \
     && cmake -DCUDA=ON -DUSE_CUDSS=ON -DCUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -Dcudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/13/cmake/cudss -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF ../ceres-solver \
-    && make -j3 && make install \
+    && make -j${NINJA_JOBS} && make install \
     && cd ${CODE_PATH}
 
-ENV CMAKE_PREFIX_PATH="/usr/local/bin/eigen/${EIGEN_VERSION}"
-ENV Eigen3_DIR="/usr/local/bin/eigen/${EIGEN_VERSION}"
+ENV CMAKE_PREFIX_PATH="/usr/local"
+ENV Eigen3_DIR="/usr/local/share/eigen3/cmake"
 ENV Ceres_DIR=${CODE_PATH}/ceres-bin
 ENV cudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/13/cmake/cudss
 
@@ -267,7 +255,7 @@ RUN git clone https://github.com/nerfstudio-project/nerfstudio.git \
     && sed -i '/@torch_compile()/d' nerfstudio/models/splatfacto.py \
     && cp /tmp/patch_optimizer_save.py nerfstudio/engine/patch_optimizer_save.py \
     && sed -i '/^from __future__ import annotations/a from nerfstudio.engine import patch_optimizer_save  # noqa: F401' nerfstudio/engine/trainer.py \
-    && pip install -e . \
+    && pip install --no-deps -e . \
     && cd ${CODE_PATH}
 
 # Install latest gsplat from source (for splatfacto, splatfacto-big, splatfacto-mcmc)
@@ -279,7 +267,9 @@ RUN git clone https://github.com/nerfstudio-project/gsplat.git --recursive \
     && sed -i 's/point_indices = self\.parser\.point_indices\[image_name\]/point_indices = self.parser.point_indices.get(image_name, np.array([], dtype=np.int32))/' examples/datasets/colmap.py \
     && python setup.py build_ext --inplace \
     && python setup.py develop \
-    && pip install -e libs/scene -e libs/stage \
+    && sed -i 's/^torch==.*$/torch==${TORCH_VERSION}/' examples/requirements.txt \
+    && sed -i 's/^torchvision==.*$/torchvision==${TORCH_VISION_VERSION}/' examples/requirements.txt \
+    && sed -i 's/^numpy>=.*$/numpy>=1.26.4,<2.0/' examples/requirements.txt \
     && pip install --no-build-isolation -r examples/requirements.txt \
     && pip install --force-reinstall imageio tqdm \
     && cd ${CODE_PATH}
@@ -314,7 +304,7 @@ RUN sed -i 's/return natsorted(glob.glob(f"{self.normal_save_dir}\/\*.png"))/ret
 RUN mkdir -p /opt/splatfacto_w_env \
     && git clone https://github.com/KevinXu02/splatfacto-w ${CODE_PATH}/splatfacto-w \
     && pip install --target=/opt/splatfacto_w_env --no-deps gsplat==1.4.0 \
-    && pip install --target=/opt/splatfacto_w_env --upgrade git+https://github.com/KevinXu02/splatfacto-w
+    && pip install --target=/opt/splatfacto_w_env --upgrade --no-deps git+https://github.com/KevinXu02/splatfacto-w
 
 # Copy and make wrapper scripts executable
 COPY src/pipeline/training/run_splatfacto_w_wrapper.py /opt/ml/code/training/run_splatfacto_w_wrapper.py
@@ -329,8 +319,12 @@ RUN chmod +x /opt/ml/code/training/run_splatfacto_w_wrapper.py \
     /opt/ml/code/training/run_dn_splatter_wrapper.py
 
 # Install gsplat-specific pycolmap to separate location
+# rmbrualla fork is pycolmap==0.0.1 which lacks pycolmap.Reconstruction (requires 3.x+)
+# Use pycolmap==3.12.6 which has the Reconstruction API gsplat's colmap.py requires
 RUN mkdir -p /opt/gsplat_pycolmap \
-    && pip install --target=/opt/gsplat_pycolmap git+https://github.com/rmbrualla/pycolmap@cc7ea4b7301720ac29287dbe450952511b32125e
+    && pip install --target=/opt/gsplat_pycolmap --no-deps pycolmap==3.12.6 \
+    && rm -rf /opt/gsplat_pycolmap/numpy* /opt/gsplat_pycolmap/scipy* \
+    && pip install --target=/opt/gsplat_pycolmap --upgrade 'numpy==1.26.4'
 
 # Build OpenEXR + OpenImageIO from source (system libopenimageio-dev is built against old OpenEXR
 # and its cmake config pins an incompatible version requirement for COLMAP 4.x)
@@ -355,7 +349,7 @@ RUN wget https://github.com/AcademySoftwareFoundation/OpenImageIO/archive/refs/t
 RUN wget https://github.com/colmap/colmap/archive/refs/tags/${COLMAP_VERSION}.zip \
     && unzip ${COLMAP_VERSION}.zip && rm ${COLMAP_VERSION}.zip \
     && cd colmap-${COLMAP_VERSION}/ && mkdir build && cd build \
-    && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DMARCH_NATIVE=OFF -DCMAKE_PREFIX_PATH=/usr/local -Dcudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/13/cmake/cudss && ninja -j${NINJA_JOBS} install \
+    && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DCASPAR_ENABLED=ON -DCUDA_ENABLED=ON -DMARCH_NATIVE=OFF -DCMAKE_PREFIX_PATH=/usr/local -Dcudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/13/cmake/cudss && ninja -j${NINJA_JOBS} install \
     && cd ${CODE_PATH}/colmap-${COLMAP_VERSION} \
     && python -m pip install . \
     && cd ${CODE_PATH}
@@ -370,7 +364,44 @@ RUN wget "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -O "awscliv2
     && unzip awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip
 
 # Install utilities and ensure numpy==1.26.4 for compatibility
-RUN pip install --no-cache-dir scipy 'numpy==1.26.4' Pillow>=10.3.0 'timm>=1.0.0' einops omegaconf fvcore iopath rembg rich natsort trimesh onnxruntime onnxruntime-gpu boto3
+RUN pip install --no-cache-dir scipy 'numpy==1.26.4' Pillow>=10.3.0 'timm>=1.0.0' einops omegaconf fvcore iopath rembg rich natsort trimesh onnxruntime onnxruntime-gpu boto3 appdirs rawpy fpsample
+
+# Install nerfstudio runtime deps omitted by --no-deps install
+# Excludes: torch, torchvision, gsplat, pycolmap (managed separately)
+RUN pip install --no-cache-dir \
+    'appdirs>=1.4' \
+    'av>=9.2.0' \
+    fpsample \
+    'gdown>=4.6.0' \
+    'h5py>=2.9.0' \
+    'imageio>=2.21.1' \
+    'jaxtyping>=0.2.15' \
+    'matplotlib>=3.6.0' \
+    'mediapy>=1.1.0' \
+    'msgpack>=1.0.4' \
+    'msgpack_numpy>=0.4.8' \
+    'ninja>=1.10' \
+    'open3d>=0.16.0' \
+    'opencv-python-headless==4.10.0.84' \
+    pathos \
+    'plotly>=5.7.0' \
+    'protobuf<=5,!=3.20.0' \
+    'pymeshlab>=2022.2.post2' \
+    'pyngrok>=5.1.0' \
+    'pyquaternion>=0.9.9' \
+    'python-socketio>=5.7.1' \
+    pytorch-msssim \
+    rawpy \
+    'scikit-image>=0.19.3' \
+    'splines==0.3.0' \
+    'tensorboard>=2.13.0' \
+    tensorly \
+    'torchmetrics[image]>=1.0.1' \
+    'tyro>=0.9.8' \
+    'viser==1.0.0' \
+    'wandb>=0.13.3' \
+    'nerfacc==0.5.2' \
+    xatlas
 
 # Install sharp-frame-extractor separately after scipy is available
 RUN pip install --no-cache-dir sharp-frame-extractor
@@ -399,6 +430,23 @@ RUN git clone https://github.com/nadermx/backgroundremover.git \
 ENV U2NET_PATH=/root/.u2net/u2net.pth
 ENV U2NETP_PATH=/root/.u2net/u2netp.pth
 
+# Install 3DGRUT runtime deps omitted by --no-deps install
+# Excludes: torch, torchvision, torchmetrics, numpy, setuptools (managed separately)
+RUN pip install --no-cache-dir \
+    addict \
+    dataclasses_json \
+    fire \
+    imageio \
+    kornia \
+    msgpack \
+    'nvidia-ncore>=19.0.0' \
+    piexif \
+    plyfile \
+    scikit-learn \
+    simplejpeg \
+    'slangtorch==1.3.18' \
+    'usd-core>=26.5'
+
 # Build NVIDIA 3DGRUT and Attentive Eraser in single layer
 # Stable Diffusion XL model will be downloaded from HuggingFace at runtime if using eraser
 RUN git clone --recursive https://github.com/nv-tlabs/3dgrut.git \
@@ -406,10 +454,11 @@ RUN git clone --recursive https://github.com/nv-tlabs/3dgrut.git \
     && git reset --hard ${THREEDGRUT_HASH} \
     && sed -i 's/checkpoint = torch.load(checkpoint_path)/checkpoint = torch.load(checkpoint_path, weights_only=False)/' threedgrut/render.py \
     && sed -i 's/checkpoint = torch.load(conf.resume)/checkpoint = torch.load(conf.resume, weights_only=False)/' threedgrut/trainer.py \
-    && sed -i '/fused-ssim/d' requirements.txt \
-    && sed -i 's/^xformers/#xformers/' requirements.txt \
-    && python -m pip install --no-build-isolation -r requirements.txt \
-    && python -m pip install --no-build-isolation -e . \
+    && sed -i '/fused-ssim/d' requirements_extra.txt \
+    && sed -i 's/^xformers/#xformers/' requirements_extra.txt \
+    && python -m pip install --no-build-isolation --no-deps -r requirements_extra.txt \
+    && LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LIBRARY_PATH} python -m pip install --no-build-isolation -r requirements_tinycudann.txt \
+    && python -m pip install --no-build-isolation --no-deps -e . \
     && cd ${CODE_PATH} \
     && git clone https://github.com/Anonym0u3/AttentiveEraser.git \
     && cd ${CODE_PATH}/AttentiveEraser \
@@ -417,6 +466,7 @@ RUN git clone --recursive https://github.com/nv-tlabs/3dgrut.git \
     && sed -i 's/^transformers/#transformers/' requirements.txt \
     && sed -i 's/^xformers/#xformers/' requirements.txt \
     && sed -i 's/^diffusers/#diffusers/' requirements.txt \
+    && sed -i 's/^pytorch_lightning/#pytorch_lightning/' requirements.txt \
     && pip install -r requirements.txt \
     && cd ${CODE_PATH} \
     && python3 - <<'PATCH_SCRIPT'
@@ -501,7 +551,10 @@ RUN pip install --no-cache-dir --no-deps diffusers && pip install --no-cache-dir
 
 # Final NumPy constraint to fix Numba compatibility (requires NumPy < 2.0)
 # Pin Pillow < 10.0.0 last to prevent NerfStudio pil_to_numpy breakage (ImagingCore.setimage API change)
-RUN pip install --force-reinstall --no-cache-dir 'numpy<2.0,>=1.26.4' 'moviepy==1.0.3' 'Pillow>=9.4.0,<10.0.0'
+# Remove torchaudio if installed by transitive deps — it pulls a CUDA 13.0 build that mismatches
+# PyTorch 13.2 and breaks diffusers/transformers imports via torchaudio._extension CUDA version check
+RUN pip install --force-reinstall --no-cache-dir 'numpy<2.0,>=1.26.4' 'moviepy==1.0.3' 'Pillow>=9.4.0,<10.0.0' \
+    && pip uninstall -y torchaudio || true
 
 # Aggressively remove xformers completely after ALL installations
 RUN pip uninstall -y xformers || true && \
@@ -517,7 +570,9 @@ RUN wget https://github.com/nianticlabs/spz/archive/refs/tags/v${SPZ_VERSION}.ta
     && mv spz-${SPZ_VERSION} spz \
     && rm v${SPZ_VERSION}.tar.gz
 WORKDIR ${CODE_PATH}/spz
-RUN pip install scikit-build-core nanobind && pip install . \
+RUN pip install scikit-build-core nanobind \
+    && sed -i 's/add_library(zstd::zstd ALIAS zstd::libzstd_static)/add_library(zstd::zstd ALIAS zstd::libzstd_shared)/' CMakeLists.txt \
+    && pip install . \
     && mkdir -p build \
     && cd build \
     && cmake .. -DCMAKE_BUILD_TYPE=Release \
@@ -527,7 +582,7 @@ WORKDIR ${CODE_PATH}
 
 # Install gsplat-specific pycolmap for multi-GPU (MUST BE LAST to avoid being overwritten)
 RUN mkdir -p /opt/gsplat_pycolmap \
-    && pip install --target=/opt/gsplat_pycolmap --no-deps git+https://github.com/rmbrualla/pycolmap@cc7ea4b7301720ac29287dbe450952511b32125e \
+    && pip install --target=/opt/gsplat_pycolmap --no-deps pycolmap==3.12.6 \
     && rm -rf /opt/gsplat_pycolmap/numpy* /opt/gsplat_pycolmap/scipy* \
     && pip install --target=/opt/gsplat_pycolmap --upgrade 'numpy==1.26.4'
 

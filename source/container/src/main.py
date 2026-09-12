@@ -109,7 +109,7 @@ from utils import (
     update_dynamodb_metrics, update_component_phase_completion,
     parse_3dgrut_metrics_from_log, parse_gsplat_metrics_from_log,
     send_task_success, send_task_failure, send_task_heartbeat,
-    flatten_images_for_gsplat, remove_unobserved_images_for_gsplat,
+    flatten_images_for_gsplat,
     remove_fully_masked_images_for_gsplat
 )
 
@@ -340,7 +340,6 @@ if __name__ == "__main__":
     log.info(f"  Run training: {config['RUN_TRAIN'] == 'true'}")
     log.info(f"  Resume training: {config['RUN_RECON'] == 'false' and config['RUN_TRAIN'] == 'true'}")
     log.info(f"  Only export: {config['RUN_RECON'] == 'false' and config['RUN_TRAIN'] == 'false'}")
-    os.environ['PYTORCH_CUDA_ALLOC_CONF']= 'expandable_segments:True'
     # SQLite on EFS: EFS does not support POSIX file locking which SQLite requires.
     # Redirect both temp files and the COLMAP database itself to local storage.
     os.environ['SQLITE_TMPDIR'] = '/tmp'
@@ -395,7 +394,7 @@ if __name__ == "__main__":
     transforms_out_path = os.path.join(config['DATASET_PATH'], "transforms.json")
     colmap_vocab_path = os.path.join(config['CODE_PATH'], "vocab_tree_flickr100K_words32K.bin")
 
-    if config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or config['MODEL'] == "splatfacto-mcmc":
+    if config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"):
         model = "splatfacto"
     elif config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
         model = config['MODEL']
@@ -550,6 +549,23 @@ if __name__ == "__main__":
                                     os.path.join(root, mask_stem)
                                 )
                     log.info(f"Masks renamed from COLMAP to NerfStudio convention in: {masks_dir}")
+                    # Fill blank (all-white) masks for images that have no mask
+                    _filled = 0
+                    for _root, _dirs, _files in os.walk(image_path):
+                        _rel = os.path.relpath(_root, image_path)
+                        for _img_file in _files:
+                            if not _img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                                continue
+                            _mask_rel = os.path.join(_rel, _img_file) if _rel != '.' else _img_file
+                            _mask_target = os.path.join(masks_dir, os.path.splitext(_mask_rel)[0] + '.png')
+                            if not os.path.isfile(_mask_target):
+                                os.makedirs(os.path.dirname(_mask_target), exist_ok=True)
+                                _sample = Image.open(os.path.join(_root, _img_file))
+                                Image.new('L', _sample.size, 255).save(_mask_target)
+                                _sample.close()
+                                _filled += 1
+                    if _filled:
+                        log.info(f"Generated {_filled} blank masks for images without existing masks")
                     # If transforms.json already exists (no conversion needed), inject mask_path now
                     # so gsplat can find the masks without relying on the Colmap-to-Nerfstudio step.
                     transforms_path = os.path.join(config['DATASET_PATH'], 'transforms.json')
@@ -558,6 +574,8 @@ if __name__ == "__main__":
                             _data = _json.load(_f)
                         _injected = 0
                         for _frame in _data.get('frames', []):
+                            # Remove any pre-existing mask_path from external pipeline — we re-validate below
+                            _frame.pop('mask_path', None)
                             _img = _frame.get('file_path', '')
                             if _img.startswith('images/'):
                                 _img = _img[len('images/'):]
@@ -607,7 +625,23 @@ if __name__ == "__main__":
                                 os.path.join(root, mask_stem)
                             )
                 log.info("Masks renamed from COLMAP to NerfStudio convention in directory input")
-        
+                _filled = 0
+                for _root, _dirs, _files in os.walk(image_path):
+                    _rel = os.path.relpath(_root, image_path)
+                    for _img_file in _files:
+                        if not _img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                            continue
+                        _mask_rel = os.path.join(_rel, _img_file) if _rel != '.' else _img_file
+                        _mask_target = os.path.join(masks_dir, os.path.splitext(_mask_rel)[0] + '.png')
+                        if not os.path.isfile(_mask_target):
+                            os.makedirs(os.path.dirname(_mask_target), exist_ok=True)
+                            _sample = Image.open(os.path.join(_root, _img_file))
+                            Image.new('L', _sample.size, 255).save(_mask_target)
+                            _sample.close()
+                            _filled += 1
+                if _filled:
+                    log.info(f"Generated {_filled} blank masks for images without existing masks")
+
         # Ensure colmap/sparse structure exists for NerfStudio (not needed for 3DGRUT or depth loss)
         if colmap_zip_found and config['MODEL'] not in ('3dgrt', '3dgut') and not ENABLE_DEPTH_LOSS:
             colmap_sparse_0 = os.path.join(config['DATASET_PATH'], 'colmap', 'sparse', '0')
@@ -756,7 +790,7 @@ if __name__ == "__main__":
                             log.info(f"Moved 3dgrut_models directory from {model_src_dir} to {model_ckpt_path}")
                 else:
                     # For splatfacto models, keep files in dataset directory
-                    if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
+                    if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"]:
                         log.info(f"Keeping nerfstudio_models in dataset directory for splatfacto: {model_src_dir}")
                         # Don't move - files are already in correct location
                     else:
@@ -765,7 +799,7 @@ if __name__ == "__main__":
                         log.info(f"Moved nerfstudio_models from {model_src_dir} to {model_ckpt_path}")
             if os.path.exists(config_yml_src): # only for Nerfstudio
                 # For splatfacto models, keep config.yml in dataset directory and update it there
-                if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
+                if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"]:
                     log.info(f"Keeping nerfstudio_models and config.yml in dataset directory for splatfacto resume: {model_src_dir}")
                     ckpt_files = sorted([f for f in os.listdir(model_src_dir) if f.endswith('.ckpt')])
                     log.info(f"Splatfacto resume checkpoint files found at: {ckpt_files}")
@@ -829,7 +863,7 @@ if __name__ == "__main__":
             log.info(f"Successfully extracted and organized model archive for resume training")
         
         # Final verification for splatfacto models
-        if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
+        if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"]:
             dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
             dataset_config_path = os.path.join(config['DATASET_PATH'], "config.yml")
             log.info(f"Final check - Checkpoint dir: {os.path.exists(dataset_models_path)}, Config: {os.path.exists(dataset_config_path)}")
@@ -838,7 +872,7 @@ if __name__ == "__main__":
                 log.info(f"Available checkpoints: {ckpt_files}")
         
         # Verify checkpoint files and config are in correct location
-        if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
+        if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"]:
             dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
             dataset_config_path = os.path.join(config['DATASET_PATH'], "config.yml")
             if os.path.exists(dataset_models_path):
@@ -1174,13 +1208,34 @@ if __name__ == "__main__":
             else:
                 method = config['MATCHING_METHOD']
             faces_to_remove = config['SPHERICAL_CUBE_FACES_TO_REMOVE'].strip()
+            # Compute SIFT feature count scaled to input image resolution
+            REF_MAX_IMAGE_SIZE = 3200
+            REF_MAX_NUM_FEATURES = 8192
+            sample_images = [f for f in os.listdir(image_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+            _max_dim = REF_MAX_IMAGE_SIZE
+            if sample_images:
+                with Image.open(os.path.join(image_path, sample_images[0])) as _img:
+                    _max_dim = max(_img.width, _img.height)
+                sift_max_num_features = min(int(REF_MAX_NUM_FEATURES * (_max_dim / REF_MAX_IMAGE_SIZE) ** 2), 65536)
+            else:
+                sift_max_num_features = REF_MAX_NUM_FEATURES
+            log.info(f"Spherical SIFT: max_num_features={sift_max_num_features}, enhanced={config['ENABLE_ENHANCED_FEATURE_EXTRACTION']}")
             args = [
                 "--input_image_path", image_path,
                 "--output_path", config['DATASET_PATH'],
-                "--matcher", method
+                "--matcher", method,
+                "--max_num_features", str(sift_max_num_features),
             ]
+            if config['ENABLE_ENHANCED_FEATURE_EXTRACTION'] == "true":
+                args.append("--enhanced_feature_extraction")
             if faces_to_remove and faces_to_remove != '[]':
-                args.append("--remove_faces")
+                try:
+                    faces_list = ast.literal_eval(faces_to_remove)
+                    exclude_str = ",".join(f.strip().lower() for f in faces_list)
+                except (ValueError, SyntaxError):
+                    exclude_str = faces_to_remove.strip("[]").replace("'", "").replace('"', "")
+                args.extend(["--exclude_faces", exclude_str])
+                log.info(f"Spherical: excluding cubemap faces: {exclude_str}")
 
             if config['REMOVE_OBJECT'] == "true":
                 bg_removal_model = "u2net_human_seg"
@@ -1283,6 +1338,32 @@ if __name__ == "__main__":
     except Exception as e:
         error_message = f"Issue creating human subject removal component: {e}"
         pipeline.report_error(740, error_message)
+
+    ##################################
+    # PREPARE-DEPTHS COMPONENT:
+    # Convert EXR depth maps to uint16 PNG for splatfacto-depth supervision
+    ##################################
+    try:
+        if config['MODEL'] == "splatfacto-depth":
+            raw_depths_dir = os.path.join(config['DATASET_PATH'], "depths_exr")
+            depths_out_dir = os.path.join(config['DATASET_PATH'], "depths")
+            if os.path.isdir(raw_depths_dir) and any(f.endswith(".exr") for f in os.listdir(raw_depths_dir)):
+                depth_scale = config.get('DEPTH_SCALE', '1000.0')
+                pipeline.create_component(
+                    name="Prepare-Depths",
+                    comp_type=ComponentType.PRE_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="pre_processing/prepare_depths.py",
+                    args=["-i", raw_depths_dir, "-o", depths_out_dir, "--depth-scale", depth_scale],
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
+                log.info(f"Prepare-Depths: converting EXR from {raw_depths_dir} -> {depths_out_dir}")
+            else:
+                log.info("splatfacto-depth: no depths_exr/ directory found, skipping EXR conversion (expecting pre-converted PNG in depths/)")
+    except Exception as e:
+        error_message = f"Issue creating Prepare-Depths component: {e}"
+        pipeline.report_error(741, error_message)
 
     ##################################
     # RECONSTRUCTION COMPONENT:
@@ -1481,6 +1562,9 @@ if __name__ == "__main__":
                             ])
                         if int(pipeline.config.num_gpus) > 0:
                             args.extend(["--Mapper.ba_use_gpu", "1"])
+                            if len([f for f in os.listdir(image_path)
+                                    if f.lower().endswith(('.png', '.jpg', '.jpeg'))]) >= 500:
+                                args.extend(["--Mapper.ba_global_backend", "CASPAR"])
                         pipeline.create_component(
                             name="ColmapSfM-Mapper",
                             comp_type=ComponentType.RECONSTRUCTION,
@@ -1740,6 +1824,7 @@ if __name__ == "__main__":
                 data_model = "colmap"
             # Single GPU gsplat with depth loss — override model choice and use gsplat simple_trainer
             if ENABLE_DEPTH_LOSS and ENABLE_MULTI_GPU == "false":
+                isp_mode = config.get('THREED_ISP', 'none').lower()
                 if config['MODEL'] == "splatfacto-mcmc":
                     model = "mcmc"
                 else:
@@ -1761,6 +1846,10 @@ if __name__ == "__main__":
                 if model == "mcmc":
                     num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
                     args.extend(["--mcmc.cap-max", str(num_gaussians)])
+                if isp_mode == "ppisp":
+                    args.extend(["--post_processing", "ppisp", "--batch_size", "1"])
+                elif isp_mode == "bilagrid":
+                    args.extend(["--post_processing", "bilateral_grid"])
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -1782,6 +1871,10 @@ if __name__ == "__main__":
                 ]
                 if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
                     eval_args.append("--no-normalize-world-space")
+                if isp_mode == "ppisp":
+                    eval_args.extend(["--post_processing", "ppisp", "--batch_size", "1"])
+                elif isp_mode == "bilagrid":
+                    eval_args.extend(["--post_processing", "bilateral_grid"])
                 pipeline.create_component(
                     name="GSplat-Metrics",
                     comp_type=ComponentType.TRAINING,
@@ -1883,7 +1976,7 @@ if __name__ == "__main__":
             elif ENABLE_MULTI_GPU == "false" and \
                 config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
                 args = [
-                    config['MODEL'],
+                    "splatfacto" if config['MODEL'] == "splatfacto-depth" else config['MODEL'],
                     "--viewer.quit-on-train-completion=True"
                 ]
                 if config['LOG_VERBOSITY'] != "debug":
@@ -1897,8 +1990,7 @@ if __name__ == "__main__":
                         "--pipeline.model.predict-normals", "True",
                         "--max-num-iterations", str(config['MAX_STEPS']),
                     ])
-                elif config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
-                    config['MODEL'] == "splatfacto-mcmc":
+                elif config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"):
                     if config['RUN_RECON'] == "false" and not colmap_zip_found: # Resume training
                         dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
                         has_ckpt = os.path.exists(dataset_models_path) and any(
@@ -1942,13 +2034,15 @@ if __name__ == "__main__":
                     ])
                         if config['MODEL'] == "splatfacto-mcmc":
                             num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
-                            args.extend(["--pipeline.model.max-gs-num", str(num_gaussians)])
+                            args.extend([
+                                "--pipeline.model.max-gs-num", str(num_gaussians),
+                                "--pipeline.model.stop-split-at", str(int(config['MAX_STEPS'])),
+                            ])
                         if isp_mode == "bilagrid":
                             args.extend(["--pipeline.model.use-bilateral-grid", "True"])
                         elif isp_mode == "ppisp":
-                            log.info("PPISP not currently supported with Splatfacto, using Bilateral-Grid instead")
+                            log.info("PPISP not supported with Splatfacto (nerfstudio), using Bilateral-Grid instead")
                             args.extend(["--pipeline.model.use-bilateral-grid", "True"])
-                            #args.extend(["--pipeline.model.use-ppisp", "True"])
                 elif config['MODEL'] == "splatfacto-w-light":
                     if config['RUN_RECON'] == "false": # Resume training
                         if os.path.exists(model_ckpt_path):
@@ -1996,7 +2090,19 @@ if __name__ == "__main__":
                 ])
                 if auto_scale_value == "True":
                     args.extend(["--center-method", "poses"])
-                if ZIP_HAS_MASKS:
+                if config['MODEL'] == "splatfacto-depth":
+                    # Check both depths/ and depth_images/ directory names
+                    depths_dir = os.path.join(config['DATASET_PATH'], "depths")
+                    depth_images_dir = os.path.join(config['DATASET_PATH'], "depth_images")
+                    if os.path.isdir(depths_dir):
+                        args.extend(["--depths-path", "depths"])
+                        log.info("splatfacto-depth: passing --depths-path depths to colmap dataparser")
+                    elif os.path.isdir(depth_images_dir):
+                        args.extend(["--depths-path", "depth_images"])
+                        log.info("splatfacto-depth: passing --depths-path depth_images to colmap dataparser")
+                    else:
+                        log.warning("splatfacto-depth: no depths/ or depth_images/ directory found, training without depth supervision")
+                if ZIP_HAS_MASKS and config['SPHERICAL_CAMERA'] != "true":
                     masks_path = os.path.join(config['DATASET_PATH'], 'masks')
                     args.extend(["--masks-path", masks_path])
                     log.info(f"Enabling mask training from zip: {masks_path}")
@@ -2030,9 +2136,7 @@ if __name__ == "__main__":
                     "--data_factor", "1",
                     "--steps_scaler", str(steps_scaler),
                     "--disable_viewer",
-                    #"--packed",  # TODO: upstream gsplat bug - --packed causes cudaErrorIllegalAddress
-                    #              # with NCCL all_reduce in multi-GPU distributed training.
-                    #              # Re-enable once fixed: https://github.com/nerfstudio-project/gsplat/issues/910
+                    "--packed",
                     "--eval_steps", str(int(config['MAX_STEPS'])),
                     #depth_loss_flag,
                     "--data-dir", config['DATASET_PATH']
@@ -2044,8 +2148,10 @@ if __name__ == "__main__":
                 if model == "mcmc":
                     num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
                     args.extend(["--mcmc.cap-max", str(num_gaussians)])
-                if isp_mode == "bilagrid" or isp_mode == "ppisp":
-                    log.info(f"ISP mode '{isp_mode}' not supported with multi-GPU gsplat, skipping")
+                if isp_mode == "ppisp":
+                    log.info("PPISP not supported with multi-GPU gsplat (requires single GPU), skipping")
+                elif isp_mode == "bilagrid":
+                    log.info("Bilateral grid not supported with multi-GPU gsplat (requires single GPU), skipping")
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -2068,6 +2174,8 @@ if __name__ == "__main__":
                 ]
                 if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
                     eval_args.append("--no-normalize-world-space")
+                if isp_mode == "bilagrid":
+                    log.info("Bilateral grid not supported with multi-GPU gsplat (requires single GPU), skipping eval post_processing")
                 pipeline.create_component(
                     name="GSplat-Metrics",
                     comp_type=ComponentType.TRAINING,
@@ -2155,7 +2263,7 @@ if __name__ == "__main__":
     # Transform checkpoints splat training to .ply
     ##################################
     try:
-        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and not ENABLE_DEPTH_LOSS:
+        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and (not ENABLE_DEPTH_LOSS or config['MODEL'] == "splatfacto-depth"):
             if ENABLE_MULTI_GPU == "true":
                 ckpt_dir = os.path.join(output_path, "ckpts")
                 args = [
@@ -2280,9 +2388,7 @@ if __name__ == "__main__":
     try:
         # Nerfstudio models (non-multi-GPU)
         if ENABLE_MULTI_GPU == "false":
-            if not ENABLE_DEPTH_LOSS and (config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-big" or \
-                config['MODEL'] == "splatfacto-mcmc" or config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto-w-light" or \
-                config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh")):
+            if (not ENABLE_DEPTH_LOSS or config['MODEL'] == "splatfacto-depth") and (config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth", "nerfacto", "splatfacto-w-light", "dn-splatter", "dn-splatter-big", "ags-mesh")):
                 if resume_training_active:
                     # Resume training - use config from dataset directory for splatfacto models
                     if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
@@ -2343,9 +2449,7 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['ENABLE_VIDEO_EXPORT'] == "true" and ENABLE_MULTI_GPU == "false":
-            if not ENABLE_DEPTH_LOSS and (config['MODEL'] == "nerfacto" or config['MODEL'] == "splatfacto" or config['MODEL'] == "splatfacto-mcmc" or \
-                config['MODEL'] == "splatfacto-big" or config['MODEL'] == "splatfacto-w-light" or \
-                config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh")):
+            if (not ENABLE_DEPTH_LOSS or config['MODEL'] == "splatfacto-depth") and (config['MODEL'] in ("nerfacto", "splatfacto", "splatfacto-mcmc", "splatfacto-big", "splatfacto-depth", "splatfacto-w-light", "dn-splatter", "dn-splatter-big", "ags-mesh")):
                 model = "splatfacto"
                 if config['MODEL'] == "splatfacto-w-light":
                     model = "splatfacto-w-light"
@@ -2623,22 +2727,25 @@ if __name__ == "__main__":
                 # gsplat-depth uses --no-normalize-world-space (raw COLMAP/OpenCV space)
                 # nerfstudio models use OpenGL-normalized space
                 rotation = '-90,0,0' if ENABLE_DEPTH_LOSS else '270,0,180'
-                if rotation:
-                    args = [
-                        orig_ply_path,
-                        orig_ply_path,
-                        f"--rotate={rotation}",
-                        '-w'
-                    ]
-                    pipeline.create_component(
-                        name="Ply-Rotation",
-                        comp_type=ComponentType.POST_PROCESSING,
-                        comp_environ=ComponentEnvironment.EXECUTABLE,
-                        command="splat-transform",
-                        args=args,
-                        cwd=current_dir_path,
-                        requires_gpu=False
-                    )
+            else:
+                # 3DGRUT outputs need 180° on right and up axes for PlayCanvas viewer
+                rotation = '180,180,0'
+            if rotation:
+                args = [
+                    orig_ply_path,
+                    orig_ply_path,
+                    f"--rotate={rotation}",
+                    '--overwrite'
+                ]
+                pipeline.create_component(
+                    name="Ply-Rotation",
+                    comp_type=ComponentType.POST_PROCESSING,
+                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                    command="splat-transform",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
     except Exception as e:
         error_message = f"Issue rotating PLY: {e}"
         pipeline.report_error(785, error_message)
@@ -2707,22 +2814,25 @@ if __name__ == "__main__":
                 # gsplat-depth uses --no-normalize-world-space (raw COLMAP/OpenCV space)
                 # nerfstudio models use OpenGL-normalized space
                 rotation = '-90,0,0' if ENABLE_DEPTH_LOSS else '270,0,180'
-                if rotation:
-                    args = [
-                        sog_ply_path,
-                        sog_ply_path,
-                        f"--rotate={rotation}",
-                        '-w'
-                    ]
-                    pipeline.create_component(
-                        name="Rotate-PLY-For-SOG",
-                        comp_type=ComponentType.POST_PROCESSING,
-                        comp_environ=ComponentEnvironment.EXECUTABLE,
-                        command="splat-transform",
-                        args=args,
-                        cwd=current_dir_path,
-                        requires_gpu=False
-                    )
+            else:
+                # 3DGRUT outputs need 180° on right and up axes for PlayCanvas viewer
+                rotation = '180,180,0'
+            if rotation:
+                args = [
+                    sog_ply_path,
+                    sog_ply_path,
+                    f"--rotate={rotation}",
+                    '--overwrite'
+                ]
+                pipeline.create_component(
+                    name="Rotate-PLY-For-SOG",
+                    comp_type=ComponentType.POST_PROCESSING,
+                    comp_environ=ComponentEnvironment.EXECUTABLE,
+                    command="splat-transform",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
     except Exception as e:
         error_message = f"Issue rotating PLY: {e}"
         pipeline.report_error(785, error_message)
@@ -2942,14 +3052,37 @@ if __name__ == "__main__":
                     # nerfstudio OpenGL-space
                     rotation = '90,0,180' if is_lhyu else '270,0,0'
             else:
-                rotation = '180,0,0'
+                # 3DGRUT: 180° on up axis for PlayCanvas viewer
+                rotation = '0,180,0'
             if rotation:
                 args = [
                     spz_ply_path,
                     spz_ply_path,
                     f"--rotate={rotation}",
-                    '-w'
                 ]
+                # When PRESERVE_SCENE_SCALE is true the splat is in real-world metric scale.
+                # Read the dataparser_scale from nerfstudio config.yml and apply its inverse
+                # so the SPZ viewer sees a normalized (~1-unit) scene instead of a zoomed-out one.
+                preserve_scale = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
+                if preserve_scale and config['MODEL'] not in ('3dgut', '3dgrt', 'nerfacto'):
+                    import yaml as _yaml
+                    _config_yml = os.path.join(
+                        config['CODE_PATH'], 'outputs', 'unnamed',
+                        config['MODEL'], TRAIN_EXPERIMENT_NAME, 'config.yml'
+                    )
+                    _dp_scale = None
+                    if os.path.exists(_config_yml):
+                        try:
+                            with open(_config_yml, 'r') as _f:
+                                _ns_cfg = _yaml.safe_load(_f)
+                            _dp_scale = (_ns_cfg.get('pipeline', {}).get('datamanager', {})
+                                         .get('dataparser', {}).get('scale_factor'))
+                        except Exception as _e:
+                            log.warning(f"Could not read dataparser scale from config.yml: {_e}")
+                    if _dp_scale and float(_dp_scale) > 0:
+                        args.append(f"--scale={float(_dp_scale):.6f}")
+                        log.info(f"SPZ preserve_scene_scale: applying --scale={_dp_scale} from config.yml")
+                args.append('--overwrite')
                 pipeline.create_component(
                     name="Spz-Ply-Rotation",
                     comp_type=ComponentType.POST_PROCESSING,
@@ -3376,10 +3509,13 @@ if __name__ == "__main__":
                     # If using pose prior, use the intrinsics from the txt file
                     if config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == "true":
                         camera_params = read_camera_params_from_file(os.path.join(sparse_model_path, "cameras.txt"))
-                        component.args.extend([
-                            "--ImageReader.camera_model", camera_params['model'],
-                            "--ImageReader.camera_params", camera_params['params_str']
-                        ])
+                        if camera_params is not None:
+                            component.args.extend([
+                                "--ImageReader.camera_model", camera_params['model'],
+                                "--ImageReader.camera_params", camera_params['params_str']
+                            ])
+                        else:
+                            log.warning("Could not read camera params from cameras.txt/bin — using COLMAP defaults")
                     elif config.get('ENABLE_FL_METRIC', 'false') == 'true':
                         # Convert metric focal length from mm to pixels using the 35mm-equivalent
                         # formula: focal_px = (focal_mm / 36.0) * image_width_px
@@ -3506,6 +3642,8 @@ if __name__ == "__main__":
                                     mapper_args.extend(['--log_level', '1'])
                                 if int(pipeline.config.num_gpus) > 0:
                                     mapper_args.extend(['--Mapper.ba_use_gpu', '1'])
+                                    if num_imgs >= 500:
+                                        mapper_args.extend(['--Mapper.ba_global_backend', 'CASPAR'])
                                 new_components.append(Component(
                                     name='ColmapSfM-Mapper',
                                     comp_type=ComponentType.RECONSTRUCTION,
@@ -3709,11 +3847,19 @@ if __name__ == "__main__":
                                 _args[_j + 1] = _normal_supervision
                                 break
                     # Check image count and resolution at runtime to configure color correction
-                    image_files = [f for f in os.listdir(image_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                    # For spherical camera, images are in pano_camera* subdirectories under image_path
+                    if config['SPHERICAL_CAMERA'] == "true":
+                        image_files = [
+                            os.path.join(root, f)
+                            for root, _, files in os.walk(image_path)
+                            for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                        ]
+                    else:
+                        image_files = [os.path.join(image_path, f) for f in os.listdir(image_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
                     num_images = len(image_files)
                     is_4k_or_higher = False
                     if image_files:
-                        sample_img = Image.open(os.path.join(image_path, image_files[0]))
+                        sample_img = Image.open(image_files[0])
                         is_4k_or_higher = sample_img.width >= 3840 or sample_img.height >= 2160
                     
                     # Disable color correction metrics for large/high-res datasets
@@ -3793,7 +3939,6 @@ if __name__ == "__main__":
                                 _sparse_0 = os.path.join(config['DATASET_PATH'], "sparse", "0")
                             if os.path.exists(_sparse_0):
                                 flatten_images_for_gsplat(image_path, _sparse_0, log)
-                                remove_unobserved_images_for_gsplat(_sparse_0, log)
                                 # Flatten masks/ to match flattened image names.
                                 # patch_gsplat.py looks up masks by imdata[k].name which is now
                                 # 'face_00_pano_001.png' after flattening, so masks must also be flat.

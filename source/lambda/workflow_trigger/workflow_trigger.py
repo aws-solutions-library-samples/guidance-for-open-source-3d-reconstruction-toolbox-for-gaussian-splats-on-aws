@@ -349,6 +349,7 @@ def lambda_handler(event, context):
                     "MAX_STEPS": str(json_content["training"]["maxSteps"]),
                     "NUM_GAUSSIANS": str(json_content["training"].get("numGaussians", "1000000")),
                     "THREED_ISP": str(json_content["training"].get("3dIsp", "none")),
+                    "DEPTH_SCALE": str(json_content["training"].get("depthScale", "1000.0")),
                     "CROP_OUTPUT_BOUNDS": str(json_content["postProcessing"]["cropOutputBounds"]).lower(),
                     "CROP_MODE": str(json_content["postProcessing"]["cropMode"]),
                     "CLEAN_SPLAT": str(json_content["postProcessing"].get("cleanSplat", "false")).lower(),

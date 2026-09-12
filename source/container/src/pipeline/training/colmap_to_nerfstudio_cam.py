@@ -29,7 +29,7 @@ from pathlib import Path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
-from nerfstudio.nerfstudio.process_data.colmap_utils import colmap_to_json
+from nerfstudio.process_data.colmap_utils import colmap_to_json
 
 # Create Argument Parser with Rich Formatter
 parser = argparse.ArgumentParser(
@@ -100,6 +100,7 @@ if os.path.isdir(path):
                 with open(transforms_path, "r") as f:
                     data = json.load(f)
                 for frame in data.get("frames", []):
+                    frame.pop("mask_path", None)  # strip any pre-existing mask_path from external pipeline
                     img_name = frame["file_path"]
                     # Strip leading "images/" prefix if present — mask path mirrors image subpath
                     if img_name.startswith("images/"):
