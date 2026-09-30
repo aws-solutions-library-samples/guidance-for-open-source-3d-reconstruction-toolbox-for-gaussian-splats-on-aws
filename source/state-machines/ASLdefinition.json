@@ -151,6 +151,8 @@
           "MAX_STEPS.$": "$.envVars.MAX_STEPS",
           "NUM_GAUSSIANS.$": "$.envVars.NUM_GAUSSIANS",
           "THREED_ISP.$": "$.envVars.THREED_ISP",
+          "ENABLE_ABSGRAD.$": "$.envVars.ENABLE_ABSGRAD",
+          "ENHANCE_DEPTH.$": "$.envVars.ENHANCE_DEPTH",
           "ENABLE_SPZ.$": "$.envVars.ENABLE_SPZ",
           "ENABLE_SOG.$": "$.envVars.ENABLE_SOG",
           "ENABLE_USDZ.$": "$.envVars.ENABLE_USDZ",
@@ -176,6 +178,7 @@
           "COLLISION_SEED_POS.$": "$.envVars.COLLISION_SEED_POS",
           "GENERATE_LOD.$": "$.envVars.GENERATE_LOD",
           "GENERATE_MESH.$": "$.envVars.GENERATE_MESH",
+          "EXTRACT_MESH_GS.$": "$.envVars.EXTRACT_MESH_GS",
           "DDB_TABLE_NAME.$": "$.stateMachine.ddbTableName",
           "AWS_DEFAULT_REGION.$": "$.stateMachine.awsRegion"
         }

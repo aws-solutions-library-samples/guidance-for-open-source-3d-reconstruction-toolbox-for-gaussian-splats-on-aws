@@ -109,7 +109,9 @@ file_contents = {
         "model": "splatfacto",
         "3dIsp": "none",
         "preserveSceneScale": "false",
-        "enableDepthLoss": "false"
+        "enableDepthLoss": "false",
+        "enableAbsGrad": "false",
+        "enhanceDepth": "false"
     },
     "postProcessing": {
         "cropOutputBounds": "false",

@@ -47,6 +47,7 @@
     "COLLISION_SEED_POS": "0,0,0",
     "GENERATE_LOD": "false",
     "GENERATE_MESH": "true",
+    "EXTRACT_MESH_GS": "false",
     "PRESERVE_SCENE_SCALE": "false",
     "ENABLE_FL_HEURISTIC": "false",
     "FL_HEURISTIC_VALUE": "1.2",
@@ -59,5 +60,7 @@
     "AUTOGROUP_TARGET_NAME": "",
     "AUTO_MAPPER": "True",
     "AUTO_MATCHER": "True",
-    "NUM_GAUSSIANS": "1000000"
+    "NUM_GAUSSIANS": "1000000",
+    "ENABLE_ABSGRAD": "false",
+    "ENHANCE_DEPTH": "false"
 }

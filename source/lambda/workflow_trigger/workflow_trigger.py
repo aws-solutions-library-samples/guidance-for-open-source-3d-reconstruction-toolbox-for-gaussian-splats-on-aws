@@ -92,7 +92,9 @@ def validate_config(config: dict):
             "maxSteps": None,
             "model": None,
             "3dIsp": None,
-            "numGaussians": None
+            "numGaussians": None,
+            "enableAbsGrad": None,
+            "enhanceDepth": None
         },
         "postProcessing": {
             "cropOutputBounds": None,
@@ -109,7 +111,8 @@ def validate_config(config: dict):
             "collisionSceneType": None,
             "collisionSeedPos": None,
             "generateLod": None,
-            "generateMesh": None
+            "generateMesh": None,
+            "extractMeshGs": None
         },
         "sphericalCamera": {
             "enable": None,
@@ -273,12 +276,15 @@ def lambda_handler(event, context):
                     "objectRemovalObjects": str(json_content["segmentation"]["objectRemoval"]["objects"]),
                     "preserveSceneScale": str(json_content["training"].get("preserveSceneScale", "false")),
                     "enableDepthLoss": str(json_content["training"].get("enableDepthLoss", "false")),
+                    "enableAbsGrad": str(json_content["training"].get("enableAbsGrad", "false")),
+                    "enhanceDepth": str(json_content["training"].get("enhanceDepth", "false")),
                     "enableVideoExport": str(json_content["postProcessing"].get("enableVideoExport", "true")),
                     "generateCollision": str(json_content["postProcessing"].get("generateCollision", "false")),
                     "collisionSceneType": str(json_content["postProcessing"].get("collisionSceneType", "outdoor")),
                     "collisionSeedPos": str(json_content["postProcessing"].get("collisionSeedPos", "0,0,0")),
                     "generateLod": str(json_content["postProcessing"].get("generateLod", "false")),
-                    "generateMesh": str(json_content["postProcessing"].get("generateMesh", "true"))
+                    "generateMesh": str(json_content["postProcessing"].get("generateMesh", "true")),
+                    "extractMeshGs": str(json_content["postProcessing"].get("extractMeshGs", "false"))
                 }
 
                 try:
@@ -349,6 +355,8 @@ def lambda_handler(event, context):
                     "MAX_STEPS": str(json_content["training"]["maxSteps"]),
                     "NUM_GAUSSIANS": str(json_content["training"].get("numGaussians", "1000000")),
                     "THREED_ISP": str(json_content["training"].get("3dIsp", "none")),
+                    "ENABLE_ABSGRAD": str(json_content["training"].get("enableAbsGrad", "false")),
+                    "ENHANCE_DEPTH": str(json_content["training"].get("enhanceDepth", "false")),
                     "DEPTH_SCALE": str(json_content["training"].get("depthScale", "1000.0")),
                     "CROP_OUTPUT_BOUNDS": str(json_content["postProcessing"]["cropOutputBounds"]).lower(),
                     "CROP_MODE": str(json_content["postProcessing"]["cropMode"]),
@@ -375,6 +383,7 @@ def lambda_handler(event, context):
                     "COLLISION_SEED_POS": str(json_content["postProcessing"].get("collisionSeedPos", "0,0,0")),
                     "GENERATE_LOD": str(json_content["postProcessing"].get("generateLod", "false")),
                     "GENERATE_MESH": str(json_content["postProcessing"].get("generateMesh", "true")),
+                    "EXTRACT_MESH_GS": str(json_content["postProcessing"].get("extractMeshGs", "false")),
                     "DDB_TABLE_NAME": os.environ.get("DDB_TABLE_NAME", ""),
                     "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-east-1"))
                 },

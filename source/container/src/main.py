@@ -77,7 +77,10 @@ ERROR CODES
 800, "Issue generating or uploading collision voxel data"
 801, "Issue generating or uploading LOD SOG bundle"
 802, "Issue creating mesh extraction component"
+804, "Issue creating GS mesh extraction component"
+805, "Issue uploading GS mesh GLB to S3"
 803, "Issue uploading mesh GLB to S3"
+804, "Issue creating depth enhancement component"
 """
 
 import re
@@ -164,6 +167,9 @@ if __name__ == "__main__":
         GENERATE_COLLISION = config.get('GENERATE_COLLISION', 'false').lower() == 'true'
         GENERATE_LOD = config.get('GENERATE_LOD', 'false').lower() == 'true'
         GENERATE_MESH = config.get('GENERATE_MESH', 'true').lower() == 'true'
+        EXTRACT_MESH_GS = config.get('EXTRACT_MESH_GS', 'false').lower() == 'true'
+        ENABLE_ABSGRAD = config.get('ENABLE_ABSGRAD', 'false').lower() == 'true'
+        ENHANCE_DEPTH = config.get('ENHANCE_DEPTH', 'false').lower() == 'true'
 
         # Collision voxelization requires metric world scale to produce accurate collision geometry.
         # Force PRESERVE_SCENE_SCALE on whenever GENERATE_COLLISION is enabled.
@@ -467,6 +473,11 @@ if __name__ == "__main__":
                  os.path.exists(os.path.join(config['DATASET_PATH'], 'images')):
                 colmap_zip_found = True
                 log.info(f"Detected COLMAP reconstruction data already in dataset directory")
+    elif config['RUN_RECON'] == 'true' and config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true' and \
+            config['FILENAME'].endswith('.zip'):
+        # Zip contains images + COLMAP pose priors — extract and normalize before reconstruction
+        colmap_zip_found = True
+        log.info(f"Detected pose-prior zip for reconstruction: {config['FILENAME']}")
     elif config['RUN_RECON'] == 'false' or config['RUN_TRAIN'] == 'false':
         # Look for model.tar.gz in dataset directory for resume training or export-only
         for file in os.listdir(config['DATASET_PATH']):
@@ -502,6 +513,19 @@ if __name__ == "__main__":
                 log.info(f"Single subdir detected, extract_source={extract_source}, contents={os.listdir(extract_source)[:10]}")
             else:
                 extract_source = temp_path
+
+            # Auto-detect and normalize vendor-specific dataset layouts
+            import sys as _sys
+            _norm_dir = os.path.join(current_dir_path, 'pre_processing')
+            if _norm_dir not in _sys.path:
+                _sys.path.insert(0, _norm_dir)
+            from normalize_dataset import normalize as _normalize_dataset
+            _norm_result = _normalize_dataset(extract_source)
+            if _norm_result.modified:
+                log.info(f"Dataset normalized: pattern='{_norm_result.detected_pattern}'")
+                for _k, _v in _norm_result.config_overrides.items():
+                    config[_k] = _v
+                    log.info(f"  Config override applied: {_k}={_v}")
             
             # Verify required COLMAP structure exists
             has_images = os.path.exists(os.path.join(extract_source, 'images'))
@@ -594,6 +618,46 @@ if __name__ == "__main__":
                 # Clean up temp directory
                 if os.path.exists(temp_path):
                     shutil.rmtree(temp_path)
+
+                # Validate and rescale transforms.json intrinsics to match actual image dimensions.
+                # Some pipelines (e.g. SplatKing) write camera intrinsics at capture resolution
+                # but store images at a different resolution, causing nerfstudio to crash.
+                _transforms_path = os.path.join(config['DATASET_PATH'], 'transforms.json')
+                if os.path.isfile(_transforms_path):
+                    _img_files = [f for f in os.listdir(image_path)
+                                  if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                    if _img_files:
+                        with Image.open(os.path.join(image_path, _img_files[0])) as _img:
+                            _actual_w, _actual_h = _img.size
+                        with open(_transforms_path, 'r') as _f:
+                            _tdata = _json.load(_f)
+                        _cam_w = _tdata.get('w', _actual_w)
+                        _cam_h = _tdata.get('h', _actual_h)
+                        if _cam_w != _actual_w or _cam_h != _actual_h:
+                            _sx = _actual_w / _cam_w
+                            _sy = _actual_h / _cam_h
+                            log.info(f"Rescaling transforms.json intrinsics: "
+                                     f"{_cam_w}x{_cam_h} -> {_actual_w}x{_actual_h} "
+                                     f"(scale {_sx:.4f}, {_sy:.4f})")
+                            _tdata['w'] = _actual_w
+                            _tdata['h'] = _actual_h
+                            for _k in ('fl_x', 'cx'):
+                                if _k in _tdata:
+                                    _tdata[_k] = _tdata[_k] * (_sx if _k != 'cy' else _sy)
+                            if 'fl_y' in _tdata:
+                                _tdata['fl_y'] = _tdata['fl_y'] * _sy
+                            if 'cy' in _tdata:
+                                _tdata['cy'] = _tdata['cy'] * _sy
+                            if 'cx' in _tdata:
+                                _tdata['cx'] = _tdata['cx'] * _sx
+                            for _frame in _tdata.get('frames', []):
+                                for _k in ('w', 'h', 'fl_x', 'fl_y', 'cx', 'cy'):
+                                    if _k in _frame:
+                                        _s = _sx if _k in ('w', 'fl_x', 'cx') else _sy
+                                        _frame[_k] = int(_frame[_k] * _s) if _k in ('w', 'h') else _frame[_k] * _s
+                            with open(_transforms_path, 'w') as _f:
+                                _json.dump(_tdata, _f, indent=4)
+                            log.info(f"Rescaled transforms.json intrinsics to match actual image size")
             else:
                 log.warning(f"Zip does not contain valid COLMAP reconstruction structure")
                 colmap_zip_found = False
@@ -1366,6 +1430,31 @@ if __name__ == "__main__":
         pipeline.report_error(741, error_message)
 
     ##################################
+    # PRE_PROCESSING COMPONENT:
+    # Enhance sparse LiDAR depth images using PromptDA
+    ##################################
+    try:
+        if ENHANCE_DEPTH:
+            # Depth dir is resolved at runtime in the pipeline execution loop
+            # because depth files may be extracted from a zip after this build phase.
+            pipeline.create_component(
+                name="Enhance-Depth",
+                comp_type=ComponentType.PRE_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="pre_processing/enhance_depth.py",
+                args=[
+                    "--depth-dir", os.path.join(config['DATASET_PATH'], "depth"),
+                    "--images-dir", os.path.join(config['DATASET_PATH'], "images"),
+                    "--masks-dir", os.path.join(config['DATASET_PATH'], "masks"),
+                ],
+                cwd=current_dir_path,
+                requires_gpu=True
+            )
+    except Exception as e:
+        error_message = f"Issue creating depth enhancement component: {e}"
+        pipeline.report_error(804, error_message)
+
+    ##################################
     # RECONSTRUCTION COMPONENT:
     # Images to Point Cloud
     ##################################
@@ -1398,7 +1487,8 @@ if __name__ == "__main__":
                     "--image_path", image_path,
                     "--ImageReader.single_camera", "1",
                     "--FeatureExtraction.max_image_size", str(sift_max_image_size),
-                    "--SiftExtraction.max_num_features", str(sift_max_num_features)
+                    "--SiftExtraction.max_num_features", str(sift_max_num_features),
+                    "--FeatureExtraction.use_gpu", "1"
                 ]
                 if ENABLE_MULTI_GPU == "true" or \
                     config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
@@ -1464,7 +1554,8 @@ if __name__ == "__main__":
                         "--SequentialMatching.loop_detection", "1",
                         "--SequentialMatching.loop_detection_period", config['MAX_NUM_IMAGES'],
                         "--SequentialMatching.loop_detection_num_images", config['MAX_NUM_IMAGES'],
-                        "--SequentialMatching.vocab_tree_path", colmap_vocab_path
+                        "--SequentialMatching.vocab_tree_path", colmap_vocab_path,
+                        "--FeatureMatching.use_gpu", "1"
                     ])
                 elif config['MATCHING_METHOD'] == "spatial":
                     args = [
@@ -1551,6 +1642,10 @@ if __name__ == "__main__":
                             "--Mapper.multiple_models", "0"
                         ]
                         if config.get('PRESERVE_SCENE_SCALE', 'false') == 'true':
+                            pass  # Scale is preserved via auto_scale_poses=False in nerfstudio dataparser
+                        if config.get('ENABLE_FL_METRIC', 'false') == 'true':
+                            # User provided a known metric focal length — lock it in during BA
+                            # so the reconstruction stays in true metric scale
                             args.extend([
                                 "--Mapper.ba_refine_focal_length", "0",
                                 "--Mapper.ba_refine_principal_point", "0",
@@ -1563,7 +1658,7 @@ if __name__ == "__main__":
                         if int(pipeline.config.num_gpus) > 0:
                             args.extend(["--Mapper.ba_use_gpu", "1"])
                             if len([f for f in os.listdir(image_path)
-                                    if f.lower().endswith(('.png', '.jpg', '.jpeg'))]) >= 500:
+                                    if f.lower().endswith(('.png', '.jpg', '.jpeg'))]) >= 250:
                                 args.extend(["--Mapper.ba_global_backend", "CASPAR"])
                         pipeline.create_component(
                             name="ColmapSfM-Mapper",
@@ -1850,6 +1945,8 @@ if __name__ == "__main__":
                     args.extend(["--post_processing", "ppisp", "--batch_size", "1"])
                 elif isp_mode == "bilagrid":
                     args.extend(["--post_processing", "bilateral_grid"])
+                if ENABLE_ABSGRAD:
+                    args.extend(["--strategy.absgrad", "True"])
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -2043,6 +2140,8 @@ if __name__ == "__main__":
                         elif isp_mode == "ppisp":
                             log.info("PPISP not supported with Splatfacto (nerfstudio), using Bilateral-Grid instead")
                             args.extend(["--pipeline.model.use-bilateral-grid", "True"])
+                        if ENABLE_ABSGRAD:
+                            args.extend(["--pipeline.model.use-absgrad", "True"])
                 elif config['MODEL'] == "splatfacto-w-light":
                     if config['RUN_RECON'] == "false": # Resume training
                         if os.path.exists(model_ckpt_path):
@@ -2152,6 +2251,8 @@ if __name__ == "__main__":
                     log.info("PPISP not supported with multi-GPU gsplat (requires single GPU), skipping")
                 elif isp_mode == "bilagrid":
                     log.info("Bilateral grid not supported with multi-GPU gsplat (requires single GPU), skipping")
+                if ENABLE_ABSGRAD:
+                    args.extend(["--strategy.absgrad", "True"])
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -3293,6 +3394,55 @@ if __name__ == "__main__":
 
     ##################################
     # POST-PROCESS COMPONENT:
+    # Extract mesh from any Gaussian splat using mesh_extraction module
+    ##################################
+    try:
+        if EXTRACT_MESH_GS and config['MODEL'] not in ("nerfacto", "3dgrt", "3dgut"):
+            gs_mesh_glb_path = os.path.join(output_path, "gs_mesh.glb")
+            transforms_path = os.path.join(config['DATASET_PATH'], "transforms.json")
+            args = [
+                "--ply", ply_path,
+                "--transforms", transforms_path,
+                "--output-dir", output_path,
+                "--name", "gs_mesh",
+            ]
+            pipeline.create_component(
+                name="Extract-Mesh-GS",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="post_processing/extract_mesh_gs.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=True
+            )
+    except Exception as e:
+        error_message = f"Issue creating GS mesh extraction component: {e}"
+        pipeline.report_error(804, error_message)
+
+    ##################################
+    # POST-PROCESS COMPONENT:
+    # Export GS mesh GLB to S3
+    ##################################
+    try:
+        if EXTRACT_MESH_GS and config['MODEL'] not in ("nerfacto", "3dgrt", "3dgut"):
+            gs_mesh_glb_path = os.path.join(output_path, "gs_mesh.glb")
+            base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()
+            pipeline.create_component(
+                name="S3-Export-Mesh-GS",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.EXECUTABLE,
+                command="aws",
+                args=["s3", "cp", gs_mesh_glb_path,
+                      f"{config['S3_OUTPUT']}/{config['UUID']}/{base_name}.gs_mesh.glb"],
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue uploading GS mesh GLB to S3: {e}"
+        pipeline.report_error(805, error_message)
+
+    ##################################
+    # POST-PROCESS COMPONENT:
     # Create and upload model.tar.gz archive to S3
     ##################################
     try:
@@ -3642,7 +3792,7 @@ if __name__ == "__main__":
                                     mapper_args.extend(['--log_level', '1'])
                                 if int(pipeline.config.num_gpus) > 0:
                                     mapper_args.extend(['--Mapper.ba_use_gpu', '1'])
-                                    if num_imgs >= 500:
+                                    if num_imgs >= 250:
                                         mapper_args.extend(['--Mapper.ba_global_backend', 'CASPAR'])
                                 new_components.append(Component(
                                     name='ColmapSfM-Mapper',
@@ -4424,6 +4574,21 @@ if __name__ == "__main__":
                         pipeline.run_component(i)
                     except RuntimeError as _lod_err:
                         log.warning(f"Generate-LOD failed (non-fatal, skipping): {_lod_err}")
+                case "Enhance-Depth":
+                    # Resolve depth dir at runtime — files may have been extracted from zip
+                    _rt_depth_dir = os.path.join(config['DATASET_PATH'], "depth")
+                    if not os.path.isdir(_rt_depth_dir):
+                        _rt_depth_dir = os.path.join(config['DATASET_PATH'], "depth_images")
+                    if os.path.isdir(_rt_depth_dir):
+                        # Patch the --depth-dir arg with the resolved path
+                        try:
+                            _dd_idx = component.args.index("--depth-dir")
+                            component.args[_dd_idx + 1] = _rt_depth_dir
+                        except ValueError:
+                            pass
+                        pipeline.run_component(i)
+                    else:
+                        log.warning("ENHANCE_DEPTH=true but no depth/ or depth_images/ directory found, skipping")
                 case _: # Default case, run Component
                     pipeline.run_component(i)
                     # After autoscale runs, normalize image dimensions

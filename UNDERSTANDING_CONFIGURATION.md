@@ -67,7 +67,8 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             "model": "splatfacto",
             "preserveSceneScale": false,
             "3dIsp": "bilagrid",
-            "enableDepthLoss": false
+            "enableDepthLoss": false,
+            "enhanceDepth": false
         },
         "postProcessing": {
             "cropOutputBounds": true,
@@ -77,6 +78,8 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             "enableSog": true,
             "enableUsdz": false,
             "enableVideoExport": true,
+            "generateMesh": true,
+            "extractMeshGs": false,
             "plyCoords": "rhyu",
             "spzCoords": "rhyu",
             "sogCoords": "rhyu",
@@ -307,6 +310,11 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
     - **Preserve scene scale:** (boolean), whether to preserve the reconstruction scale during gaussian splat training
     - **3D image signal processing:** (string), technique to use for scene signal processing. Current options are bilagrid (bilateral grid), ppisp (physically plausible image signal processing)
     - **Enable depth loss:** (boolean), whether to enable sparse depth supervision during training. The primary use case is when a LiDAR-derived point cloud is provided as pose prior input (via `usePosePriorColmapModelFiles`), giving the trainer accurate metric depth to anchor the Gaussians. It also works with standard colmap point cloud projections as a weaker depth signal. When enabled, overrides the model choice and uses gsplat's `simple_trainer` with depth loss. Requires a colmap reconstruction. Improves geometric accuracy especially for scenes with strong depth cues. Video export and nerfstudio metrics are not available when this is enabled.
+    - **Enhance depth:** (boolean), whether to enhance sparse LiDAR depth maps using [PromptDA](https://github.com/DepthAnything/PromptDA) before training. PromptDA uses a vision transformer (DINOv2 ViT-L) to densify sparse metric depth by fusing the RGB image with the sparse depth as a prompt, producing dense metric-aligned depth maps. This is particularly useful when using LiDAR pose priors (`usePosePriorColmapModelFiles`) where the raw depth maps are low-resolution (e.g. 256×192 from ARKit). The enhanced depth maps are written back to the `depths/` directory before training begins.
+        - Valid values: `"true"`, `"false"`
+        - Default: `"false"`
+        - Requires: depth maps present in `depths/` or `depth_images/` directory
+        - Note: Downloads the `depth-anything/promptda_vitl` model weights (~1.3GB) from HuggingFace on first use if not cached in `models.tar.gz`
 
 - **Post Processing:**
     - **Crop output bounds:** (boolean), whether to crop gaussians that are outliers.
@@ -334,6 +342,9 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
     - **Generate mesh:** (boolean), whether to extract a surface mesh from a trained `dn-splatter` or `ags-mesh` model using IsoOctree TSDF fusion (`isooctree_dn.py`). Outputs a `mesh.ply` and `mesh.glb` that are uploaded to S3 alongside the splat. Only applies when `model` is `dn-splatter`, `dn-splatter-big`, or `ags-mesh`.
         - Valid values: `"true"`, `"false"`
         - Default: `"true"`
+    - **Extract mesh from Gaussian splat:** (boolean), whether to extract a high-quality textured mesh from any trained Gaussian splat using TSDF fusion, surface regularization, xatlas UV unwrapping, and camera-projection texture baking. Outputs `gs_mesh.glb` (and `gs_mesh.obj` + texture PNG) uploaded to S3. Works with all splatfacto and gsplat models. Not supported for `nerfacto`, `3dgrt`, or `3dgut`.
+        - Valid values: `"true"`, `"false"`
+        - Default: `"false"`
     - **Ply Coordinates:** (string), the coordinate system to transform the .ply to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
     - **Spz Coordinates:** (string), the coordinate system to transform the .spz to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
     - **Sog Coordinates:** (string), the coordinate system to transform the .sog to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)

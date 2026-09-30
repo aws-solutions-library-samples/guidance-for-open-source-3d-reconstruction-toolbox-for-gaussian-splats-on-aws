@@ -54,7 +54,7 @@ def generate_lod(input_ply: str, output_dir: str) -> int:
         lod_meta_path = os.path.join(output_dir, "lod-meta.json")
         cmd = ["splat-transform"]
         for path, level in lod_files:
-            cmd += [path, f"--lod={level}"]
+            cmd += [path, "--tag-lod", str(level)]
         cmd += ["-w", lod_meta_path]
         print(f"Combining LOD levels: {' '.join(cmd)}")
         result = subprocess.run(cmd)

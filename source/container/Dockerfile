@@ -67,6 +67,10 @@ ENV CUDA_MODULE_LOADING=LAZY
 # container at runtime.
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility
 
+# Set SSL cert bundle so libcurl (used by COLMAP/pycolmap) can verify HTTPS connections
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
 # Ensures that Python outputs everything that's printed directly to the terminal (so logs can be seen in real-time)
 ENV PYTHONUNBUFFERED=TRUE
 
@@ -401,10 +405,20 @@ RUN pip install --no-cache-dir \
     'viser==1.0.0' \
     'wandb>=0.13.3' \
     'nerfacc==0.5.2' \
-    xatlas
+    xatlas \
+    pymeshfix
 
 # Install sharp-frame-extractor separately after scipy is available
 RUN pip install --no-cache-dir sharp-frame-extractor
+
+# Install PromptDA for depth enhancement (ENHANCE_DEPTH feature)
+ENV PROMPTDA_HASH="9161547ca7151e14fcc8f490ad3cc02fa9437483"
+RUN git clone https://github.com/DepthAnything/PromptDA.git ${CODE_PATH}/PromptDA \
+    && cd ${CODE_PATH}/PromptDA \
+    && git reset --hard ${PROMPTDA_HASH} \
+    && pip install --no-deps -e . \
+    && echo "${CODE_PATH}/PromptDA" > /usr/local/lib/python3.12/dist-packages/promptda.pth
+ENV PYTHONPATH=/usr/local/lib/python3.12/dist-packages:${CODE_PATH}/PromptDA:${CODE_PATH}
 
 # Install Background Removal and SAM2 in single layer
 RUN git clone https://github.com/nadermx/backgroundremover.git \
@@ -454,6 +468,7 @@ RUN git clone --recursive https://github.com/nv-tlabs/3dgrut.git \
     && git reset --hard ${THREEDGRUT_HASH} \
     && sed -i 's/checkpoint = torch.load(checkpoint_path)/checkpoint = torch.load(checkpoint_path, weights_only=False)/' threedgrut/render.py \
     && sed -i 's/checkpoint = torch.load(conf.resume)/checkpoint = torch.load(conf.resume, weights_only=False)/' threedgrut/trainer.py \
+    && sed -i 's/exporter = NuRecExporter()/exporter = NuRecExporter(export_cameras=False)/' threedgrut/export/scripts/ply_to_usd.py \
     && sed -i '/fused-ssim/d' requirements_extra.txt \
     && sed -i 's/^xformers/#xformers/' requirements_extra.txt \
     && python -m pip install --no-build-isolation --no-deps -r requirements_extra.txt \
@@ -615,6 +630,8 @@ COPY ./src/pipeline/pre_processing/video/simple_video_to_images.py \
 COPY ./src/pipeline/pre_processing/autoscale_dataset.py \
      ./src/pipeline/pre_processing/autogroup_images.py \
      ./src/pipeline/pre_processing/auto_matcher.py \
+     ./src/pipeline/pre_processing/enhance_depth.py \
+     ./src/pipeline/pre_processing/normalize_dataset.py \
      ${CODE_PATH}/pre_processing/
 COPY ./src/pipeline/post_processing/rotate_splat.py \
      ./src/pipeline/post_processing/mirror_splat.py \
@@ -633,6 +650,17 @@ COPY ./src/pipeline/post_processing/rotate_splat.py \
      ./src/pipeline/post_processing/generate_collision.py \
      ./src/pipeline/post_processing/generate_lod.py \
      ./src/pipeline/post_processing/extract_mesh.py \
+     ./src/pipeline/post_processing/extract_mesh_gs.py \
+     ./src/pipeline/post_processing/mesh_extraction_cameras.py \
+     ./src/pipeline/post_processing/mesh_extraction_config.py \
+     ./src/pipeline/post_processing/mesh_extraction_density.py \
+     ./src/pipeline/post_processing/mesh_extraction_diagnose.py \
+     ./src/pipeline/post_processing/mesh_extraction_extract.py \
+     ./src/pipeline/post_processing/mesh_extraction_gaussian_model.py \
+     ./src/pipeline/post_processing/mesh_extraction_losses.py \
+     ./src/pipeline/post_processing/mesh_extraction_refine.py \
+     ./src/pipeline/post_processing/mesh_extraction_regularize.py \
+     ./src/pipeline/post_processing/mesh_extraction_utils.py \
      ${CODE_PATH}/post_processing/
 RUN chmod +x ${CODE_PATH}/entrypoint.sh ${CODE_PATH}/training/run_gsplat_trainer.sh
 

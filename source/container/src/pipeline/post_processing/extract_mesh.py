@@ -53,7 +53,7 @@ def run_gs_mesh_tsdf(config_path, output_dir, voxel_size=None, sdf_trunc=None):
     if voxel_size is not None:
         cmd.extend(["--voxel-size", str(voxel_size)])
     if sdf_trunc is not None:
-        cmd.extend(["--sdf-trunc", str(sdf_trunc)])
+        cmd.extend(["--sdf-truc", str(sdf_trunc)])
     print(f"Running gs-mesh o3dtsdf: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=False)
     return result.returncode

@@ -84,6 +84,7 @@ class SharedState:
         self.collision_seed_pos = "0,0,0"
         self.generate_lod = "false"
         self.generate_mesh = "true"
+        self.extract_mesh_gs = "false"
         self.ply_coords = "rhyu"
         self.spz_coords = "rhyu"
         self.sog_coords = "rhyu"
@@ -104,6 +105,8 @@ class SharedState:
         self.video_stop_time = None
         self.preserve_scene_scale = "false"
         self.isp_3d = "none"
+        self.enable_absgrad = "false"
+        self.enhance_depth = "false"
         self.enable_fl_heuristic = "false"
         self.fl_heuristic_value = 1.2
         self.enable_fl_metric = "false"
@@ -316,7 +319,8 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
                 filter_blurry, max_images, sfm_enable, enhanced_feature, matching_method, use_colmap_model,
                 use_transform_json, training_enable, max_steps, num_gaussians, spherical_enable, remove_bg, remove_objects,
                 object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam, log_verbosity, mask_threshold, 
-                crop_output_bounds, crop_mode, clean_splat, enable_spz, enable_sog, video_start_time, video_stop_time, preserve_scene_scale):
+                crop_output_bounds, crop_mode, clean_splat, enable_spz, enable_sog, video_start_time, video_stop_time,
+                preserve_scene_scale, enable_absgrad, enhance_depth):
     unique_uuid = uuid.uuid4()
     original_filename = os.path.basename(video_file) if video_file else "No file selected"
     
@@ -376,7 +380,9 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
             "numGaussians": str(int(num_gaussians)),
             "model": training_model,
             "preserveSceneScale": preserve_scene_scale == "true",
-            "3dIsp": shared_state.isp_3d
+            "3dIsp": shared_state.isp_3d,
+            "enableAbsGrad": enable_absgrad == "true",
+            "enhanceDepth": enhance_depth == "true"
         },
         "postProcessing": {
             "cropOutputBounds": crop_output_bounds == "true" if isinstance(crop_output_bounds, str) else crop_output_bounds,
@@ -393,7 +399,8 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
             "collisionSceneType": shared_state.collision_scene_type,
             "collisionSeedPos": shared_state.collision_seed_pos,
             "generateLod": shared_state.generate_lod == "true",
-            "generateMesh": shared_state.generate_mesh == "true"
+            "generateMesh": shared_state.generate_mesh == "true",
+            "extractMeshGs": shared_state.extract_mesh_gs == "true"
         },
         "sphericalCamera": {"enable": spherical_enable == "true",
             "cubeFacesToRemove": cube_faces_remove
@@ -527,7 +534,9 @@ def create_upload_aws_tab():
                                 "numGaussians": str(int(shared_state.num_gaussians)),
                                 "model": shared_state.model,
                                 "preserveSceneScale": shared_state.preserve_scene_scale == "true",
-                                "3dIsp": shared_state.isp_3d
+                                "3dIsp": shared_state.isp_3d,
+                                "enableAbsGrad": shared_state.enable_absgrad == "true",
+                                "enhanceDepth": shared_state.enhance_depth == "true"
                             },
                             "postProcessing": {
                                 "cropOutputBounds": shared_state.crop_output_bounds == "true",
@@ -544,7 +553,8 @@ def create_upload_aws_tab():
                                 "collisionSceneType": shared_state.collision_scene_type,
                                 "collisionSeedPos": shared_state.collision_seed_pos,
                                 "generateLod": shared_state.generate_lod == "true",
-                                "generateMesh": shared_state.generate_mesh == "true"
+                                "generateMesh": shared_state.generate_mesh == "true",
+                                "extractMeshGs": shared_state.extract_mesh_gs == "true"
                             },
                             "sphericalCamera": {
                                 "enable": shared_state.spherical_enable == "true",
@@ -931,6 +941,18 @@ def create_advanced_settings_tab():
                     value="none",
                     info="Image signal processing for splatfacto, gsplat multi-GPU, and 3DGRUT. Not applicable to nerfacto."
                 )
+                enable_absgrad = gr.Radio(
+                    label="Enable AbsGrad Densification",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Use absolute gradient for Gaussian densification. Improves quality on fine details. Applies to splatfacto and gsplat models."
+                )
+                enhance_depth = gr.Radio(
+                    label="Enhance Depth (PromptDA)",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Use PromptDA to densify sparse LiDAR depth images before training. Requires a depth/ or depth_images/ folder in the dataset."
+                )
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### Post Processing")
@@ -997,6 +1019,12 @@ def create_advanced_settings_tab():
                     value="true",
                     info="Extract a mesh from the trained model using IsoOctree TSDF fusion and export as GLB."
                 )
+                extract_mesh_gs = gr.Radio(
+                    label="Extract Mesh from Gaussian Splat",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Extract a high-quality mesh from any trained Gaussian splat using surface regularization and Poisson reconstruction. Outputs gs_mesh.glb. Not supported for nerfacto, 3dgrt, or 3dgut models."
+                )
                 ply_coords = gr.Dropdown(
                     label="PLY Coordinate System",
                     choices=[
@@ -1046,12 +1074,13 @@ def create_advanced_settings_tab():
                      shared_state.enhanced_feature, shared_state.matching_method,
                      shared_state.use_colmap_model, shared_state.use_transform_json,
                      shared_state.training_enable, shared_state.max_steps, shared_state.num_gaussians, shared_state.enable_spz, shared_state.enable_sog, shared_state.enable_usdz,
-                     shared_state.generate_collision, shared_state.collision_scene_type, shared_state.collision_seed_pos, shared_state.generate_lod, shared_state.generate_mesh,
+                     shared_state.generate_collision, shared_state.collision_scene_type, shared_state.collision_seed_pos, shared_state.generate_lod, shared_state.generate_mesh, shared_state.extract_mesh_gs,
                      shared_state.crop_output_bounds, shared_state.crop_mode, shared_state.clean_splat,
                      shared_state.spherical_enable,
                      shared_state.remove_bg, shared_state.remove_objects,
                      shared_state.object_removal_action, shared_state.objects_to_remove, shared_state.source_coordinate, shared_state.pose_world_to_cam,
                      shared_state.log_verbosity, shared_state.mask_threshold, shared_state.ply_coords, shared_state.spz_coords, shared_state.sog_coords, shared_state.usdz_coords, shared_state.preserve_scene_scale, shared_state.isp_3d,
+                     shared_state.enable_absgrad, shared_state.enhance_depth,
                      shared_state.enable_fl_heuristic, shared_state.fl_heuristic_value,
                      shared_state.enable_fl_metric, shared_state.fl_metric_value,
                      shared_state.auto_matcher, shared_state.auto_mapper,
@@ -1065,11 +1094,12 @@ def create_advanced_settings_tab():
                     max_images, video_start_time, video_stop_time, sfm_enable, enhanced_feature, matching_method,
                     use_colmap_model, use_transform_json, training_enable,
                     max_steps, num_gaussians, enable_spz, enable_sog, enable_usdz,
-                    generate_collision, collision_scene_type, collision_seed_pos, generate_lod, generate_mesh,
+                    generate_collision, collision_scene_type, collision_seed_pos, generate_lod, generate_mesh, extract_mesh_gs,
                     crop_output_bounds, crop_mode, clean_splat,
                     spherical_enable, remove_bg, remove_objects,
                     object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam,
                     log_verbosity, mask_threshold, ply_coords, spz_coords, sog_coords, usdz_coords, preserve_scene_scale, isp_3d,
+                    enable_absgrad, enhance_depth,
                     enable_fl_heuristic, fl_heuristic_value,
                     enable_fl_metric, fl_metric_value,
                     auto_matcher, auto_mapper,
@@ -1106,6 +1136,7 @@ def create_advanced_settings_tab():
                         'collision_seed_pos': settings[21],
                         'generate_lod': settings[22],
                         'generate_mesh': settings[23],
+                        'extract_mesh_gs': settings[24],
                         'crop_output_bounds': settings[24],
                         'crop_mode': settings[25],
                         'clean_splat': settings[26],
@@ -1124,16 +1155,18 @@ def create_advanced_settings_tab():
                         'usdz_coords': settings[39],
                         'preserve_scene_scale': settings[40],
                         'isp_3d': settings[41],
-                        'enable_fl_heuristic': settings[42],
-                        'fl_heuristic_value': settings[43],
-                        'enable_fl_metric': settings[44],
-                        'fl_metric_value': settings[45],
-                        'auto_matcher': settings[46],
-                        'auto_mapper': settings[47],
-                        'autoscale_dataset': settings[48],
-                        'autoscale_dataset_mode': settings[49],
-                        'autogroup_images': settings[50],
-                        'autogroup_target_name': settings[51]
+                        'enable_absgrad': settings[42],
+                        'enhance_depth': settings[43],
+                        'enable_fl_heuristic': settings[44],
+                        'fl_heuristic_value': settings[45],
+                        'enable_fl_metric': settings[46],
+                        'fl_metric_value': settings[47],
+                        'auto_matcher': settings[48],
+                        'auto_mapper': settings[49],
+                        'autoscale_dataset': settings[50],
+                        'autoscale_dataset_mode': settings[51],
+                        'autogroup_images': settings[52],
+                        'autogroup_target_name': settings[53]
                     }
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -1190,6 +1223,7 @@ def create_advanced_settings_tab():
                         shared_state.collision_seed_pos = config_data.get('collision_seed_pos', '0,0,0')
                         shared_state.generate_lod = config_data.get('generate_lod', 'false')
                         shared_state.generate_mesh = config_data.get('generate_mesh', 'true')
+                        shared_state.extract_mesh_gs = config_data.get('extract_mesh_gs', 'false')
                         shared_state.crop_output_bounds = config_data.get('crop_output_bounds', 'false')
                         shared_state.crop_mode = config_data.get('crop_mode', 'environment')
                         shared_state.clean_splat = config_data.get('clean_splat', 'false')
@@ -1209,6 +1243,8 @@ def create_advanced_settings_tab():
                         shared_state.usdz_coords = config_data.get('usdz_coords', 'rhyu')
                         shared_state.preserve_scene_scale = config_data.get('preserve_scene_scale', 'false')
                         shared_state.isp_3d = config_data.get('isp_3d', 'none')
+                        shared_state.enable_absgrad = config_data.get('enable_absgrad', 'false')
+                        shared_state.enhance_depth = config_data.get('enhance_depth', 'false')
                         shared_state.enable_fl_heuristic = config_data.get('enable_fl_heuristic', 'false')
                         shared_state.fl_heuristic_value = config_data.get('fl_heuristic_value', 1.1)
                         shared_state.enable_fl_metric = config_data.get('enable_fl_metric', 'false')
@@ -1246,6 +1282,7 @@ def create_advanced_settings_tab():
                             config_data.get('collision_seed_pos', '0,0,0'),
                             config_data.get('generate_lod', 'false'),
                             config_data.get('generate_mesh', 'true'),
+                            config_data.get('extract_mesh_gs', 'false'),
                             config_data.get('crop_output_bounds', 'false'),
                             config_data.get('crop_mode', 'environment'),
                             config_data.get('clean_splat', 'false'),
@@ -1264,6 +1301,8 @@ def create_advanced_settings_tab():
                             config_data.get('usdz_coords', 'rhyu'),
                             config_data.get('preserve_scene_scale', 'false'),
                             config_data.get('isp_3d', 'none'),
+                            config_data.get('enable_absgrad', 'false'),
+                            config_data.get('enhance_depth', 'false'),
                             config_data.get('enable_fl_heuristic', 'false'),
                             config_data.get('fl_heuristic_value', 1.2),
                             config_data.get('enable_fl_metric', 'false'),
@@ -2592,7 +2631,9 @@ def create_debug_tab():
                         shared_state.enable_sog,
                         shared_state.video_start_time,
                         shared_state.video_stop_time,
-                        shared_state.preserve_scene_scale
+                        shared_state.preserve_scene_scale,
+                        shared_state.enable_absgrad,
+                        shared_state.enhance_depth
                     )
 
         # Wire up the event handlers

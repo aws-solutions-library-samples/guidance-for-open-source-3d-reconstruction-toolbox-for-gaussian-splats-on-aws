@@ -618,7 +618,9 @@ def run(args: argparse.Namespace) -> None:
     elif args.matcher == "exhaustive":
         pycolmap.match_exhaustive(database_path, matching_options=matching_options)
     elif args.matcher == "vocabtree":
-        pycolmap.match_vocabtree(database_path, matching_options=matching_options)
+        vt_opts = pycolmap.VocabTreePairingOptions()
+        vt_opts.vocab_tree_path = VOCAB_TREE_PATH
+        pycolmap.match_vocabtree(database_path, pairing_options=vt_opts, matching_options=matching_options)
     elif args.matcher == "spatial":
         pycolmap.match_spatial(database_path, matching_options=matching_options)
     else:

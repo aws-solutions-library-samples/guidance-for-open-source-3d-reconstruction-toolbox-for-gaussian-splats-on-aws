@@ -395,28 +395,29 @@ class Predictor(BasePredictor):
     def extract_frames(self, input_video, frames_dir, num_frames):
         cap = cv2.VideoCapture(str(input_video))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_interval = max(1, total_frames // num_frames)
-        
+
+        # Seek to equidistant positions across the full video duration
+        # rather than reading sequentially, which stops early when
+        # num_frames is close to or greater than total_frames.
+        actual_frames = min(num_frames, total_frames)
+        frame_positions = [
+            int(round(i * (total_frames - 1) / max(actual_frames - 1, 1)))
+            for i in range(actual_frames)
+        ]
+
         frame_names = []
-        frame_idx = 0
-        count = 0
-        
-        while cap.isOpened():
+        for frame_idx, pos in enumerate(frame_positions):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
             ret, frame = cap.read()
             if not ret:
-                break
-                
-            if count % frame_interval == 0:
-                frame_path = os.path.join(frames_dir, f"{frame_idx:05d}.jpg")
-                cv2.imwrite(frame_path, frame)
-                frame_names.append(f"{frame_idx:05d}.jpg")
-                frame_idx += 1
-                
-            count += 1
-            if frame_idx >= num_frames:
-                break
-                
+                logging.warning(f"Failed to read frame at position {pos}")
+                continue
+            frame_path = os.path.join(frames_dir, f"{frame_idx:05d}.jpg")
+            cv2.imwrite(frame_path, frame)
+            frame_names.append(f"{frame_idx:05d}.jpg")
+
         cap.release()
+        logging.info(f"Extracted {len(frame_names)} equidistant frames from {total_frames} total")
         return frame_names
 
     def detect_center_keypoints(self, frame):
