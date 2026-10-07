@@ -405,8 +405,7 @@ RUN pip install --no-cache-dir \
     'viser==1.0.0' \
     'wandb>=0.13.3' \
     'nerfacc==0.5.2' \
-    xatlas \
-    pymeshfix
+    xatlas
 
 # Install sharp-frame-extractor separately after scipy is available
 RUN pip install --no-cache-dir sharp-frame-extractor
@@ -688,11 +687,3 @@ RUN echo "=== VERSION VERIFICATION ===" \
     && echo "  NerfStudio: $(python -c 'import nerfstudio; print(getattr(nerfstudio, "__version__", "installed"))' 2>/dev/null || echo 'Not found')" \
     && echo "  GSplat: $(python -c 'import gsplat; print(gsplat.__version__)' 2>/dev/null || echo 'Not found')" \
     && echo "=== END VERSION VERIFICATION ==="
-
-
-# Hot-patch layer: copied last so all slow dependency layers stay cached during
-# active development. These overwrite the versions installed earlier in the build.
-# Once stable, the earlier COPY can be removed and this layer kept as the canonical one.
-#COPY src/pipeline/training/dn_model_patched.py          ${CODE_PATH}/dn-splatter/dn_splatter/dn_model.py
-#COPY src/pipeline/training/dn_splatter_preprocess.py    ${CODE_PATH}/training/dn_splatter_preprocess.py
-#COPY src/main.py                                        ${CODE_PATH}/main.py

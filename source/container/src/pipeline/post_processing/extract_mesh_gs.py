@@ -22,9 +22,9 @@
 """TSDF mesh extraction from Gaussian splats with texture baking.
 
 Extracts a textured mesh (OBJ + GLB) from a trained Gaussian splat model
-using TSDF fusion, PyMeshFix repair, xatlas UV unwrapping, and camera-
-projection texture baking with configurable color grading.
-Auto-detects scene vs object mode.
+using TSDF fusion, Poisson surface reconstruction for gap filling, xatlas
+UV unwrapping, and camera-projection texture baking with configurable
+color grading. Auto-detects scene vs object mode.
 """
 import argparse
 import os
@@ -124,7 +124,7 @@ def detect_bg_color(model, cams, device, n_sample=5):
 
 
 def auto_detect_scene_mode(model, cams, bg_color, device, n_sample=8,
-                            bg_thresh_frac=25.0 / 255.0, bg_pixel_thresh=0.40):
+                            bg_thresh_frac=25.0 / 255.0, bg_pixel_thresh=0.55):
     coverages = []
     bg_fracs = []
     with torch.no_grad():
@@ -451,71 +451,203 @@ def main():
     sdf_trunc = voxel_length * 4
     pr(f"Voxel: {voxel_length:.5f}, trunc: {sdf_trunc:.5f}")
 
-    # TSDF integration using VoxelBlockGrid (tensor API).
-    # ScalableTSDFVolume is broken in Open3D >= 0.20.0.
-    _o3d_dev = o3c.Device('CPU:0')
-    volume = o3d.t.geometry.VoxelBlockGrid(
-        attr_names=('tsdf', 'weight', 'color'),
-        attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
-        attr_channels=((1,), (1,), (3,)),
-        voxel_size=voxel_length,
-        block_resolution=16,
-        block_count=100000,
-        device=_o3d_dev,
-    )
-    cam0 = cams_half[0]
-    _K_np = np.array([[cam0.fx, 0, cam0.cx],
-                      [0, cam0.fy, cam0.cy],
-                      [0, 0, 1.0]], dtype=np.float64)
-    _intrinsic_t = o3c.Tensor(_K_np)
-    _depth_trunc = float(voxel_extent if SCENE_MODE else obj_extent * 3)
+    # For opaque-bg objects, suppress non-object Gaussians before TSDF
+    _opa_backup = None
+    _gauss_cluster_pos = None
+    _gauss_cluster_nrm = None
+    if opaque_bg and not SCENE_MODE:
+        pr("Identifying object Gaussians for TSDF...")
+        with torch.no_grad():
+            _g_pos = m.positions.cpu().numpy()
+            _g_opa = m.opacities.cpu().numpy()
+        _sh_dc = m._sh_dc.detach().cpu().numpy().squeeze()
+        _g_col = 0.28209479177 * _sh_dc + 0.5
+        _col_diff = np.abs(_g_col - bg_color).max(axis=1)
+        _fg = (_g_opa > 0.3) & (_col_diff > 0.05)
+        _pos_fg = _g_pos[_fg]
 
-    pr(f"Integrating {len(cams_half)} cameras into TSDF...")
-    with torch.no_grad():
-        for i, cam in enumerate(cams_half):
-            depth = _render_depth_gsplat(m, cam, device=DEVICE)
-            rgb, alpha = _render_gsplat(m, cam, device=DEVICE)
-            rgb_np = rgb[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy()
-            alpha_np = (alpha[0, 0].cpu().numpy() if alpha.dim() == 4
-                        else alpha.cpu().numpy())
-            alpha_safe = alpha_np.clip(min=0.1)
-            rgb_unpremult = (rgb_np / alpha_safe[:, :, None]).clip(0, 1)
-            if SCENE_MODE:
-                depth[torch.from_numpy(alpha_np < 0.3).to(depth.device)] = 0.0
-                depth[depth > voxel_extent] = 0.0
-            elif opaque_bg:
-                bg_diff = np.abs(rgb_unpremult - bg_color).max(axis=2)
-                bg_mask = (bg_diff < bg_thresh) | (alpha_np < 0.1)
-                depth[torch.from_numpy(bg_mask).to(depth.device)] = 0.0
-            else:
-                depth[torch.from_numpy(alpha_np < 0.5).to(depth.device)] = 0.0
-            depth_np = depth.cpu().numpy().astype(np.float32)
-            color_f = rgb_unpremult.astype(np.float32)
-            depth_t = o3d.t.geometry.Image(o3c.Tensor(depth_np))
-            color_t = o3d.t.geometry.Image(o3c.Tensor(color_f))
-            w2c = np.ascontiguousarray(
-                np.linalg.inv(cam.c2w_opencv), dtype=np.float64)
-            extrinsic_t = o3c.Tensor(w2c)
-            try:
-                frustum_coords = volume.compute_unique_block_coordinates(
-                    depth_t, _intrinsic_t, extrinsic_t, 1.0, _depth_trunc)
-                volume.integrate(frustum_coords, depth_t, color_t,
-                                 _intrinsic_t, extrinsic_t, 1.0, _depth_trunc)
-            except RuntimeError:
-                pass
-            if (i + 1) % 40 == 0:
-                pr(f"  {i + 1}/{len(cams_half)}")
-            if (i + 1) % 50 == 0:
-                torch.cuda.empty_cache()
+        with open(TRANSFORMS) as _f:
+            _tdata = json_mod.load(_f)
+        _R_at = np.eye(3, dtype=np.float64)
+        _t_at = np.zeros(3, dtype=np.float64)
+        if "applied_transform" in _tdata:
+            _at = np.array(
+                _tdata["applied_transform"], dtype=np.float64)
+            _R_at = _at[:3, :3]
+            _t_at = _at[:3, 3]
+            _pos_fg = (_pos_fg @ _R_at.T) + _t_at
 
-    pr("Extracting mesh from TSDF...")
-    mesh_t = volume.extract_triangle_mesh()
-    mesh = mesh_t.to_legacy()
-    del volume
-    torch.cuda.empty_cache()
-    gc.collect()
-    mesh.compute_vertex_normals()
-    pr(f"TSDF raw: {len(mesh.vertices)}V {len(mesh.triangles)}F")
+        _pcd_tmp = o3d.geometry.PointCloud()
+        _pcd_tmp.points = o3d.utility.Vector3dVector(_pos_fg)
+        _labels = np.array(
+            _pcd_tmp.cluster_dbscan(eps=0.5, min_points=50))
+        _obj_mask_np = np.zeros(len(_g_pos), dtype=bool)
+        if (_labels >= 0).any():
+            _uniq, _cnts = np.unique(
+                _labels[_labels >= 0], return_counts=True)
+            _fg_idx = np.where(_fg)[0]
+            _cluster = _labels == _uniq[_cnts.argmax()]
+            _obj_mask_np[_fg_idx[_cluster]] = True
+            _cpos = _pos_fg[_cluster]
+            _cmin = _cpos.min(axis=0)
+            _cmax = _cpos.max(axis=0)
+            _cmarg = (_cmax - _cmin) * 0.1
+            _cmin -= _cmarg
+            _cmax += _cmarg
+            _all_pos_t = (_g_pos @ _R_at.T) + _t_at
+            _spatial = (
+                np.all(_all_pos_t >= _cmin, axis=1)
+                & np.all(_all_pos_t <= _cmax, axis=1)
+                & (_g_opa > 0.1))
+            _obj_mask_np |= _spatial
+            pr(f"  Object cluster: {_cluster.sum()} core +"
+               f" {_spatial.sum() - _cluster.sum()} spatial"
+               f" = {_obj_mask_np.sum()} Gaussians")
+        else:
+            _obj_mask_np[_fg] = True
+
+        # Save cluster positions + normals for gap filling
+        # Gaussians are in model space (same as TSDF mesh)
+        with torch.no_grad():
+            _g_norms = m.normals.cpu().numpy()
+        _gauss_cluster_pos = _g_pos[_obj_mask_np].copy()
+        _gauss_cluster_nrm = _g_norms[_obj_mask_np].copy()
+        pr(f"  Saved {len(_gauss_cluster_pos)} cluster points"
+           f" for gap filling")
+
+        _opa_backup = m._raw_opacities.data.clone()
+        _suppress = torch.from_numpy(
+            ~_obj_mask_np).to(m._raw_opacities.device)
+        m._raw_opacities.data[_suppress] = -20.0
+        del _g_pos, _g_opa, _sh_dc, _pos_fg, _obj_mask_np, _g_norms
+        torch.cuda.empty_cache()
+
+    # Mesh extraction: Poisson from Gaussians (transparent-bg) or TSDF (others)
+    mesh = o3d.geometry.TriangleMesh()
+    if not SCENE_MODE and not opaque_bg:
+        pr("Poisson reconstruction from Gaussians...")
+        with torch.no_grad():
+            _g_pos = m.positions.cpu().numpy()
+            _g_opa = m.opacities.cpu().numpy()
+            _g_nrm = m.normals.cpu().numpy()
+        _fg = _g_opa > 0.5
+        _pos = _g_pos[_fg]
+        _nrm = _g_nrm[_fg]
+        _nlen = np.linalg.norm(_nrm, axis=1, keepdims=True)
+        _nrm = np.where(_nlen > 1e-6, _nrm / _nlen, 0)
+        pr(f"  {_fg.sum()} Gaussians (opacity > 0.5)")
+
+        _pcd = o3d.geometry.PointCloud()
+        _pcd.points = o3d.utility.Vector3dVector(_pos)
+        _pcd.normals = o3d.utility.Vector3dVector(_nrm)
+
+        # SH color for vertex coloring
+        _sh_dc = m._sh_dc.detach().cpu().numpy().squeeze()
+        _g_col = (0.28209479177 * _sh_dc + 0.5).clip(0, 1)
+        _pcd.colors = o3d.utility.Vector3dVector(_g_col[_fg])
+
+        pr("  Orienting normals...")
+        _pcd.orient_normals_consistent_tangent_plane(k=30)
+
+        pr("  Running Poisson (depth=9)...")
+        mesh, _dens = (
+            o3d.geometry.TriangleMesh
+            .create_from_point_cloud_poisson(
+                _pcd, depth=9, linear_fit=True))
+        _dens = np.asarray(_dens)
+        _thresh = np.quantile(_dens, 0.05)
+        mesh.remove_vertices_by_mask(_dens < _thresh)
+        mesh.compute_vertex_normals()
+        pr(f"  Poisson: {len(mesh.vertices)}V {len(mesh.triangles)}F"
+           f" (density trim at {_thresh:.4f})")
+
+        # Transfer SH vertex colors to Poisson mesh via KDTree
+        _src_tree = o3d.geometry.KDTreeFlann(
+            o3d.geometry.PointCloud(
+                o3d.utility.Vector3dVector(_pos)))
+        _mesh_v = np.asarray(mesh.vertices)
+        _mesh_c = np.zeros((len(_mesh_v), 3), dtype=np.float64)
+        _sh_col = _g_col[_fg]
+        for _vi in range(len(_mesh_v)):
+            [_, _idx, _] = _src_tree.search_knn_vector_3d(
+                _mesh_v[_vi], 1)
+            _mesh_c[_vi] = _sh_col[_idx[0]]
+        mesh.vertex_colors = o3d.utility.Vector3dVector(_mesh_c)
+        pr(f"  Transferred SH colors to {len(_mesh_v)} vertices")
+        del _g_pos, _g_opa, _g_nrm, _pos, _nrm, _pcd, _dens
+
+    if SCENE_MODE or len(mesh.triangles) == 0:
+        # TSDF fusion for scene mode and opaque-bg objects
+        _o3d_dev = o3c.Device('CPU:0')
+        volume = o3d.t.geometry.VoxelBlockGrid(
+            attr_names=('tsdf', 'weight', 'color'),
+            attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
+            attr_channels=((1,), (1,), (3,)),
+            voxel_size=voxel_length,
+            block_resolution=16,
+            block_count=100000,
+            device=_o3d_dev,
+        )
+        cam0 = cams_half[0]
+        _K_np = np.array([[cam0.fx, 0, cam0.cx],
+                          [0, cam0.fy, cam0.cy],
+                          [0, 0, 1.0]], dtype=np.float64)
+        _intrinsic_t = o3c.Tensor(_K_np)
+        _depth_trunc = float(voxel_extent if SCENE_MODE else obj_extent * 3)
+
+        pr(f"Integrating {len(cams_half)} cameras into TSDF...")
+        with torch.no_grad():
+            for i, cam in enumerate(cams_half):
+                depth = _render_depth_gsplat(m, cam, device=DEVICE)
+                rgb, alpha = _render_gsplat(m, cam, device=DEVICE)
+                rgb_np = rgb[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy()
+                alpha_np = (alpha[0, 0].cpu().numpy() if alpha.dim() == 4
+                            else alpha.cpu().numpy())
+                alpha_safe = alpha_np.clip(min=0.1)
+                rgb_unpremult = (
+                    rgb_np / alpha_safe[:, :, None]).clip(0, 1)
+                if SCENE_MODE:
+                    depth[torch.from_numpy(
+                        alpha_np < 0.3).to(depth.device)] = 0.0
+                    depth[depth > voxel_extent] = 0.0
+                else:
+                    depth[torch.from_numpy(
+                        alpha_np < 0.05).to(depth.device)] = 0.0
+                depth_np = depth.cpu().numpy().astype(np.float32)
+                color_f = rgb_unpremult.astype(np.float32)
+                depth_t = o3d.t.geometry.Image(o3c.Tensor(depth_np))
+                color_t = o3d.t.geometry.Image(o3c.Tensor(color_f))
+                w2c = np.ascontiguousarray(
+                    np.linalg.inv(cam.c2w_opencv), dtype=np.float64)
+                extrinsic_t = o3c.Tensor(w2c)
+                try:
+                    frustum_coords = (
+                        volume.compute_unique_block_coordinates(
+                            depth_t, _intrinsic_t, extrinsic_t,
+                            1.0, _depth_trunc))
+                    volume.integrate(
+                        frustum_coords, depth_t, color_t,
+                        _intrinsic_t, extrinsic_t, 1.0, _depth_trunc)
+                except RuntimeError:
+                    pass
+                if (i + 1) % 40 == 0:
+                    pr(f"  {i + 1}/{len(cams_half)}")
+                if (i + 1) % 50 == 0:
+                    torch.cuda.empty_cache()
+
+        pr("Extracting mesh from TSDF...")
+        mesh_t = volume.extract_triangle_mesh()
+        mesh = mesh_t.to_legacy()
+        del volume
+        torch.cuda.empty_cache()
+        gc.collect()
+        mesh.compute_vertex_normals()
+        pr(f"TSDF raw: {len(mesh.vertices)}V {len(mesh.triangles)}F")
+
+    # Restore full model opacities for texturing
+    if _opa_backup is not None:
+        m._raw_opacities.data = _opa_backup
+        del _opa_backup
 
     # Cleanup connected components
     if len(mesh.triangles) > 0:
@@ -540,6 +672,66 @@ def main():
     mesh.remove_duplicated_vertices()
     mesh.remove_non_manifold_edges()
 
+    # Fill TSDF holes using combined Poisson (TSDF verts + Gaussian gap points)
+    if not SCENE_MODE and _gauss_cluster_pos is not None:
+        pr("Combined Poisson gap filling...")
+        tsdf_v = np.asarray(mesh.vertices)
+        tsdf_n = np.asarray(mesh.vertex_normals)
+        tsdf_c = np.asarray(mesh.vertex_colors)
+        has_colors = len(tsdf_c) == len(tsdf_v) and tsdf_c.max() > 0
+
+        tsdf_pcd = o3d.geometry.PointCloud()
+        tsdf_pcd.points = o3d.utility.Vector3dVector(tsdf_v)
+        tsdf_tree = o3d.geometry.KDTreeFlann(tsdf_pcd)
+
+        dists = np.zeros(len(_gauss_cluster_pos))
+        for gi in range(len(_gauss_cluster_pos)):
+            [_, _, d2] = tsdf_tree.search_knn_vector_3d(
+                _gauss_cluster_pos[gi], 1)
+            dists[gi] = np.sqrt(d2[0])
+        gap_thresh = voxel_length * 3
+        gap_mask = dists > gap_thresh
+        n_gap = gap_mask.sum()
+        pr(f"  Gap Gaussians: {n_gap}/{len(_gauss_cluster_pos)}")
+
+        if n_gap > 50:
+            gap_pos = _gauss_cluster_pos[gap_mask]
+            gap_nrm = _gauss_cluster_nrm[gap_mask]
+            nlen = np.linalg.norm(gap_nrm, axis=1, keepdims=True)
+            gap_nrm = np.where(nlen > 1e-6, gap_nrm / nlen, 0)
+
+            comb_pts = np.vstack([tsdf_v, gap_pos])
+            comb_nrm = np.vstack([tsdf_n, gap_nrm])
+            comb_pcd = o3d.geometry.PointCloud()
+            comb_pcd.points = o3d.utility.Vector3dVector(comb_pts)
+            comb_pcd.normals = o3d.utility.Vector3dVector(comb_nrm)
+            comb_pcd.orient_normals_consistent_tangent_plane(k=30)
+
+            pr("  Poisson reconstruction (depth=10)...")
+            p_mesh, p_dens = (
+                o3d.geometry.TriangleMesh
+                .create_from_point_cloud_poisson(
+                    comb_pcd, depth=10, linear_fit=True))
+            p_dens = np.asarray(p_dens)
+            p_mesh.remove_vertices_by_mask(
+                p_dens < np.quantile(p_dens, 0.01))
+            p_mesh.compute_vertex_normals()
+            pr(f"  Poisson: {len(p_mesh.vertices)}V"
+               f" {len(p_mesh.triangles)}F")
+
+            if has_colors:
+                pv = np.asarray(p_mesh.vertices)
+                new_colors = np.zeros((len(pv), 3), dtype=np.float64)
+                for vi in range(len(pv)):
+                    [_, idx, _] = tsdf_tree.search_knn_vector_3d(
+                        pv[vi], 1)
+                    new_colors[vi] = tsdf_c[idx[0]]
+                p_mesh.vertex_colors = (
+                    o3d.utility.Vector3dVector(new_colors))
+
+            mesh = p_mesh
+        del _gauss_cluster_pos, _gauss_cluster_nrm
+
     pr(f"Taubin smoothing ({SMOOTH_ITERATIONS} iters)...")
     mesh = mesh.filter_smooth_taubin(
         number_of_iterations=SMOOTH_ITERATIONS,
@@ -549,11 +741,10 @@ def main():
     mesh.compute_vertex_normals()
     pr(f"After smoothing: {len(mesh.vertices)}V {len(mesh.triangles)}F")
 
-    complex_geometry = len(mesh.triangles) > 1_000_000
-    pre_target = TARGET_FACES * 3 if (complex_geometry and not SCENE_MODE) else TARGET_FACES
-    if len(mesh.triangles) > pre_target:
+    if SCENE_MODE and len(mesh.triangles) > TARGET_FACES:
         gc.collect()
-        mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=pre_target)
+        mesh = mesh.simplify_quadric_decimation(
+            target_number_of_triangles=TARGET_FACES)
         mesh.compute_vertex_normals()
 
     vert_colors = np.asarray(mesh.vertex_colors).astype(np.float64)
@@ -569,45 +760,9 @@ def main():
         front_verts = o3d_verts.astype(np.float64)
         front_faces = o3d_faces.astype(np.int64)
     else:
-        n_orig_v = len(o3d_verts)
-        tm_temp = trimesh.Trimesh(vertices=o3d_verts, faces=o3d_faces, process=False)
-        n_before = len(tm_temp.faces)
-        for _hf_pass in range(5):
-            prev = len(tm_temp.faces)
-            trimesh.repair.fill_holes(tm_temp)
-            if len(tm_temp.faces) == prev:
-                break
-        pr(f"Hole fill: {n_before}F -> {len(tm_temp.faces)}F")
-        if len(tm_temp.vertices) > n_orig_v and has_vc:
-            n_new = len(tm_temp.vertices) - n_orig_v
-            new_colors = np.full((n_new, 3), vert_colors.mean(axis=0))
-            for vi in range(n_orig_v, len(tm_temp.vertices)):
-                adj = np.any(tm_temp.faces == vi, axis=1)
-                nbrs = set(tm_temp.faces[adj].ravel()) - {vi}
-                orig_nbrs = [v for v in nbrs if v < n_orig_v]
-                if orig_nbrs:
-                    new_colors[vi - n_orig_v] = vert_colors[orig_nbrs].mean(axis=0)
-            vert_colors = np.vstack([vert_colors, new_colors])
-        front_verts = tm_temp.vertices.astype(np.float64)
-        front_faces = tm_temp.faces.astype(np.int64)
-        import pymeshfix
-        pr("Running MeshFix...")
-        mfix = pymeshfix.MeshFix(front_verts.astype(np.float32), front_faces.astype(np.int32))
-        try:
-            mfix.repair(verbose=False)
-        except TypeError:
-            mfix.repair()
-        fixed_verts = np.array(mfix.v, dtype=np.float64)
-        fixed_faces = np.array(mfix.f, dtype=np.int64)
-        pr(f"MeshFix: {len(front_verts)}V/{len(front_faces)}F -> {len(fixed_verts)}V/{len(fixed_faces)}F")
-        if has_vc and len(fixed_verts) > 0:
-            from scipy.spatial import cKDTree
-            tree = cKDTree(front_verts)
-            _, idx = tree.query(fixed_verts, k=1)
-            vert_colors = vert_colors[np.clip(idx, 0, len(vert_colors) - 1)]
-        front_verts = fixed_verts
-        front_faces = fixed_faces
-        if complex_geometry and len(front_faces) > TARGET_FACES:
+        front_verts = o3d_verts.astype(np.float64)
+        front_faces = o3d_faces.astype(np.int64)
+        if len(front_faces) > TARGET_FACES:
             pr(f"Decimating to {TARGET_FACES}F...")
             post_mesh = o3d.geometry.TriangleMesh()
             post_mesh.vertices = o3d.utility.Vector3dVector(front_verts)
@@ -739,7 +894,7 @@ def main():
     t_vc = texel_vc[valid_ys, valid_xs].astype(np.float32)
     t_cam_color = np.zeros((n_texels, 3), dtype=np.float32)
     t_cam_weight = np.zeros(n_texels, dtype=np.float32)
-    depth_tol = obj_extent * 0.03
+    depth_tol = obj_extent * (0.15 if not SCENE_MODE and not opaque_bg else 0.03)
     CHUNK = 2_000_000
     gc.collect()
     pr(f"Projecting {n_texels} texels into {len(cams_full)} cameras...")
