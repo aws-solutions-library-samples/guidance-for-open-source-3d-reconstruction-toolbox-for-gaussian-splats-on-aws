@@ -231,7 +231,98 @@ def _normalize_splatking(extract_source: str, result: NormalizationResult) -> No
 
 
 # ---------------------------------------------------------------------------
-# Pattern: Generic COLMAP wrapper subdirectory
+# Pattern: COLMAP binary model with double-nested images
+# Detects: colmap/sparse/0/*.bin + images/images/ (double-nested)
+# The binary model stores names as 'images\render_X.png' because it was
+# built with --image_path pointing to the parent of images/.
+# Fix: flatten images/images/ -> images/ and rename binary model entries
+# to flat basenames so feature extraction registers flat names in the DB.
+# ---------------------------------------------------------------------------
+
+def _is_colmap_double_nested(path: str) -> bool:
+    """Detect colmap/sparse/0/ binary model + images/images/ double-nesting."""
+    sparse_0 = os.path.join(path, "colmap", "sparse", "0")
+    images_images = os.path.join(path, "images", "images")
+    has_bin = os.path.exists(os.path.join(sparse_0, "images.bin"))
+    has_double = os.path.isdir(images_images)
+    return has_bin and has_double
+
+
+def _normalize_colmap_double_nested(extract_source: str, result: NormalizationResult) -> None:
+    """Flatten images/images/ -> images/ and fix binary model image names."""
+    result.detected_pattern = "COLMAP binary model with double-nested images"
+    _log(result, "Detected COLMAP binary model with images/images/ double-nesting — normalizing")
+
+    images_dir = os.path.join(extract_source, "images")
+    images_images_dir = os.path.join(images_dir, "images")
+
+    # Move all files from images/images/ up to images/
+    moved = 0
+    for fname in os.listdir(images_images_dir):
+        src = os.path.join(images_images_dir, fname)
+        dst = os.path.join(images_dir, fname)
+        if os.path.isfile(src):
+            shutil.move(src, dst)
+            moved += 1
+    shutil.rmtree(images_images_dir)
+    _log(result, f"  Flattened images/images/ -> images/ ({moved} files)")
+
+    # Move colmap/sparse/ -> sparse/ at root so pipeline finds it
+    colmap_sparse = os.path.join(extract_source, "colmap", "sparse")
+    root_sparse = os.path.join(extract_source, "sparse")
+    if os.path.isdir(colmap_sparse) and not os.path.isdir(root_sparse):
+        shutil.move(colmap_sparse, root_sparse)
+        _log(result, "  Moved colmap/sparse/ -> sparse/")
+
+    # Fix binary model image names: 'images\render_X.png' -> 'render_X.png'
+    sparse_0 = os.path.join(extract_source, "sparse", "0")
+    images_bin = os.path.join(sparse_0, "images.bin")
+    if os.path.exists(images_bin):
+        try:
+            import struct, io
+            with open(images_bin, 'rb') as f:
+                data = f.read()
+            buf = io.BytesIO(data)
+            out = io.BytesIO()
+            num = struct.unpack('<Q', buf.read(8))[0]
+            out.write(struct.pack('<Q', num))
+            fixed = 0
+            for _ in range(num):
+                image_id_b = buf.read(4)
+                qvec_b = buf.read(32)
+                tvec_b = buf.read(24)
+                cam_b = buf.read(4)
+                name = b''
+                while True:
+                    c = buf.read(1)
+                    if c == b'\x00': break
+                    name += c
+                num_p2d_b = buf.read(8)
+                num_p2d = struct.unpack('<Q', num_p2d_b)[0]
+                p2d_data = buf.read(num_p2d * 24)
+                flat = os.path.basename(name.decode().replace('\\', '/')).encode()
+                if flat != name:
+                    fixed += 1
+                out.write(image_id_b + qvec_b + tvec_b + cam_b)
+                out.write(flat + b'\x00')
+                out.write(num_p2d_b + p2d_data)
+            with open(images_bin, 'wb') as f:
+                f.write(out.getvalue())
+            # Also patch colmap/sparse/0/images.bin if it exists (zip may have
+            # placed the original there; main.py skips the sparse/ move if
+            # colmap/sparse/0 is already populated)
+            colmap_images_bin = os.path.join(extract_source, 'colmap', 'sparse', '0', 'images.bin')
+            if os.path.exists(colmap_images_bin) and colmap_images_bin != images_bin:
+                import shutil as _shutil
+                _shutil.copy2(images_bin, colmap_images_bin)
+            _log(result, f"  Fixed {fixed} image names in binary model to flat basenames")
+        except Exception as e:
+            _log(result, f"  WARNING: could not fix binary model names: {e}")
+
+    result.modified = True
+    result.config_overrides["USE_POSE_PRIOR_COLMAP_MODEL_FILES"] = "true"
+    _log(result, "  Config override: USE_POSE_PRIOR_COLMAP_MODEL_FILES=true")
+
 # Detects any single subdirectory that itself contains sparse/ + images/
 # but has a non-standard name (e.g. "COLMAP_Export/", "reconstruction/").
 # The caller already handles the single-subdir case for known names, but
@@ -285,6 +376,10 @@ def normalize(extract_source: str) -> NormalizationResult:
 
     if _is_splatking(extract_source):
         _normalize_splatking(extract_source, result)
+        return result
+
+    if _is_colmap_double_nested(extract_source):
+        _normalize_colmap_double_nested(extract_source, result)
         return result
 
     wrapper = _is_wrapped_colmap(extract_source)

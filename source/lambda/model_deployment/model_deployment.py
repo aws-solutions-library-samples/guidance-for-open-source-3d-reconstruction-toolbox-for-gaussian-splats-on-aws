@@ -193,6 +193,19 @@ def handler(event, context):
         
         print(f"Using S3 bucket: {s3_bucket}")
         
+        # Skip if models already exist in S3
+        s3_client = boto3.client('s3')
+        try:
+            s3_client.head_object(Bucket=s3_bucket, Key='models/models.tar.gz')
+            print("models.tar.gz already exists in S3, skipping download")
+            response_data['Message'] = 'Models already present in S3, skipping download.'
+            response_data['ArchiveLocation'] = f's3://{s3_bucket}/models/models.tar.gz'
+            if 'RequestType' in event:
+                send_response(event, context, 'SUCCESS', response_data)
+            return response_data
+        except Exception:
+            pass  # Does not exist or head_object failed, proceed with download
+        
         # Create temp directory
         temp_dir = tempfile.mkdtemp()
         print(f"Created temporary directory: {temp_dir}")
@@ -271,7 +284,6 @@ def handler(event, context):
         
         # Upload only the archive to S3
         print(f"Uploading archive to s3://{s3_bucket}/models/models.tar.gz")
-        s3_client = boto3.client('s3')
         
         # Ensure models directory exists
         try:

@@ -222,6 +222,62 @@ def resize_to_4k(image_path, spherical_camera=False):
     # Return original image if no resize needed
     return image
 
+def _center_crop_and_resize(img, target_w: int, target_h: int,
+                            interpolation: int = cv2.INTER_AREA):
+    """Center-crop to target aspect ratio then resize to exact dimensions.
+
+    Returns the resized image, or None if already at target dimensions.
+    """
+    h, w = img.shape[:2]
+    if w == target_w and h == target_h:
+        return None
+    target_ratio = target_w / target_h
+    img_ratio = w / h
+    if img_ratio > target_ratio:
+        crop_w = int(h * target_ratio)
+        x_start = (w - crop_w) // 2
+        img = img[:, x_start:x_start + crop_w]
+    elif img_ratio < target_ratio:
+        crop_h = int(w / target_ratio)
+        y_start = (h - crop_h) // 2
+        img = img[y_start:y_start + crop_h, :]
+    return cv2.resize(img, (target_w, target_h), interpolation=interpolation)
+
+
+def _resize_auxiliary_dirs(image_dir: str, target_w: int, target_h: int):
+    """Resize mask/depth files in sibling directories to match image dimensions.
+
+    Uses INTER_NEAREST to preserve discrete mask values and depth precision.
+    Walks subdirectories so both flat and multi-camera layouts are handled.
+    """
+    parent_dir = os.path.dirname(image_dir)
+    extensions = ('.png', '.jpg', '.jpeg')
+    for dirname in ("masks", "depth", "depth_images", "depth_sensor"):
+        aux_dir = os.path.join(parent_dir, dirname)
+        if not os.path.isdir(aux_dir):
+            continue
+        resized_count = 0
+        total_count = 0
+        for root, _dirs, files in os.walk(aux_dir):
+            for f in files:
+                if not f.lower().endswith(extensions):
+                    continue
+                total_count += 1
+                filepath = os.path.join(root, f)
+                img = cv2.imread(filepath, cv2.IMREAD_UNCHANGED)
+                if img is None:
+                    continue
+                result = _center_crop_and_resize(
+                    img, target_w, target_h, cv2.INTER_NEAREST
+                )
+                if result is not None:
+                    cv2.imwrite(filepath, result)
+                    resized_count += 1
+        if resized_count:
+            print(f"Resized {resized_count}/{total_count} files in"
+                  f" {dirname}/ to {target_w}x{target_h}")
+
+
 def resize_images_to_common_dimensions(image_dir):
     """
     Resize all images in a directory to the smallest common dimensions
@@ -229,6 +285,9 @@ def resize_images_to_common_dimensions(image_dir):
     center-cropped to the target aspect ratio first, then scaled to
     the exact target dimensions. This ensures every image ends up at
     identical width x height without distortion.
+
+    Also resizes files in sibling masks/ and depth*/ directories so
+    that auxiliary data stays in sync with the images.
 
     Args:
         image_dir (str): Path to directory containing images
@@ -257,9 +316,11 @@ def resize_images_to_common_dimensions(image_dir):
         return None
 
     if len(dimensions) == 1:
-        w, h = dimensions.pop()
-        print(f"All {len(image_files)} images already have uniform dimensions: {w}x{h}")
-        return (w, h)
+        target_w, target_h = dimensions.pop()
+        print(f"All {len(image_files)} images already have uniform dimensions:"
+              f" {target_w}x{target_h}")
+        _resize_auxiliary_dirs(image_dir, target_w, target_h)
+        return (target_w, target_h)
 
     target_w = min(d[0] for d in dimensions)
     target_h = min(d[1] for d in dimensions)
@@ -272,27 +333,13 @@ def resize_images_to_common_dimensions(image_dir):
         img = cv2.imread(filepath)
         if img is None:
             continue
-        h, w = img.shape[:2]
-        if w == target_w and h == target_h:
-            continue
-        # Center-crop to target aspect ratio, then resize
-        target_ratio = target_w / target_h
-        img_ratio = w / h
-        if img_ratio > target_ratio:
-            # Image is wider — crop width
-            crop_w = int(h * target_ratio)
-            x_start = (w - crop_w) // 2
-            img = img[:, x_start:x_start + crop_w]
-        elif img_ratio < target_ratio:
-            # Image is taller — crop height
-            crop_h = int(w / target_ratio)
-            y_start = (h - crop_h) // 2
-            img = img[y_start:y_start + crop_h, :]
-        img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
-        cv2.imwrite(filepath, img)
-        resized_count += 1
+        result = _center_crop_and_resize(img, target_w, target_h)
+        if result is not None:
+            cv2.imwrite(filepath, result)
+            resized_count += 1
 
     print(f"Resized {resized_count}/{len(image_files)} images to {target_w}x{target_h}")
+    _resize_auxiliary_dirs(image_dir, target_w, target_h)
     return (target_w, target_h)
 
 # COLMAP camera model id -> name mapping
@@ -901,7 +948,8 @@ def extract_images_from_zip_temp(temp_path, image_path, dataset_path, log):
 def validate_and_resize_images(image_path, config, log, pipeline):
     """
     Validate image files and resize them if needed.
-    
+    Also resizes sibling mask/depth directories to keep them in sync.
+
     Args:
         image_path: Path to directory containing images
         config: Configuration dictionary
@@ -913,7 +961,6 @@ def validate_and_resize_images(image_path, config, log, pipeline):
     filenames = [f for f in all_files if os.path.splitext(f)[1].lower() in IMAGE_EXTS]
     if filenames:
         log.info(f"Found {len(filenames)} images in archive (skipped {len(all_files) - len(filenames)} non-image files).")
-        # Check first image to determine if resizing is needed
         first_filepath = os.path.join(image_path, filenames[0])
         first_image = cv2.imread(first_filepath)
         if first_image is not None:
@@ -925,6 +972,10 @@ def validate_and_resize_images(image_path, config, log, pipeline):
                 for filename in filenames:
                     filepath = os.path.join(image_path, filename)
                     resize_to_4k(filepath, config['SPHERICAL_CAMERA'] == "true")
+                resized_img = cv2.imread(first_filepath)
+                if resized_img is not None:
+                    rh, rw = resized_img.shape[:2]
+                    _resize_auxiliary_dirs(image_path, rw, rh)
             else:
                 log.info(f"Images do not need resizing (first image: {width}x{height}). Skipping resize for all {len(filenames)} images.")
         else:
@@ -932,6 +983,10 @@ def validate_and_resize_images(image_path, config, log, pipeline):
             for filename in filenames:
                 filepath = os.path.join(image_path, filename)
                 resize_to_4k(filepath, config['SPHERICAL_CAMERA'] == "true")
+            resized_img = cv2.imread(os.path.join(image_path, filenames[0]))
+            if resized_img is not None:
+                rh, rw = resized_img.shape[:2]
+                _resize_auxiliary_dirs(image_path, rw, rh)
     else:
         log.info("No image files found in image directory - this is expected for resume training")
 

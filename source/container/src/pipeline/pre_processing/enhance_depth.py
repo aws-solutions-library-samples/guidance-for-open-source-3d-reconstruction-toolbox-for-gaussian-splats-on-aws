@@ -90,6 +90,10 @@ def enhance_single(rgb_path: str, depth_path: str, mask_path, model, device: str
         raise RuntimeError(f"Could not read depth image: {depth_path}")
     sparse_m = depth_arr.astype("float32") / 1000.0  # mm -> metres
 
+    # Resize sparse depth to match RGB dimensions before masking
+    if sparse_m.shape[:2] != (orig_h, orig_w):
+        sparse_m = cv2.resize(sparse_m, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+
     # Zero masked regions so PromptDA does not use them as metric anchors
     if valid_mask is not None:
         sparse_m[~valid_mask] = 0.0

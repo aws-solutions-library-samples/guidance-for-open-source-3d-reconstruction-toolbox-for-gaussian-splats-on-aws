@@ -191,6 +191,120 @@ def main():
     if os.path.exists(images_dir):
         clean_images_dir(images_dir)
 
+    # Normalize image dimensions after flattening — mixed sizes crash depth_from_pretrain.py
+    # (torch.stack requires identical tensor shapes). Must run after clean_images_dir flattens
+    # subdirectories so all images are in the flat images/ directory.
+    if os.path.exists(images_dir):
+        import cv2 as _cv2
+        _img_files = [f for f in os.listdir(images_dir)
+                      if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                      and os.path.isfile(os.path.join(images_dir, f))]
+        if _img_files:
+            _dims = set()
+            for _f in _img_files:
+                _img = _cv2.imread(os.path.join(images_dir, _f))
+                if _img is not None:
+                    _dims.add((_img.shape[1], _img.shape[0]))
+            if len(_dims) > 1:
+                print(f"Mixed image dimensions detected {_dims} — normalizing to smallest common size")
+                _target_w = min(d[0] for d in _dims)
+                _target_h = min(d[1] for d in _dims)
+                _resized = 0
+                for _f in _img_files:
+                    _fp = os.path.join(images_dir, _f)
+                    _img = _cv2.imread(_fp)
+                    if _img is None:
+                        continue
+                    _h, _w = _img.shape[:2]
+                    if _w != _target_w or _h != _target_h:
+                        _target_ratio = _target_w / _target_h
+                        _img_ratio = _w / _h
+                        if _img_ratio > _target_ratio:
+                            _crop_w = int(_h * _target_ratio)
+                            _x = (_w - _crop_w) // 2
+                            _img = _img[:, _x:_x + _crop_w]
+                        elif _img_ratio < _target_ratio:
+                            _crop_h = int(_w / _target_ratio)
+                            _y = (_h - _crop_h) // 2
+                            _img = _img[_y:_y + _crop_h, :]
+                        _img = _cv2.resize(_img, (_target_w, _target_h), interpolation=_cv2.INTER_AREA)
+                        _cv2.imwrite(_fp, _img)
+                        _resized += 1
+                print(f"Normalized {_resized}/{len(_img_files)} images to {_target_w}x{_target_h}")
+
+                # Resize masks to match the new image dimensions
+                _masks_dir = os.path.join(data_dir, "masks")
+                if os.path.isdir(_masks_dir):
+                    _mask_files = [f for f in os.listdir(_masks_dir)
+                                   if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                                   and os.path.isfile(os.path.join(_masks_dir, f))]
+                    _mask_resized = 0
+                    for _mf in _mask_files:
+                        _mp = os.path.join(_masks_dir, _mf)
+                        _mask = _cv2.imread(_mp, _cv2.IMREAD_GRAYSCALE)
+                        if _mask is None:
+                            continue
+                        _mh, _mw = _mask.shape[:2]
+                        if _mw != _target_w or _mh != _target_h:
+                            _mask = _cv2.resize(_mask, (_target_w, _target_h),
+                                                interpolation=_cv2.INTER_NEAREST)
+                            _cv2.imwrite(_mp, _mask)
+                            _mask_resized += 1
+                    if _mask_resized:
+                        print(f"Resized {_mask_resized} masks to {_target_w}x{_target_h}")
+
+            else:
+                # Uniform dimensions — still resize masks if they don't match
+                _target_w, _target_h = next(iter(_dims))
+                _masks_dir = os.path.join(data_dir, "masks")
+                if os.path.isdir(_masks_dir):
+                    _mask_files = [f for f in os.listdir(_masks_dir)
+                                   if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                                   and os.path.isfile(os.path.join(_masks_dir, f))]
+                    _mask_resized = 0
+                    for _mf in _mask_files:
+                        _mp = os.path.join(_masks_dir, _mf)
+                        _mask = _cv2.imread(_mp, _cv2.IMREAD_GRAYSCALE)
+                        if _mask is None:
+                            continue
+                        _mh, _mw = _mask.shape[:2]
+                        if _mw != _target_w or _mh != _target_h:
+                            _mask = _cv2.resize(_mask, (_target_w, _target_h),
+                                                interpolation=_cv2.INTER_NEAREST)
+                            _cv2.imwrite(_mp, _mask)
+                            _mask_resized += 1
+                    if _mask_resized:
+                        print(f"Resized {_mask_resized} masks to {_target_w}x{_target_h}")
+
+                # Update transforms.json intrinsics to match the new image dimensions
+                _transforms_path = os.path.join(data_dir, "transforms.json")
+                if os.path.isfile(_transforms_path):
+                    import json as _json
+                    with open(_transforms_path, 'r') as _f:
+                        _tdata = _json.load(_f)
+                    _cam_w = _tdata.get('w', _target_w)
+                    _cam_h = _tdata.get('h', _target_h)
+                    if _cam_w != _target_w or _cam_h != _target_h:
+                        _sx = _target_w / _cam_w
+                        _sy = _target_h / _cam_h
+                        _tdata['w'] = _target_w
+                        _tdata['h'] = _target_h
+                        for _k in ('fl_x', 'cx'):
+                            if _k in _tdata:
+                                _tdata[_k] = _tdata[_k] * _sx
+                        if 'fl_y' in _tdata:
+                            _tdata['fl_y'] = _tdata['fl_y'] * _sy
+                        if 'cy' in _tdata:
+                            _tdata['cy'] = _tdata['cy'] * _sy
+                        for _frame in _tdata.get('frames', []):
+                            for _k in ('w', 'h', 'fl_x', 'fl_y', 'cx', 'cy'):
+                                if _k in _frame:
+                                    _s = _sx if _k in ('w', 'fl_x', 'cx') else _sy
+                                    _frame[_k] = int(_frame[_k] * _s) if _k in ('w', 'h') else _frame[_k] * _s
+                        with open(_transforms_path, 'w') as _f:
+                            _json.dump(_tdata, _f, indent=4)
+                        print(f"Updated transforms.json intrinsics to {_target_w}x{_target_h}")
+
     # If images/ is empty, search for images in common alternative locations
     # (e.g. colmap/images/ when the zip was a COLMAP reconstruction export)
     if not os.path.isdir(images_dir) or not any(
@@ -555,6 +669,10 @@ def main():
             kw.setdefault("skip_validation", True)
             return _orig_hub_load(*a, **kw)
         _hub.load = _hub_load_no_validate
+        # Also patch torch.hub.load globally so depth_from_pretrain.py
+        # (which imports torch.hub directly) also gets skip_validation=True.
+        import torch
+        torch.hub.load = _hub_load_no_validate
         _patch_zoedepth_model_io()
         colmap_sparse = os.path.join(data_dir, "colmap", "sparse", "0")
         if os.path.exists(colmap_sparse):
@@ -695,6 +813,69 @@ def main():
             normal_format=args.normal_format,
         )
         mask_generator.main()
+
+        # Resize generated masks to match actual image dimensions.
+        # DepthNormalConsistency outputs masks at the normal estimator's native
+        # resolution (e.g. 1536x1536 square) which may differ from the RGB images.
+        import cv2 as _cv2
+        _masks_dir = os.path.join(data_dir, "masks")
+        if os.path.isdir(_masks_dir) and os.path.isdir(images_dir):
+            _sample_img = next(
+                (f for f in os.listdir(images_dir)
+                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                 and os.path.isfile(os.path.join(images_dir, f))), None
+            )
+            if _sample_img is not None:
+                _ref = _cv2.imread(os.path.join(images_dir, _sample_img))
+                if _ref is not None:
+                    _img_h, _img_w = _ref.shape[:2]
+                    _mask_resized = 0
+                    for _mf in os.listdir(_masks_dir):
+                        if not _mf.lower().endswith(('.png', '.jpg', '.jpeg')):
+                            continue
+                        _mp = os.path.join(_masks_dir, _mf)
+                        _mask = _cv2.imread(_mp, _cv2.IMREAD_GRAYSCALE)
+                        if _mask is None:
+                            continue
+                        if _mask.shape[0] != _img_h or _mask.shape[1] != _img_w:
+                            _mask = _cv2.resize(_mask, (_img_w, _img_h),
+                                                interpolation=_cv2.INTER_NEAREST)
+                            _cv2.imwrite(_mp, _mask)
+                            _mask_resized += 1
+                    if _mask_resized:
+                        print(f"Resized {_mask_resized} depth-normal masks to {_img_w}x{_img_h}")
+
+    # Final mask resize pass: runs unconditionally at the end after all image
+    # processing is complete. Reads actual image dimensions fresh from disk so
+    # it works regardless of whether images were in subdirs, mixed sizes, or
+    # already uniform when the earlier resize blocks ran.
+    import cv2 as _cv2
+    _masks_dir = os.path.join(data_dir, "masks")
+    if os.path.isdir(_masks_dir) and os.path.isdir(images_dir):
+        _img_sample = next(
+            (f for f in os.listdir(images_dir)
+             if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+             and os.path.isfile(os.path.join(images_dir, f))), None
+        )
+        if _img_sample is not None:
+            _ref = _cv2.imread(os.path.join(images_dir, _img_sample))
+            if _ref is not None:
+                _img_h, _img_w = _ref.shape[:2]
+                _mask_resized = 0
+                for _mf in os.listdir(_masks_dir):
+                    if not _mf.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        continue
+                    _mp = os.path.join(_masks_dir, _mf)
+                    _mask = _cv2.imread(_mp, _cv2.IMREAD_GRAYSCALE)
+                    if _mask is None:
+                        continue
+                    if _mask.shape[0] != _img_h or _mask.shape[1] != _img_w:
+                        _mask = _cv2.resize(_mask, (_img_w, _img_h),
+                                            interpolation=_cv2.INTER_NEAREST)
+                        _cv2.imwrite(_mp, _mask)
+                        _mask_resized += 1
+                if _mask_resized:
+                    print(f"Final mask resize: {_mask_resized} masks resized to {_img_w}x{_img_h}")
 
     print("DN-Splatter pre-processing complete.")
 

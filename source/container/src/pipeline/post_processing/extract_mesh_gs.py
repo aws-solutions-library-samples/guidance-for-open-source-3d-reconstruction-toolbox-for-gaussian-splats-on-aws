@@ -174,6 +174,8 @@ def estimate_object_extent(model, cams, bg_color, device, n_sample=8):
             c2w = cam.c2w_opencv
             pts_world = (c2w[:3, :3] @ pts_cam.T).T + c2w[:3, 3]
             pts_3d.append(pts_world[::10])
+    if not pts_3d:
+        return 1.0  # fallback extent when no visible object pixels found
     all_pts = np.concatenate(pts_3d)
     lo = np.percentile(all_pts, 2, axis=0)
     hi = np.percentile(all_pts, 98, axis=0)
@@ -200,11 +202,13 @@ def estimate_scene_extent(model, cams, device, n_sample=12):
             c2w = cam.c2w_opencv
             pts_world = (c2w[:3, :3] @ pts_cam.T).T + c2w[:3, 3]
             pts_3d.append(pts_world[::10])
+    if not pts_3d:
+        return 1.0  # fallback extent when no visible object pixels found
     all_pts = np.concatenate(pts_3d)
     lo = np.percentile(all_pts, 2, axis=0)
     hi = np.percentile(all_pts, 98, axis=0)
     full_extent = float((hi - lo).max())
-    med_depth = float(np.median(np.concatenate(all_depths)))
+    med_depth = float(np.median(np.concatenate(all_depths))) if all_depths else 1.0
     detail_extent = min(full_extent, med_depth * 8)
     pr(f"  Median depth: {med_depth:.2f}, full: {full_extent:.2f}, detail: {detail_extent:.2f}")
     return full_extent, detail_extent

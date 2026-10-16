@@ -623,7 +623,15 @@ class DNSplatterModel(SplatfactoModel):
 
         if "mask" in batch:
             # batch["mask"] : [H, W, 1]
-            assert batch["mask"].shape[:2] == gt_img.shape[:2] == pred_img.shape[:2]
+            if batch["mask"].shape[:2] != gt_img.shape[:2]:
+                import torch.nn.functional as F
+                m = batch["mask"]
+                if m.ndim == 3:
+                    m = m.permute(2, 0, 1).unsqueeze(0)
+                m = F.interpolate(m.float(), size=gt_img.shape[:2],
+                                  mode="nearest")
+                batch["mask"] = m.squeeze(0).permute(1, 2, 0).to(
+                    batch["mask"].dtype)
             mask = batch["mask"].to(self.device)
             depth_out = depth_out * mask
             if "sensor_depth" in batch:

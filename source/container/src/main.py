@@ -528,7 +528,10 @@ if __name__ == "__main__":
                     log.info(f"  Config override applied: {_k}={_v}")
             
             # Verify required COLMAP structure exists
-            has_images = os.path.exists(os.path.join(extract_source, 'images'))
+            # Support both flat layout (images/, sparse/) and colmap-prefix
+            # layout (colmap/images/, colmap/sparse/) produced by AtlasMobile.
+            has_images = os.path.exists(os.path.join(extract_source, 'images')) or \
+                        os.path.exists(os.path.join(extract_source, 'colmap', 'images'))
             has_sparse = os.path.exists(os.path.join(extract_source, 'sparse')) or \
                         os.path.exists(os.path.join(extract_source, 'colmap', 'sparse'))
             has_transforms = os.path.exists(os.path.join(extract_source, 'transforms.json'))
@@ -539,8 +542,9 @@ if __name__ == "__main__":
                     colmap_zip_needs_conversion = True
                     log.info("No transforms.json in zip - Colmap-to-Nerfstudio conversion will be required")
 
-                # Detect masks directory in the zip
-                has_masks = os.path.exists(os.path.join(extract_source, 'masks'))
+                # Detect masks directory in the zip (flat or under colmap/)
+                has_masks = os.path.exists(os.path.join(extract_source, 'masks')) or \
+                           os.path.exists(os.path.join(extract_source, 'colmap', 'masks'))
                 if has_masks:
                     log.info("Masks directory detected in zip — will enable mask training")
                 
@@ -554,6 +558,20 @@ if __name__ == "__main__":
                         else:
                             os.remove(dst)
                     shutil.move(src, dst)
+
+                # Hoist images/masks/depths from colmap/ to root when the
+                # zip uses the colmap-prefix layout (colmap/images/ etc.).
+                _colmap_dir = os.path.join(config['DATASET_PATH'], 'colmap')
+                if os.path.isdir(_colmap_dir):
+                    for _subdir in ('images', 'masks', 'depths'):
+                        _src = os.path.join(_colmap_dir, _subdir)
+                        _dst = os.path.join(config['DATASET_PATH'], _subdir)
+                        if os.path.isdir(_src) and not os.path.exists(_dst):
+                            shutil.move(_src, _dst)
+                            log.info(
+                                f"Hoisted colmap/{_subdir}/ to"
+                                f" {_subdir}/"
+                            )
 
                 if has_masks:
                     ZIP_HAS_MASKS = True
@@ -749,17 +767,19 @@ if __name__ == "__main__":
             _img_dir = os.path.join(config['DATASET_PATH'], 'images')
             _colmap_img_dir = os.path.join(config['DATASET_PATH'], 'colmap', 'images')
             _img_empty = not os.path.isdir(_img_dir) or not any(
-                f.lower().endswith(('.png', '.jpg', '.jpeg'))
-                for f in os.listdir(_img_dir)
-                if os.path.isfile(os.path.join(_img_dir, f))
-            ) if os.path.isdir(_img_dir) else True
+                _f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                for _r, _d, _fs in os.walk(_img_dir)
+                for _f in _fs
+            )
             if _img_empty and os.path.isdir(_colmap_img_dir):
-                os.makedirs(_img_dir, exist_ok=True)
-                _copied = 0
-                for _f in os.listdir(_colmap_img_dir):
-                    if _f.lower().endswith(('.png', '.jpg', '.jpeg')):
-                        shutil.copy2(os.path.join(_colmap_img_dir, _f), os.path.join(_img_dir, _f))
-                        _copied += 1
+                shutil.copytree(
+                    _colmap_img_dir, _img_dir, dirs_exist_ok=True,
+                )
+                _copied = sum(
+                    1 for _ in os.walk(_img_dir)
+                    for _f in _[2]
+                    if _f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                )
                 log.info(f"Copied {_copied} images from colmap/images/ to images/")
             # If transforms.json is missing but transforms-in.json exists, use it
             _transforms = os.path.join(config['DATASET_PATH'], 'transforms.json')
@@ -1492,7 +1512,8 @@ if __name__ == "__main__":
                 ]
                 if ENABLE_MULTI_GPU == "true" or \
                     config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
-                    if config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == "false":
+                    if config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == "false" and \
+                        config['USE_POSE_PRIOR_TRANSFORM_JSON'] == "false":
                         args.extend([
                             "--ImageReader.camera_model", "PINHOLE"
                         ])
@@ -1785,6 +1806,29 @@ if __name__ == "__main__":
                             cwd=current_dir_path,
                             requires_gpu=False
                         )
+                elif ENABLE_MULTI_GPU == "false" and \
+                    (config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'true' or config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true'):
+                    undist_output = os.path.join(
+                        config['DATASET_PATH'], '_undistorted'
+                    )
+                    args = [
+                        "image_undistorter",
+                        "--image_path", image_path,
+                        "--input_path", sparse_model_path,
+                        "--output_path", undist_output,
+                        "--output_type", "COLMAP"
+                    ]
+                    if config['LOG_VERBOSITY'] == "error":
+                        args.extend(["--log_level", "1"])
+                    pipeline.create_component(
+                        name="ColmapSfM-Image-Undistorter",
+                        comp_type=ComponentType.RECONSTRUCTION,
+                        comp_environ=ComponentEnvironment.EXECUTABLE,
+                        command="colmap",
+                        args=args,
+                        cwd=current_dir_path,
+                        requires_gpu=False
+                    )
             elif config['RECON_SOFTWARE_NAME'] == "map_anything": #MapAnything
                 args = [
                     "--scene_dir", config['DATASET_PATH'],
@@ -1806,8 +1850,10 @@ if __name__ == "__main__":
                 )
         else:
             log.info("Reconstruction configured to be skipped...skipping reconstruction")
-            # 3DGRUT requires undistorted images (PINHOLE only) — run undistorter on pre-existing COLMAP
-            if colmap_zip_found and config['MODEL'] in ('3dgrt', '3dgut'):
+            # 3DGRUT handles all COLMAP camera models natively (PINHOLE,
+            # SIMPLE_RADIAL, RADIAL, OPENCV, FULL_OPENCV, OPENCV_FISHEYE),
+            # so no undistortion step is needed for 3dgut.
+            if colmap_zip_found and config['MODEL'] == '3dgrt':
                 undist_output = os.path.join(config['DATASET_PATH'], '_undistorted')
                 undist_args = [
                     "image_undistorter",
@@ -1827,7 +1873,7 @@ if __name__ == "__main__":
                     cwd=current_dir_path,
                     requires_gpu=False
                 )
-                log.info("Added undistorter for 3DGRUT with pre-existing COLMAP reconstruction")
+                log.info("Added undistorter for 3DGRT with pre-existing COLMAP reconstruction")
     except Exception as e:
         error_message = f"Issue creating the reconstruction component: {e}"
         pipeline.report_error(750, error_message)
@@ -1868,6 +1914,27 @@ if __name__ == "__main__":
                 args=args,
                 requires_gpu=False
             )
+        elif (config['RUN_TRAIN'] == "true"
+              and config['MODEL'] not in ('3dgrt', '3dgut')
+              and not os.path.exists(os.path.join(config['DATASET_PATH'], "transforms.json"))):
+            _has_sparse = (
+                os.path.isfile(os.path.join(config['DATASET_PATH'], "colmap", "sparse", "0", "cameras.bin"))
+                or os.path.isfile(os.path.join(config['DATASET_PATH'], "sparse", "0", "cameras.bin"))
+            )
+            if _has_sparse:
+                log.info("transforms.json missing but COLMAP model found — adding conversion component")
+                args = ["--data_dir", config['DATASET_PATH']]
+                pipeline.create_component(
+                    name="Colmap-to-Nerfstudio",
+                    comp_type=ComponentType.RECONSTRUCTION,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="training/colmap_to_nerfstudio_cam.py",
+                    cwd=current_dir_path,
+                    args=args,
+                    requires_gpu=False
+                )
+            else:
+                log.info("Not configured to perform SfM reconstruction...skipping dataset conversion.")
         else:
             log.info("Not configured to perform SfM reconstruction...skipping dataset conversion.")
     except Exception as e:
@@ -1946,7 +2013,7 @@ if __name__ == "__main__":
                 elif isp_mode == "bilagrid":
                     args.extend(["--post_processing", "bilateral_grid"])
                 if ENABLE_ABSGRAD:
-                    args.extend(["--strategy.absgrad", "True"])
+                    args.append("--strategy.absgrad")
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -1992,23 +2059,38 @@ if __name__ == "__main__":
                     depth_dir = os.path.join(config['DATASET_PATH'], "depth_images")
                 has_sensor_depth = False
                 if os.path.isdir(depth_dir):
-                    _depth_samples = [f for f in os.listdir(depth_dir)
-                                      if f.lower().endswith(('.png', '.jpg', '.npy'))]
+                    _depth_samples: list[str] = []
+                    for _root, _dirs, _files in os.walk(depth_dir):
+                        for _f in _files:
+                            if _f.lower().endswith(('.png', '.jpg', '.npy')):
+                                _depth_samples.append(
+                                    os.path.join(_root, _f)
+                                )
+                            if len(_depth_samples) >= 3:
+                                break
+                        if _depth_samples:
+                            break
                     if _depth_samples:
                         import cv2 as _cv2_check
                         _s = _cv2_check.imread(
-                            os.path.join(depth_dir, _depth_samples[0]),
+                            _depth_samples[0],
                             _cv2_check.IMREAD_ANYDEPTH
                         )
                         if _s is not None and str(_s.dtype) == 'uint16':
                             _mm_max = float(_s.max()) * 0.001
                             _mm_min = float(_s[_s > 0].min()) * 0.001 if (_s > 0).any() else 0
                             has_sensor_depth = 0.1 <= _mm_min and _mm_max <= 1000.0
-                # Also check depth_sensor/ written by preprocess after converting mono depth
+                # Also check depth_sensor/ or depth_images/ after preprocess
                 if not has_sensor_depth:
-                    _ds_dir = os.path.join(config['DATASET_PATH'], "depth_sensor")
-                    if os.path.isdir(_ds_dir) and any(f.endswith('.png') for f in os.listdir(_ds_dir)):
-                        has_sensor_depth = True
+                    for _dname in ("depth_sensor", "depth_images", "depth"):
+                        _ds_dir = os.path.join(config['DATASET_PATH'], _dname)
+                        if os.path.isdir(_ds_dir):
+                            for _r2, _d2, _f2 in os.walk(_ds_dir):
+                                if any(_fn.endswith('.png') for _fn in _f2):
+                                    has_sensor_depth = True
+                                    break
+                        if has_sensor_depth:
+                            break
                 log.info(f"DN-Splatter depth mode: {'sensor (valid uint16)' if has_sensor_depth else 'mono (no valid sensor depth)'}")
 
                 args = [
@@ -2252,7 +2334,7 @@ if __name__ == "__main__":
                 elif isp_mode == "bilagrid":
                     log.info("Bilateral grid not supported with multi-GPU gsplat (requires single GPU), skipping")
                 if ENABLE_ABSGRAD:
-                    args.extend(["--strategy.absgrad", "True"])
+                    args.append("--strategy.absgrad")
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -2330,8 +2412,15 @@ if __name__ == "__main__":
                             f"scheduler.positions.max_steps={_total_iterations}",
                         ])
                     else:
-                        log.error(f"3DGRUT checkpoint not found: {threedgrut_ckpt_file}")
-                        raise RuntimeError(f"3DGRUT checkpoint missing: {threedgrut_ckpt_file}")
+                        log.warning(
+                            f"3DGRUT checkpoint not found: {threedgrut_ckpt_file}"
+                            " — falling back to fresh training"
+                        )
+                        args.extend([
+                            f"experiment_name={TRAIN_EXPERIMENT_NAME}",
+                            f"n_iterations={str(config['MAX_STEPS'])}",
+                            f"scheduler.positions.max_steps={str(config['MAX_STEPS'])}",
+                        ])
                 else:
                     args.extend([
                         f"experiment_name={TRAIN_EXPERIMENT_NAME}",
@@ -2341,7 +2430,7 @@ if __name__ == "__main__":
                 isp_mode = config.get('THREED_ISP', 'none').lower()
                 if isp_mode in ("bilagrid", "ppisp"):
                     args.append(f"+model.isp.type={isp_mode}")
-                
+
                 # train.py is patched with DataLoader fix for Batch at build time
                 pipeline.create_component(
                     name="Train",
@@ -3657,15 +3746,52 @@ if __name__ == "__main__":
                     # COLMAP FEATURE EXTRACTOR CONDITIONAL COMPONENT
                     log.info("Using standard COLMAP feature extraction")
                     # If using pose prior, use the intrinsics from the txt file
-                    if config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == "true":
-                        camera_params = read_camera_params_from_file(os.path.join(sparse_model_path, "cameras.txt"))
+                    if config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == "true" or \
+                        config['USE_POSE_PRIOR_TRANSFORM_JSON'] == "true":
+                        # Prefer cameras.bin/txt from existing COLMAP reconstruction
+                        camera_params = read_camera_params_from_file(
+                            os.path.join(sparse_model_path, "cameras.txt")
+                        )
+                        if camera_params is None and config['USE_POSE_PRIOR_TRANSFORM_JSON'] == "true":
+                            # Fall back to transforms.json intrinsics
+                            try:
+                                _tf_path = transforms_in_path
+                                if not os.path.exists(_tf_path):
+                                    _tf_path = transforms_out_path
+                                if os.path.exists(_tf_path):
+                                    import json as _json_tf
+                                    with open(_tf_path, 'r') as _f:
+                                        _tf = _json_tf.load(_f)
+                                    _src = _tf
+                                    if 'fl_x' not in _src and _tf.get('frames'):
+                                        _src = _tf['frames'][0]
+                                    _fl_x = _src.get('fl_x')
+                                    _fl_y = _src.get('fl_y', _fl_x)
+                                    _cx = _src.get('cx')
+                                    _cy = _src.get('cy')
+                                    if _fl_x is not None and _cx is not None:
+                                        _k1 = float(_src.get('k1', 0))
+                                        _k2 = float(_src.get('k2', 0))
+                                        _p1 = float(_src.get('p1', 0))
+                                        _p2 = float(_src.get('p2', 0))
+                                        if any(v != 0 for v in (_k1, _k2, _p1, _p2)):
+                                            _cam = "OPENCV"
+                                            _ps = f"{_fl_x},{_fl_y},{_cx},{_cy},{_k1},{_k2},{_p1},{_p2}"
+                                        else:
+                                            _cam = "PINHOLE"
+                                            _ps = f"{_fl_x},{_fl_y},{_cx},{_cy}"
+                                        camera_params = {'model': _cam, 'params_str': _ps}
+                                        log.info(f"Camera from transforms.json: {_cam}")
+                            except Exception as _e:
+                                log.warning(f"Could not read camera from transforms.json: {_e}")
                         if camera_params is not None:
                             component.args.extend([
                                 "--ImageReader.camera_model", camera_params['model'],
                                 "--ImageReader.camera_params", camera_params['params_str']
                             ])
+                            log.info(f"Feature extractor camera: {camera_params['model']}")
                         else:
-                            log.warning("Could not read camera params from cameras.txt/bin — using COLMAP defaults")
+                            log.warning("Could not read camera params — using COLMAP defaults")
                     elif config.get('ENABLE_FL_METRIC', 'false') == 'true':
                         # Convert metric focal length from mm to pixels using the 35mm-equivalent
                         # formula: focal_px = (focal_mm / 36.0) * image_width_px
@@ -3913,21 +4039,65 @@ if __name__ == "__main__":
                                 log.info(f"AUTO_MATCHER: keeping current matcher '{config['MATCHING_METHOD']}'")
                         except Exception as e:
                             log.warning(f"AUTO_MATCHER: analysis failed ({e}), keeping '{config['MATCHING_METHOD']}'")
+                case "ColmapSfM-Triangulator" | "HlocSfM-Tri":
+                    import sqlite3 as _sql
+                    try:
+                        _conn = _sql.connect(colmap_db_path)
+                        _cur = _conn.cursor()
+                        _cur.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        )
+                        _existing = {r[0] for r in _cur.fetchall()}
+                        _dropped = []
+                        for _tbl in ("frame_data", "frames", "rig_sensors", "rigs"):
+                            if _tbl in _existing:
+                                _cur.execute(f"DROP TABLE {_tbl}")
+                                _dropped.append(_tbl)
+                        _conn.commit()
+                        _conn.close()
+                        if _dropped:
+                            log.info(
+                                "Dropped COLMAP 4.x rig tables before"
+                                f" triangulator: {_dropped}"
+                            )
+                    except Exception as _rig_err:
+                        log.warning(f"Could not drop rig tables: {_rig_err}")
+                    for _rf in ("rigs.txt", "frames.txt",
+                                "rigs.bin", "frames.bin"):
+                        _rfp = os.path.join(sparse_model_path, _rf)
+                        if os.path.exists(_rfp):
+                            os.remove(_rfp)
+                            log.info(f"Removed {_rf} from model dir")
+                    pipeline.run_component(i)
                 case "ColmapSfM-Image-Undistorter":
                     pipeline.run_component(i)
-                    # For 3DGRUT with pre-existing COLMAP: move undistorted output into place
+                    # Move undistorted output into place
                     undist_dir = os.path.join(config['DATASET_PATH'], '_undistorted')
-                    if config['MODEL'] in ('3dgrt', '3dgut') and os.path.isdir(undist_dir):
+                    if os.path.isdir(undist_dir):
                         undist_sparse = os.path.join(undist_dir, 'sparse')
                         undist_images = os.path.join(undist_dir, 'images')
                         if os.path.isdir(undist_sparse):
-                            # Replace sparse/0/ contents with undistorted model
                             for f in os.listdir(undist_sparse):
-                                shutil.move(os.path.join(undist_sparse, f),
-                                            os.path.join(sparse_model_path, f))
-                            log.info(f"Moved undistorted model into {sparse_model_path}")
+                                shutil.copy2(
+                                    os.path.join(undist_sparse, f),
+                                    os.path.join(sparse_model_path, f),
+                                )
+                            log.info(f"Copied undistorted model into {sparse_model_path}")
+                            # Also update colmap/sparse/0 so colmap-to-nerfstudio
+                            # reads the undistorted model
+                            _colmap_sparse = os.path.join(
+                                config['DATASET_PATH'], 'colmap', 'sparse', '0'
+                            )
+                            if os.path.isdir(_colmap_sparse):
+                                for f in os.listdir(undist_sparse):
+                                    shutil.copy2(
+                                        os.path.join(undist_sparse, f),
+                                        os.path.join(_colmap_sparse, f),
+                                    )
+                                log.info(
+                                    f"Copied undistorted model into {_colmap_sparse}"
+                                )
                         if os.path.isdir(undist_images):
-                            # Replace images with undistorted versions
                             for f in os.listdir(undist_images):
                                 shutil.move(os.path.join(undist_images, f),
                                             os.path.join(image_path, f))
@@ -3982,10 +4152,16 @@ if __name__ == "__main__":
                         # Re-evaluate sensor depth at runtime — depth_sensor/ is created by
                         # preprocess after pipeline creation, so the build-time detection may
                         # have been wrong (uint8 files present but not yet converted).
-                        _depth_sensor_dir = os.path.join(config['DATASET_PATH'], "depth_sensor")
-                        _has_sensor_depth = os.path.isdir(_depth_sensor_dir) and any(
-                            f.endswith('.png') for f in os.listdir(_depth_sensor_dir)
-                        )
+                        _has_sensor_depth = False
+                        for _dname in ("depth_sensor", "depth_images", "depth"):
+                            _dd = os.path.join(config['DATASET_PATH'], _dname)
+                            if os.path.isdir(_dd):
+                                for _r, _d, _fls in os.walk(_dd):
+                                    if any(_fn.endswith('.png') for _fn in _fls):
+                                        _has_sensor_depth = True
+                                        break
+                            if _has_sensor_depth:
+                                break
                         # Always use mono normals — dsine provides stronger planar supervision
                         _normal_supervision = "mono"
                         log.info(f"DN-Splatter Train runtime depth mode: {'sensor' if _has_sensor_depth else 'mono'}")
@@ -4107,6 +4283,75 @@ if __name__ == "__main__":
                                     remove_fully_masked_images_for_gsplat(
                                         image_path, _sparse_0, _masks_dir, log
                                     )
+                        # 3DGRUT reads the COLMAP model from sparse/0/,
+                        # but the colmap-prefix zip layout puts it at
+                        # colmap/sparse/0/.  Copy the files over.
+                        if config['MODEL'] == '3dgut':
+                            _s0 = os.path.join(
+                                config['DATASET_PATH'], 'sparse', '0',
+                            )
+                            _cs0 = os.path.join(
+                                config['DATASET_PATH'],
+                                'colmap', 'sparse', '0',
+                            )
+                            _s0_empty = (
+                                not os.path.isdir(_s0)
+                                or not os.listdir(_s0)
+                            )
+                            if _s0_empty and os.path.isdir(_cs0):
+                                os.makedirs(_s0, exist_ok=True)
+                                for _sf in os.listdir(_cs0):
+                                    shutil.copy2(
+                                        os.path.join(_cs0, _sf),
+                                        os.path.join(_s0, _sf),
+                                    )
+                                log.info(
+                                    "Copied COLMAP model from"
+                                    " colmap/sparse/0/ to sparse/0/"
+                                    " for 3DGRUT"
+                                )
+
+                        # 3DGRUT expects masks as <stem>_mask.png next
+                        # to each image, not in a separate masks/ dir.
+                        if ZIP_HAS_MASKS and config['MODEL'] == '3dgut':
+                            _masks_dir = os.path.join(
+                                config['DATASET_PATH'], 'masks',
+                            )
+                            _copied_masks = 0
+                            for _mr, _md, _mf in os.walk(image_path):
+                                _mrel = os.path.relpath(_mr, image_path)
+                                for _img_f in _mf:
+                                    if not _img_f.lower().endswith(
+                                        ('.png', '.jpg', '.jpeg')
+                                    ):
+                                        continue
+                                    _stem = os.path.splitext(_img_f)[0]
+                                    _mask_cand = os.path.join(
+                                        _masks_dir,
+                                        _mrel if _mrel != '.' else '',
+                                        _img_f,
+                                    )
+                                    if not os.path.isfile(_mask_cand):
+                                        _mask_cand = os.path.join(
+                                            _masks_dir,
+                                            _mrel if _mrel != '.' else '',
+                                            _stem + '.png',
+                                        )
+                                    if os.path.isfile(_mask_cand):
+                                        shutil.copy2(
+                                            _mask_cand,
+                                            os.path.join(
+                                                _mr,
+                                                _stem + '_mask.png',
+                                            ),
+                                        )
+                                        _copied_masks += 1
+                            log.info(
+                                f"Copied {_copied_masks} masks"
+                                " into 3DGRUT convention"
+                                " (<image>_mask.png)"
+                            )
+
                         # Clean up CUDA memory before training
                         cleanup_cuda_memory()
                         pipeline.run_component(i)

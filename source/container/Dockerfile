@@ -390,7 +390,6 @@ RUN pip install --no-cache-dir \
     pathos \
     'plotly>=5.7.0' \
     'protobuf<=5,!=3.20.0' \
-    'pymeshlab>=2022.2.post2' \
     'pyngrok>=5.1.0' \
     'pyquaternion>=0.9.9' \
     'python-socketio>=5.7.1' \
@@ -605,6 +604,8 @@ RUN mkdir -p ${CODE_PATH}/reconstruction ${CODE_PATH}/training ${CODE_PATH}/sphe
     ${CODE_PATH}/pre_processing/segmentation ${CODE_PATH}/pre_processing/video \
     ${CODE_PATH}/post_processing ${CODE_PATH}/sam
 # Copy application source — grouped to minimize layers
+# Cache-bust: increment when pipeline source files change
+ARG PIPELINE_CACHE_BUST=26
 COPY ./src/entrypoint.sh ./src/main.py ./src/config.json ./src/pipeline/pipeline.py ./src/pipeline/utils.py ${CODE_PATH}/
 COPY ./src/pipeline/reconstruction/extract_poses_imgs.py \
      ./src/pipeline/reconstruction/process_pose_transforms.py \
@@ -686,4 +687,4 @@ RUN echo "=== VERSION VERIFICATION ===" \
     && echo "  PyColmap (gsplat): $(PYTHONPATH=/opt/gsplat_pycolmap:$PYTHONPATH python -c 'import pycolmap; print(pycolmap.__version__)' 2>/dev/null || echo 'Not found')" \
     && echo "  NerfStudio: $(python -c 'import nerfstudio; print(getattr(nerfstudio, "__version__", "installed"))' 2>/dev/null || echo 'Not found')" \
     && echo "  GSplat: $(python -c 'import gsplat; print(gsplat.__version__)' 2>/dev/null || echo 'Not found')" \
-    && echo "=== END VERSION VERIFICATION ==="
+    && echo "=== END VERSION VERIFICATION === "

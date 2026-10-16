@@ -133,78 +133,169 @@ def sync_images_txt_with_db(database_path, images_dir, sparse_path):
     if not images_dir.exists():
         raise FileNotFoundError(f"Images directory not found: {images_dir}")
     if not images_txt_path.exists():
-        raise FileNotFoundError(f"images.txt not found: {images_txt_path}")
+        images_bin_path = sparse_path / 'images.bin'
+        if images_bin_path.exists():
+            # Remove COLMAP 4.x rig/frame files before conversion —
+            # they cause RigId crashes in both pycolmap and the CLI
+            for _rig in ("rigs.bin", "frames.bin",
+                         "rigs.txt", "frames.txt"):
+                _rp = sparse_path / _rig
+                if _rp.exists():
+                    _rp.unlink()
+                    print(f"Removed {_rig} before conversion")
+            converted = False
+            try:
+                import pycolmap
+                recon = pycolmap.Reconstruction(str(sparse_path))
+                recon.write_text(str(sparse_path))
+                converted = True
+                print(
+                    f"Converted COLMAP binary to text in"
+                    f" {sparse_path} (pycolmap)"
+                )
+            except Exception as pyc_err:
+                print(
+                    f"pycolmap conversion failed ({pyc_err}),"
+                    " trying colmap model_converter CLI"
+                )
+                import subprocess
+                subprocess.run(
+                    [
+                        "colmap", "model_converter",
+                        "--input_path", str(sparse_path),
+                        "--output_path", str(sparse_path),
+                        "--output_type", "TXT",
+                    ],
+                    check=True,
+                )
+                converted = True
+                print(
+                    f"Converted COLMAP binary to text in"
+                    f" {sparse_path} (CLI)"
+                )
+            if converted:
+                for _stale in (
+                    "images.bin", "cameras.bin", "points3D.bin",
+                    "rigs.bin", "frames.bin",
+                    "rigs.txt", "frames.txt",
+                ):
+                    _bp = sparse_path / _stale
+                    if _bp.exists():
+                        _bp.unlink()
+                print(
+                    "Removed binary/rig model files"
+                )
+        if not images_txt_path.exists():
+            raise FileNotFoundError(
+                f"images.txt not found: {images_txt_path}"
+            )
     
     # Create backup of original images.txt
     backup_path = images_txt_path.with_suffix('.txt.backup')
     shutil.copy2(images_txt_path, backup_path)
-    
-    # Read image information from database
-    db_images = {}
+
+    # Read database: image_id, name, camera_id for each image
+    db_images: dict[int, tuple[str, int]] = {}
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """
-            SELECT image_id, name 
-            FROM images 
-            ORDER BY image_id
-            """
+            "SELECT image_id, name, camera_id "
+            "FROM images ORDER BY image_id"
         )
-        #cursor.execute("SELECT image_id, name FROM images ORDER BY image_id;")
-        for image_id, name in cursor.fetchall():
-            db_images[image_id] = name
-    
-    # Read images.txt content
-    images_txt_content = {}
-    current_image_block = []
-    
+        for image_id, name, camera_id in cursor.fetchall():
+            db_images[image_id] = (name, camera_id)
+
+    # Build name → db info lookup
+    db_name_to_info: dict[str, tuple[int, int]] = {}
+    for image_id, (name, camera_id) in db_images.items():
+        db_name_to_info[name] = (image_id, camera_id)
+
+    # Parse images.txt — index by image NAME (not numeric ID)
+    model_entries: dict[str, list[str]] = {}
     with open(images_txt_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
-        
-    # Parse images.txt
+
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-        if line.startswith('#'):
+        if line.startswith('#') or not line:
             i += 1
             continue
-            
-        if line:  # First line of image block
-            image_data = line.split()
-            image_id = int(image_data[0])  # First element is IMAGE_ID
-            current_image_block = [line]
-            
-            # Next line contains the second row of image data
-            if i + 1 < len(lines):
-                current_image_block.append(lines[i + 1].rstrip())
-                
-            images_txt_content[image_id] = current_image_block
+        parts = line.split()
+        if len(parts) >= 10:
+            model_name = parts[9]
+            second_line = lines[i + 1].rstrip() if i + 1 < len(lines) else ""
+            model_entries[model_name] = [line, second_line]
             i += 2
         else:
             i += 1
-    
-    # Write new images.txt with correct order
+
+    # Build a basename fallback index for model entries whose names
+    # include subdirectory paths (e.g. "face_00/scan_000.jpg").
+    # First match wins when multiple model entries share a basename.
+    basename_to_model: dict[str, str] = {}
+    for model_name in model_entries:
+        bn = os.path.basename(model_name)
+        if bn != model_name and bn not in basename_to_model:
+            basename_to_model[bn] = model_name
+
+    # Write images.txt matching model poses to database IDs by name
+    matched = 0
+    matched_by_basename = 0
+    skipped_db = 0
     with open(images_txt_path, 'w', encoding='utf-8') as f:
         f.write("# Image list with two lines of data per image:\n")
         f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
         f.write("#   POINTS2D[] as (X, Y, POINT3D_ID)\n")
-        
-        for image_id in sorted(db_images.keys()):
-            if image_id in images_txt_content:
-                # Get the original line and update the image name
-                line_parts = images_txt_content[image_id][0].split()
-                line_parts[9] = db_images[image_id]  # Update the image name
-                new_line = ' '.join(line_parts)
-                
-                f.write(new_line + '\n')
-                f.write(images_txt_content[image_id][1] + '\n')
+
+        for db_id in sorted(db_images.keys()):
+            db_name, db_cam_id = db_images[db_id]
+            if db_name in model_entries:
+                entry_key = db_name
+            elif db_name in basename_to_model:
+                entry_key = basename_to_model[db_name]
+                matched_by_basename += 1
             else:
-                print(f"Warning: Image ID {image_id} ({db_images[image_id]}) found in database but not in images.txt")
-    
-    print(f"Successfully synchronized images.txt with database.db")
+                skipped_db += 1
+                continue
+            parts = model_entries[entry_key][0].split()
+            parts[0] = str(db_id)
+            parts[8] = str(db_cam_id)
+            parts[9] = db_name
+            f.write(" ".join(parts) + "\n")
+            f.write(model_entries[entry_key][1] + "\n")
+            matched += 1
+
+    # Write cameras.txt from database so camera IDs are consistent
+    cameras_txt_path = sparse_path / "cameras.txt"
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT camera_id, model, width, height, params "
+            "FROM cameras ORDER BY camera_id"
+        )
+        db_cameras = cursor.fetchall()
+    if db_cameras:
+        _MODEL_NAMES = {
+            0: "SIMPLE_PINHOLE", 1: "PINHOLE",
+            2: "SIMPLE_RADIAL", 3: "RADIAL",
+            4: "OPENCV", 5: "OPENCV_FISHEYE",
+        }
+        with open(cameras_txt_path, 'w', encoding='utf-8') as f:
+            f.write("# Camera list with one line of data per camera:\n")
+            f.write("#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
+            for cam_id, model_id, w, h, params_blob in db_cameras:
+                model_name = _MODEL_NAMES.get(model_id, f"UNKNOWN_{model_id}")
+                params = np.frombuffer(params_blob, dtype=np.float64)
+                params_str = " ".join(str(p) for p in params)
+                f.write(f"{cam_id} {model_name} {w} {h} {params_str}\n")
+        print(f"Wrote {len(db_cameras)} cameras from database to cameras.txt")
+
+    print(f"Synchronized images.txt: {matched} matched by name"
+          f" ({matched_by_basename} via basename fallback), "
+          f"{skipped_db} db images not in model, "
+          f"{len(model_entries) - matched} model images not in db")
     print(f"Original images.txt backed up to: {backup_path}")
-    print(f"Processed {len(db_images)} images from database")
-    print(f"Found {len(images_txt_content)} images in images.txt")
 
 def get_image_extension(depth_path):
     """
@@ -227,22 +318,32 @@ def process_transforms(transforms_json):
     img_ext = get_image_extension(frames[0]['depth_path'])
     print(f"Detected image extension: {img_ext}")
     
+    root_cam_model = transforms_json.get('camera_model')
+
     for frame in frames:
         transform = np.array(frame['transform_matrix'])
         poses.append(transform)
-        
+
         # Extract just the filename part and add extension
         base_name = os.path.basename(frame['file_path'])
         image_name = base_name + img_ext
         image_names.append(image_name)
-        
-        cameras.append({
-            'w': frame['w'],
-            'h': frame['h'],
-            'fl_x': frame['fl_x'],
-            'cx': frame['cx'],
-            'cy': frame['cy']
-        })
+
+        src = frame if 'fl_x' in frame else transforms_json
+        cam = {
+            'w': frame.get('w', transforms_json.get('w')),
+            'h': frame.get('h', transforms_json.get('h')),
+            'fl_x': src['fl_x'],
+            'fl_y': src.get('fl_y', src['fl_x']),
+            'cx': src['cx'],
+            'cy': src['cy'],
+        }
+        for k in ('k1', 'k2', 'p1', 'p2', 'k3', 'k4', 'k5', 'k6'):
+            v = frame.get(k, transforms_json.get(k))
+            if v is not None:
+                cam[k] = v
+        cam['camera_model'] = frame.get('camera_model', root_cam_model)
+        cameras.append(cam)
     
     print(f"Processed {len(frames)} frames")
     return poses, image_names, cameras
@@ -439,21 +540,66 @@ def get_camera_model_from_db(database_path):
             return model_map.get(model_id, 'SIMPLE_PINHOLE')
     return 'SIMPLE_PINHOLE'
 
+def _determine_camera_model(camera):
+    """Determine COLMAP camera model from intrinsic fields."""
+    explicit = camera.get('camera_model')
+    if explicit:
+        model_map = {
+            'OPENCV': 'OPENCV',
+            'OPENCV_FISHEYE': 'OPENCV_FISHEYE',
+            'PINHOLE': 'PINHOLE',
+            'SIMPLE_PINHOLE': 'SIMPLE_PINHOLE',
+            'SIMPLE_RADIAL': 'SIMPLE_RADIAL',
+            'RADIAL': 'RADIAL',
+        }
+        mapped = model_map.get(explicit.upper())
+        if mapped:
+            return mapped
+
+    k1 = float(camera.get('k1', 0))
+    k2 = float(camera.get('k2', 0))
+    p1 = float(camera.get('p1', 0))
+    p2 = float(camera.get('p2', 0))
+    has_dist = any(v != 0 for v in (k1, k2, p1, p2))
+    fl_x = camera['fl_x']
+    fl_y = camera.get('fl_y', fl_x)
+    if has_dist:
+        return 'OPENCV'
+    if fl_x != fl_y:
+        return 'PINHOLE'
+    return 'PINHOLE'
+
+
+def _camera_params_list(camera, model):
+    """Build COLMAP parameter list for a camera model."""
+    fl_x = camera['fl_x']
+    fl_y = camera.get('fl_y', fl_x)
+    cx = camera['cx']
+    cy = camera['cy']
+    k1 = float(camera.get('k1', 0))
+    k2 = float(camera.get('k2', 0))
+    p1 = float(camera.get('p1', 0))
+    p2 = float(camera.get('p2', 0))
+
+    if model == 'SIMPLE_PINHOLE':
+        return [fl_x, cx, cy]
+    if model == 'PINHOLE':
+        return [fl_x, fl_y, cx, cy]
+    if model == 'SIMPLE_RADIAL':
+        return [fl_x, cx, cy, k1]
+    if model == 'RADIAL':
+        return [fl_x, cx, cy, k1, k2]
+    if model == 'OPENCV':
+        return [fl_x, fl_y, cx, cy, k1, k2, p1, p2]
+    if model == 'OPENCV_FISHEYE':
+        k3 = float(camera.get('k3', 0))
+        k4 = float(camera.get('k4', 0))
+        return [fl_x, fl_y, cx, cy, k1, k2, k3, k4]
+    return [fl_x, fl_y, cx, cy]
+
+
 def write_cameras_file(cameras, output_dir, database_path=None):
-    """
-    Write the Colmap cameras.txt file with camera intrinsic params
-        0 = 'w': frame['w'],
-        1 = 'h': frame['h'],
-        2 = 'fl_x': frame['fl_x'],
-        3 = 'cx': frame['cx'],
-        4 = 'cy': frame['cy']
-    """
-    # Get camera model from database if available
-    camera_model = 'SIMPLE_PINHOLE'
-    if database_path and os.path.exists(database_path):
-        camera_model = get_camera_model_from_db(database_path)
-        print(f"Using camera model from database: {camera_model}")
-    
+    """Write COLMAP cameras.txt from per-frame intrinsics."""
     cameras_path = os.path.join(output_dir, 'cameras.txt')
     print(f"Writing cameras file to {cameras_path}")
     with open(cameras_path, 'w', encoding="utf-8") as f:
@@ -461,19 +607,14 @@ def write_cameras_file(cameras, output_dir, database_path=None):
         f.write('#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n')
 
         for idx, camera in enumerate(cameras, 1):
-            # Match the camera model from the database
-            if camera_model == 'SIMPLE_RADIAL':
-                # SIMPLE_RADIAL: f, cx, cy, k
-                params = [camera['fl_x'], camera['cx'], camera['cy'], 0.0]
-            elif camera_model == 'PINHOLE':
-                # PINHOLE: fx, fy, cx, cy
-                params = [camera['fl_x'], camera['fl_x'], camera['cx'], camera['cy']]
-            else:  # SIMPLE_PINHOLE
-                # SIMPLE_PINHOLE: f, cx, cy
-                params = [camera['fl_x'], camera['cx'], camera['cy']]
-            
-            f.write(f'{idx} {camera_model} {camera["w"]} {camera["h"]} {" ".join(map(str, params))}\n')
-    print(f"Wrote {len(cameras)} cameras to file with model {camera_model}")
+            model = _determine_camera_model(camera)
+            params = _camera_params_list(camera, model)
+            params_str = " ".join(str(p) for p in params)
+            f.write(
+                f'{idx} {model} {camera["w"]} {camera["h"]}'
+                f' {params_str}\n'
+            )
+    print(f"Wrote {len(cameras)} cameras to file")
 
 def write_images_file(image_names, poses, output_dir, source_coord_name, pose_is_world_to_cam):
     """
@@ -501,7 +642,7 @@ def write_images_file(image_names, poses, output_dir, source_coord_name, pose_is
             image_name = os.path.basename(name)
 
             # Write the camera pose
-            f.write(f'{idx} {R_colmap[0]} {R_colmap[1]} {R_colmap[2]} {R_colmap[3]} {t_colmap[0]} {t_colmap[1]} {t_colmap[2]} {1} {image_name}\n')
+            f.write(f'{idx} {R_colmap[0]} {R_colmap[1]} {R_colmap[2]} {R_colmap[3]} {t_colmap[0]} {t_colmap[1]} {t_colmap[2]} {idx} {image_name}\n')
             # Empty second line for points2D
             f.write('\n')
     print(f"Wrote {len(image_names)} images to file")
@@ -532,6 +673,38 @@ def get_colmap_image_order(database_path):
         #cursor.execute("SELECT name FROM images ORDER BY image_id")
         image_names = [row[0] for row in cursor.fetchall()]
     return image_names
+
+def clear_rig_tables(db_path: str) -> None:
+    """Drop COLMAP 4.x rig tables from the database.
+
+    COLMAP 4.x ``feature_extractor`` creates rig/frame tables even for
+    single-camera datasets.  If these tables *exist* (even empty),
+    ``point_triangulator`` enters the rig code path and crashes when
+    the text model files disagree with auto-generated frame
+    assignments.  Dropping the tables entirely forces COLMAP to fall
+    back to the non-rig loading path.
+    """
+    rig_tables = ("frame_data", "frames", "rig_sensors", "rigs")
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        existing = {r[0] for r in cursor.fetchall()}
+        dropped: list[str] = []
+        for tbl in rig_tables:
+            if tbl in existing:
+                cursor.execute(f"DROP TABLE {tbl}")
+                dropped.append(tbl)
+        conn.commit()
+        conn.close()
+        if dropped:
+            print(
+                "Dropped COLMAP 4.x rig tables to avoid"
+                f" triangulator crash: {dropped}"
+            )
+    except Exception as exc:
+        print(f"Warning: could not drop rig tables: {exc}")
+
 
 def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
     """
@@ -602,41 +775,51 @@ def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
         # First, clear any existing pose priors
         cursor.execute("DELETE FROM pose_priors")
 
-        # Detect schema version: COLMAP 4.x uses image_id (FK), 3.x uses image_name (text PK)
+        # Detect schema variant:
+        #   COLMAP 4.x rig: corr_data_id (references image_id), corr_sensor_type=0
+        #   COLMAP 4.x early: image_id FK
+        #   COLMAP 3.x: image_name text PK
         cursor.execute("PRAGMA table_info(pose_priors)")
         pose_prior_cols = {row[1] for row in cursor.fetchall()}
-        print(f"[POSE_PRIOR_DEBUG] pose_prior_cols after DELETE: {pose_prior_cols}")
+        print(f"[POSE_PRIOR_DEBUG] pose_prior_cols: {pose_prior_cols}")
+
         if not pose_prior_cols:
-            # pose_priors table missing entirely (old DB from zip) - create with 4.x schema
-            print("[POSE_PRIOR_DEBUG] pose_priors table missing - creating with 4.x schema")
+            print("[POSE_PRIOR_DEBUG] pose_priors table empty — creating 4.x schema")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS pose_priors (
                     image_id INTEGER PRIMARY KEY NOT NULL,
                     position BLOB,
                     coordinate_system INTEGER NOT NULL,
                     position_covariance BLOB,
-                    FOREIGN KEY(image_id) REFERENCES images(image_id) ON DELETE CASCADE
+                    FOREIGN KEY(image_id) REFERENCES images(image_id)
+                        ON DELETE CASCADE
                 )
             """)
             pose_prior_cols = {'image_id'}
+
+        use_corr_schema = "corr_data_id" in pose_prior_cols
         use_image_id_schema = "image_id" in pose_prior_cols
-        print(f"[POSE_PRIOR_DEBUG] use_image_id_schema={use_image_id_schema}, cols={pose_prior_cols}")
+        schema_label = (
+            "corr_data_id (4.x rig)" if use_corr_schema
+            else "image_id (4.x)" if use_image_id_schema
+            else "image_name (3.x)"
+        )
+        print(f"[POSE_PRIOR_DEBUG] schema={schema_label}")
 
-        # Build a name -> image_id lookup from the images table (needed for 4.x schema)
-        name_to_image_id = {}
-        if use_image_id_schema:
-            cursor.execute("SELECT image_id, name FROM images")
-            name_to_image_id = {name: image_id for image_id, name in cursor.fetchall()}
+        # Build name -> (image_id, camera_id) lookup for 4.x schemas
+        name_to_image = {}
+        if use_corr_schema or use_image_id_schema:
+            cursor.execute("SELECT image_id, camera_id, name FROM images")
+            for row in cursor.fetchall():
+                name_to_image[row[2]] = {
+                    'image_id': row[0],
+                    'camera_id': row[1],
+                }
 
-        # Update the pose_priors table with the pose information
         for image_id, pose_data in image_poses.items():
-            # Get translation
             tx, ty, tz = pose_data['translation']
-            
-            # Convert quaternion to rotation matrix
             qw, qx, qy, qz = pose_data['quaternion']
-            
-            # Create rotation matrix from quaternion
+
             R = np.zeros((3, 3))
             R[0, 0] = 1 - 2 * qy**2 - 2 * qz**2
             R[0, 1] = 2 * qx * qy - 2 * qz * qw
@@ -647,43 +830,55 @@ def update_colmap_db_with_pose_priors(colmap_db_path, images_txt_path):
             R[2, 0] = 2 * qx * qz - 2 * qy * qw
             R[2, 1] = 2 * qy * qz + 2 * qx * qw
             R[2, 2] = 1 - 2 * qx**2 - 2 * qy**2
-            
-            # Invert the transformation (camera-to-world -> world-to-camera)
+
             R_inv = R.transpose()
             t_inv = -R_inv @ np.array([tx, ty, tz])
-            
-            # Create position blob (translation vector)
-            position = np.array(t_inv, dtype=np.float64)
-            position_blob = position.tobytes()
-            
-            # Create a default identity covariance matrix (low uncertainty)
-            covariance = np.eye(3, dtype=np.float64) * 0.01
-            covariance_blob = covariance.tobytes()
-            
-            # Use coordinate system 1 (COLMAP world coordinate system)
+
+            position_blob = np.array(t_inv, dtype=np.float64).tobytes()
+            covariance_blob = (np.eye(3, dtype=np.float64) * 0.01).tobytes()
             coordinate_system = 1
 
-            if use_image_id_schema:
-                # COLMAP 4.x: pose_priors(image_id INTEGER PK, ...)
-                db_image_id = name_to_image_id.get(pose_data['name'])
-                if db_image_id is None:
-                    print("Warning: image not found in database, skipping pose prior for", pose_data['name'])
+            if use_corr_schema:
+                # COLMAP 4.x rig schema: corr_data_id = image_id,
+                # corr_sensor_type = 0 (camera), corr_sensor_id = camera_id
+                img_info = name_to_image.get(pose_data['name'])
+                if img_info is None:
+                    print(f"Warning: '{pose_data['name']}' not in DB, skipping")
+                    continue
+                cursor.execute("""
+                    INSERT INTO pose_priors
+                    (corr_data_id, corr_sensor_type, corr_sensor_id,
+                     position, coordinate_system, position_covariance)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (  # nosemgrep
+                    img_info['image_id'], 0, img_info['camera_id'],
+                    position_blob, coordinate_system, covariance_blob,
+                ))
+            elif use_image_id_schema:
+                # COLMAP 4.x early: image_id PK
+                img_info = name_to_image.get(pose_data['name'])
+                if img_info is None:
+                    print(f"Warning: '{pose_data['name']}' not in DB, skipping")
                     continue
                 cursor.execute("""
                     INSERT OR REPLACE INTO pose_priors
                     (image_id, position, coordinate_system, position_covariance)
                     VALUES (?, ?, ?, ?)
-                """, (db_image_id, position_blob, coordinate_system, covariance_blob))  # nosemgrep
+                """, (  # nosemgrep
+                    img_info['image_id'],
+                    position_blob, coordinate_system, covariance_blob,
+                ))
             else:
-                # COLMAP 3.x: pose_priors(image_name TEXT PK, ...)
+                # COLMAP 3.x: image_name text PK
                 cursor.execute("""
                     INSERT OR REPLACE INTO pose_priors
-                    (image_name, position, coordinate_system, position_covariance)
+                    (image_name, position, coordinate_system,
+                     position_covariance)
                     VALUES (?, ?, ?, ?)
-                """, (pose_data['name'], position_blob, coordinate_system, covariance_blob))  # nosemgrep
-
-            if cursor.rowcount == 0:
-                print("Warning: Failed to insert pose prior for image", pose_data['name'])
+                """, (  # nosemgrep
+                    pose_data['name'],
+                    position_blob, coordinate_system, covariance_blob,
+                ))
         
         # Commit changes and close connection
         conn.commit()
@@ -806,7 +1001,23 @@ if __name__ == '__main__':
                 pose_is_world_to_cam
             )
             create_empty_points3d_file(sparse_path)
-        # Using spatial matcher matcher for pose priors requires colmap db to be updated with poses
+            # Remove binary files so COLMAP loads the text files we just wrote
+            # and to avoid rig-format conflicts with COLMAP 4.x
+            for _bin in (
+                "images.bin", "cameras.bin", "points3D.bin",
+                "rigs.bin", "frames.bin",
+                "rigs.txt", "frames.txt",
+            ):
+                _bp = os.path.join(sparse_path, _bin)
+                if os.path.exists(_bp):
+                    os.remove(_bp)
+                    print(f"Removed {_bin} to avoid rig-format conflicts")
+            # Rewrite cameras.txt and images.txt so IDs match the
+            # database (which has a single shared camera).  The poses
+            # written above are preserved; only the numeric IDs change.
+            sync_images_txt_with_db(colmap_db_path, image_path, sparse_path)
+        # Using spatial matcher for pose priors requires colmap db to be updated with poses
         update_colmap_db_with_pose_priors(colmap_db_path, os.path.join(sparse_path, "images.txt"))
+        clear_rig_tables(colmap_db_path)
     except Exception as e:
         raise RuntimeError("Error converting pose priors: " + str(e)) from e
