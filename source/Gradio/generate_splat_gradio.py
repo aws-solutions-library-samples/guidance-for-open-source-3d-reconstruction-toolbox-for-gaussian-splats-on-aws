@@ -84,7 +84,6 @@ class SharedState:
         self.collision_seed_pos = "0,0,0"
         self.generate_lod = "false"
         self.generate_mesh = "true"
-        self.extract_mesh_gs = "false"
         self.ply_coords = "rhyu"
         self.spz_coords = "rhyu"
         self.sog_coords = "rhyu"
@@ -399,8 +398,7 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
             "collisionSceneType": shared_state.collision_scene_type,
             "collisionSeedPos": shared_state.collision_seed_pos,
             "generateLod": shared_state.generate_lod == "true",
-            "generateMesh": shared_state.generate_mesh == "true",
-            "extractMeshGs": shared_state.extract_mesh_gs == "true"
+            "generateMesh": shared_state.generate_mesh == "true"
         },
         "sphericalCamera": {"enable": spherical_enable == "true",
             "cubeFacesToRemove": cube_faces_remove
@@ -553,8 +551,7 @@ def create_upload_aws_tab():
                                 "collisionSceneType": shared_state.collision_scene_type,
                                 "collisionSeedPos": shared_state.collision_seed_pos,
                                 "generateLod": shared_state.generate_lod == "true",
-                                "generateMesh": shared_state.generate_mesh == "true",
-                                "extractMeshGs": shared_state.extract_mesh_gs == "true"
+                                "generateMesh": shared_state.generate_mesh == "true"
                             },
                             "sphericalCamera": {
                                 "enable": shared_state.spherical_enable == "true",
@@ -916,15 +913,16 @@ def create_advanced_settings_tab():
                         "splatfacto-big",
                         "splatfacto-mcmc",
                         "splatfacto-w-light",
-                        "splatfacto-depth",
                         "3dgut",
                         "3dgrt",
                         "nerfacto",
                         "dn-splatter",
                         "ags-mesh",
-                        "gsplat-depth"
+                        "gsplat-depth",
+                        "faster-gs"
                     ],
-                    value="splatfacto"
+                    value="splatfacto",
+                    info="faster-gs: Faster-GS (NeRFICG) with Speedy-Splat pruning. The fastest option, with smaller splats; single GPU. Supports 3D ISP (PPISP) and AbsGrad; no mesh export or resume."
                 )
                 preserve_scene_scale = gr.Radio(
                     label="Preserve Scene Scale",
@@ -939,13 +937,13 @@ def create_advanced_settings_tab():
                         ("Physically Plausible ISP (ppisp)", "ppisp")
                     ],
                     value="none",
-                    info="Image signal processing for splatfacto, gsplat multi-GPU, and 3DGRUT. Not applicable to nerfacto."
+                    info="Image signal processing for splatfacto, dn-splatter/ags-mesh, gsplat multi-GPU, 3DGRUT, and faster-gs. splatfacto and dn-splatter use Bilateral Grid when PPISP is selected; faster-gs uses PPISP for either mode. Not applicable to nerfacto."
                 )
                 enable_absgrad = gr.Radio(
                     label="Enable AbsGrad Densification",
                     choices=["true", "false"],
                     value="false",
-                    info="Use absolute gradient for Gaussian densification. Improves quality on fine details. Applies to splatfacto and gsplat models."
+                    info="Use absolute gradient for Gaussian densification. Improves quality on fine details. Applies to splatfacto, gsplat, and faster-gs models."
                 )
                 enhance_depth = gr.Radio(
                     label="Enhance Depth (PromptDA)",
@@ -1014,16 +1012,10 @@ def create_advanced_settings_tab():
                     info="Outputs lod-meta.json with 4 decimation levels (100%, 50%, 25%, 12.5%) for progressive streaming."
                 )
                 generate_mesh = gr.Radio(
-                    label="Generate Mesh (dn-splatter/ags-mesh only)",
+                    label="Generate Mesh",
                     choices=["true", "false"],
                     value="true",
-                    info="Extract a mesh from the trained model using IsoOctree TSDF fusion and export as GLB."
-                )
-                extract_mesh_gs = gr.Radio(
-                    label="Extract Mesh from Gaussian Splat",
-                    choices=["true", "false"],
-                    value="false",
-                    info="Extract a high-quality mesh from any trained Gaussian splat using surface regularization and Poisson reconstruction. Outputs gs_mesh.glb. Not supported for nerfacto, 3dgrt, or 3dgut models."
+                    info="Extract a textured mesh and export it as <name>.mesh.glb. dn-splatter/ags-mesh use their native TSDF extractor; other splat models use Gaussian-splat TSDF fusion with texture baking. Not supported for nerfacto, 3dgrt, 3dgut, or faster-gs."
                 )
                 ply_coords = gr.Dropdown(
                     label="PLY Coordinate System",
@@ -1074,7 +1066,7 @@ def create_advanced_settings_tab():
                      shared_state.enhanced_feature, shared_state.matching_method,
                      shared_state.use_colmap_model, shared_state.use_transform_json,
                      shared_state.training_enable, shared_state.max_steps, shared_state.num_gaussians, shared_state.enable_spz, shared_state.enable_sog, shared_state.enable_usdz,
-                     shared_state.generate_collision, shared_state.collision_scene_type, shared_state.collision_seed_pos, shared_state.generate_lod, shared_state.generate_mesh, shared_state.extract_mesh_gs,
+                     shared_state.generate_collision, shared_state.collision_scene_type, shared_state.collision_seed_pos, shared_state.generate_lod, shared_state.generate_mesh,
                      shared_state.crop_output_bounds, shared_state.crop_mode, shared_state.clean_splat,
                      shared_state.spherical_enable,
                      shared_state.remove_bg, shared_state.remove_objects,
@@ -1094,7 +1086,7 @@ def create_advanced_settings_tab():
                     max_images, video_start_time, video_stop_time, sfm_enable, enhanced_feature, matching_method,
                     use_colmap_model, use_transform_json, training_enable,
                     max_steps, num_gaussians, enable_spz, enable_sog, enable_usdz,
-                    generate_collision, collision_scene_type, collision_seed_pos, generate_lod, generate_mesh, extract_mesh_gs,
+                    generate_collision, collision_scene_type, collision_seed_pos, generate_lod, generate_mesh,
                     crop_output_bounds, crop_mode, clean_splat,
                     spherical_enable, remove_bg, remove_objects,
                     object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam,
@@ -1136,37 +1128,36 @@ def create_advanced_settings_tab():
                         'collision_seed_pos': settings[21],
                         'generate_lod': settings[22],
                         'generate_mesh': settings[23],
-                        'extract_mesh_gs': settings[24],
-                        'crop_output_bounds': settings[25],
-                        'crop_mode': settings[26],
-                        'clean_splat': settings[27],
-                        'spherical_enable': settings[28],
-                        'remove_bg': settings[29],
-                        'remove_objects': settings[30],
-                        'object_removal_action': settings[31],
-                        'objects_to_remove': settings[32],
-                        'source_coordinate': settings[33],
-                        'pose_world_to_cam': settings[34],
-                        'log_verbosity': settings[35],
-                        'mask_threshold': settings[36],
-                        'ply_coords': settings[37],
-                        'spz_coords': settings[38],
-                        'sog_coords': settings[39],
-                        'usdz_coords': settings[40],
-                        'preserve_scene_scale': settings[41],
-                        'isp_3d': settings[42],
-                        'enable_absgrad': settings[43],
-                        'enhance_depth': settings[44],
-                        'enable_fl_heuristic': settings[45],
-                        'fl_heuristic_value': settings[46],
-                        'enable_fl_metric': settings[47],
-                        'fl_metric_value': settings[48],
-                        'auto_matcher': settings[49],
-                        'auto_mapper': settings[50],
-                        'autoscale_dataset': settings[51],
-                        'autoscale_dataset_mode': settings[52],
-                        'autogroup_images': settings[53],
-                        'autogroup_target_name': settings[54]
+                        'crop_output_bounds': settings[24],
+                        'crop_mode': settings[25],
+                        'clean_splat': settings[26],
+                        'spherical_enable': settings[27],
+                        'remove_bg': settings[28],
+                        'remove_objects': settings[29],
+                        'object_removal_action': settings[30],
+                        'objects_to_remove': settings[31],
+                        'source_coordinate': settings[32],
+                        'pose_world_to_cam': settings[33],
+                        'log_verbosity': settings[34],
+                        'mask_threshold': settings[35],
+                        'ply_coords': settings[36],
+                        'spz_coords': settings[37],
+                        'sog_coords': settings[38],
+                        'usdz_coords': settings[39],
+                        'preserve_scene_scale': settings[40],
+                        'isp_3d': settings[41],
+                        'enable_absgrad': settings[42],
+                        'enhance_depth': settings[43],
+                        'enable_fl_heuristic': settings[44],
+                        'fl_heuristic_value': settings[45],
+                        'enable_fl_metric': settings[46],
+                        'fl_metric_value': settings[47],
+                        'auto_matcher': settings[48],
+                        'auto_mapper': settings[49],
+                        'autoscale_dataset': settings[50],
+                        'autoscale_dataset_mode': settings[51],
+                        'autogroup_images': settings[52],
+                        'autogroup_target_name': settings[53]
                     }
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -1186,13 +1177,13 @@ def create_advanced_settings_tab():
                 
                 def load_configuration(config_name):
                     if not config_name:
-                        return ["Please select a configuration"] + [gr.update() for _ in range(34)]
+                        return ["Please select a configuration"] + [gr.update() for _ in advanced_components]
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
                     safe_name = re.sub(r'[^\w\-. ]', '', config_name)[:64]
                     config_file = os.path.join(configs_dir, f"{safe_name}.json")
                     if not os.path.realpath(config_file).startswith(os.path.realpath(configs_dir) + os.sep):
-                        return ["Error: Invalid configuration name"] + [gr.update() for _ in range(34)]
+                        return ["Error: Invalid configuration name"] + [gr.update() for _ in advanced_components]
                     
                     try:
                         with open(config_file, 'r') as f:
@@ -1223,7 +1214,6 @@ def create_advanced_settings_tab():
                         shared_state.collision_seed_pos = config_data.get('collision_seed_pos', '0,0,0')
                         shared_state.generate_lod = config_data.get('generate_lod', 'false')
                         shared_state.generate_mesh = config_data.get('generate_mesh', 'true')
-                        shared_state.extract_mesh_gs = config_data.get('extract_mesh_gs', 'false')
                         shared_state.crop_output_bounds = config_data.get('crop_output_bounds', 'false')
                         shared_state.crop_mode = config_data.get('crop_mode', 'environment')
                         shared_state.clean_splat = config_data.get('clean_splat', 'false')
@@ -1282,7 +1272,6 @@ def create_advanced_settings_tab():
                             config_data.get('collision_seed_pos', '0,0,0'),
                             config_data.get('generate_lod', 'false'),
                             config_data.get('generate_mesh', 'true'),
-                            config_data.get('extract_mesh_gs', 'false'),
                             config_data.get('crop_output_bounds', 'false'),
                             config_data.get('crop_mode', 'environment'),
                             config_data.get('clean_splat', 'false'),
@@ -1315,7 +1304,7 @@ def create_advanced_settings_tab():
                             config_data.get('autogroup_target_name', '')
                         ]
                     except Exception as e:
-                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in range(52)]
+                        return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in advanced_components]
                 
                 # Wire up save/load buttons
                 save_config_btn.click(

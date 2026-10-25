@@ -62,6 +62,14 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda-${CUDA_VERSION}/lib64:${LD_LIBRARY_PATH}
 ENV OPTIX_FORCE_DEPRECATED_LAUNCHER=1
 ENV CUDA_MODULE_LOADING=LAZY
 
+# CUDA forward-compatibility: the image is built against CUDA 13.2, which
+# normally requires an R580+ host driver. The cuda-compat-13-2 package (installed
+# below) provides a newer user-mode libcuda that lets the CUDA 13.2 runtime run on
+# older base drivers (e.g. R570) on data-center GPUs. This directory must come
+# FIRST on LD_LIBRARY_PATH so the compat libcuda is loaded ahead of the host-
+# injected driver libcuda.
+ENV LD_LIBRARY_PATH=/usr/local/cuda-${CUDA_VERSION}/compat:${LD_LIBRARY_PATH}
+
 # Expose compute + graphics + utility caps so the NVIDIA Container Toolkit
 # projects the host's NVIDIA driver libraries and Vulkan ICD into the
 # container at runtime.
@@ -228,6 +236,16 @@ RUN wget https://developer.download.nvidia.com/compute/cudss/${CUDSS_VERSION}/lo
     && ln -sf /usr/include/libcudss/13/cudss_threading_interface.h /usr/include/cudss_threading_interface.h \
     && ln -sf /usr/include/libcudss/13/cudss_distributed_interface.h /usr/include/cudss_distributed_interface.h \
     && cd ${CODE_PATH}
+
+# Install CUDA forward-compatibility package so the CUDA 13.2 runtime can run on
+# older host drivers (e.g. R570, which otherwise reports "driver too old" and
+# falls back to CPU). The NVIDIA CUDA apt repo is already configured by the cuDSS
+# local-repo step above. The matching LD_LIBRARY_PATH entry is set in the ENV
+# block near the top of this file so /usr/local/cuda-${CUDA_VERSION}/compat is
+# searched before the host-injected driver libcuda at runtime.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cuda-compat-13-2 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Build Ceres with cuDSS support
 RUN git clone https://github.com/ceres-solver/ceres-solver.git --recursive \
@@ -531,6 +549,41 @@ RUN python3 ${CODE_PATH}/patch_tracer.py \
     echo "Patches applied successfully" && \
     rm ${CODE_PATH}/patch_tracer.py
 
+# Compute 3DGRUT LPIPS on a downscaled copy of large images (e.g. 4K fisheyes) to avoid
+# CUDA OOM in the end-of-training and metrics renders. PSNR/SSIM stay full resolution.
+COPY ./src/pipeline/training/patch_3dgrut_render.py ${CODE_PATH}/
+RUN python3 ${CODE_PATH}/patch_3dgrut_render.py ${CODE_PATH}/3dgrut/threedgrut/render.py \
+    && rm ${CODE_PATH}/patch_3dgrut_render.py
+
+# Install NeRFICG (MIT) + Faster-GS (Apache-2.0) for the "faster-gs" model
+# License guard: NeRFICG's knn_utils defaults to the non-commercial simple-knn (Inria
+# Gaussian-Splatting License); it is switched off before anything is installed, and the
+# build fails if simple-knn or diff-gaussian-rasterization end up in the image.
+# The NeRFICG GUI submodule (ICGui) is intentionally not cloned (headless container).
+# fused-ssim (MIT) and ppisp (Apache-2.0) are only installed if not already present
+# (gsplat may have installed them) to avoid replacing versions other models rely on.
+ENV NERFICG_HASH="e458ac6e41810ad6d9405687c1e698fadd28dac5"
+ENV FASTERGS_HASH="c60ea269b7cf3ebda527d640b6fdd31462f91b41"
+ENV FUSED_SSIM_HASH="a7c48d6dd7ac6dc39a7958c7c4452e0b10418f38"
+ENV PPISP_HASH="a247368047651db2e03e6f97a36e4f5bebbe5c5f"
+RUN pip install --no-cache-dir munch lpips tabulate \
+    && git clone https://github.com/nerficg-project/nerficg.git ${CODE_PATH}/nerficg \
+    && cd ${CODE_PATH}/nerficg \
+    && git reset --hard ${NERFICG_HASH} \
+    && sed -i 's/^_ALLOW_PROPRIETARY_LICENSED_CODE = True/_ALLOW_PROPRIETARY_LICENSED_CODE = False/' src/Optim/knn_utils.py \
+    && grep -q '^_ALLOW_PROPRIETARY_LICENSED_CODE = False' src/Optim/knn_utils.py \
+    && git clone https://github.com/nerficg-project/faster-gaussian-splatting.git src/Methods/FasterGS \
+    && git -C src/Methods/FasterGS reset --hard ${FASTERGS_HASH} \
+    && pip install --no-cache-dir --no-build-isolation --no-deps src/CudaUtils/MortonEncoding \
+    && pip install --no-cache-dir --no-build-isolation --no-deps src/Methods/FasterGS/FasterGSCudaBackend \
+    && (python -c "from fused_ssim import fused_ssim" 2>/dev/null \
+        || pip install --no-cache-dir --no-build-isolation --no-deps "git+https://github.com/rahul-goel/fused-ssim@${FUSED_SSIM_HASH}") \
+    && (python -c "from ppisp import PPISP, PPISPConfig; from ppisp.report import export_ppisp_report" 2>/dev/null \
+        || pip install --no-cache-dir --no-build-isolation --no-deps "git+https://github.com/nv-tlabs/ppisp@${PPISP_HASH}") \
+    && python -c "import importlib.util, sys; bad=[m for m in ('simple_knn','diff_gaussian_rasterization') if importlib.util.find_spec(m)]; print('Non-commercial packages present:', bad) if bad else None; sys.exit(1 if bad else 0)" \
+    && rm -rf ${CODE_PATH}/nerficg/.git ${CODE_PATH}/nerficg/src/Methods/FasterGS/.git ${CODE_PATH}/nerficg/src/Methods/FasterGS/resources \
+    && cd ${CODE_PATH}
+
 # Install Node.js, npm, and ffmpeg
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
     && apt-get install -y nodejs ffmpeg
@@ -605,7 +658,7 @@ RUN mkdir -p ${CODE_PATH}/reconstruction ${CODE_PATH}/training ${CODE_PATH}/sphe
     ${CODE_PATH}/post_processing ${CODE_PATH}/sam
 # Copy application source — grouped to minimize layers
 # Cache-bust: increment when pipeline source files change
-ARG PIPELINE_CACHE_BUST=26
+ARG PIPELINE_CACHE_BUST=27
 COPY ./src/entrypoint.sh ./src/main.py ./src/config.json ./src/pipeline/pipeline.py ./src/pipeline/utils.py ${CODE_PATH}/
 COPY ./src/pipeline/reconstruction/extract_poses_imgs.py \
      ./src/pipeline/reconstruction/process_pose_transforms.py \
@@ -615,7 +668,9 @@ COPY ./src/pipeline/reconstruction/extract_poses_imgs.py \
      ${CODE_PATH}/reconstruction/
 COPY ./src/pipeline/training/colmap_to_nerfstudio_cam.py \
      ./src/pipeline/training/dn_splatter_preprocess.py \
+     ./src/pipeline/training/view_depth.py \
      ./src/pipeline/training/run_gsplat_trainer.sh \
+     ./src/pipeline/training/run_faster_gs.py \
      ${CODE_PATH}/training/
 COPY ./src/pipeline/reconstruction/spherical/panorama_sfm.py ${CODE_PATH}/spherical/
 COPY ./src/pipeline/pre_processing/segmentation/remove_object_using_mask.py \
@@ -687,4 +742,5 @@ RUN echo "=== VERSION VERIFICATION ===" \
     && echo "  PyColmap (gsplat): $(PYTHONPATH=/opt/gsplat_pycolmap:$PYTHONPATH python -c 'import pycolmap; print(pycolmap.__version__)' 2>/dev/null || echo 'Not found')" \
     && echo "  NerfStudio: $(python -c 'import nerfstudio; print(getattr(nerfstudio, "__version__", "installed"))' 2>/dev/null || echo 'Not found')" \
     && echo "  GSplat: $(python -c 'import gsplat; print(gsplat.__version__)' 2>/dev/null || echo 'Not found')" \
+    && echo "  FasterGS backend: $(python -c 'import FasterGSCudaBackend; print("installed")' 2>/dev/null || echo 'Not found')" \
     && echo "=== END VERSION VERIFICATION === "

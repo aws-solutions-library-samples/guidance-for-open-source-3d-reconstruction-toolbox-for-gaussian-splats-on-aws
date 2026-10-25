@@ -28,6 +28,117 @@ import sys
 from pathlib import Path
 
 
+def convert_lidar_bins(data_dir):
+    """Convert raw ARKit LiDAR depth .bin files to uint16 mm PNGs in depth/.
+
+    Input:  <data_dir>/depths/<stem>_depth[_smoothed].bin — headerless little-endian
+            float32 depth in meters, row-major, at the LiDAR's native resolution
+            (256x192 on current iPhones/iPads).
+    Output: <data_dir>/depth/<image_stem>.png — uint16 millimeters, same size and
+            orientation as the matching RGB image, named after the (flattened)
+            image file so the depth_file_path injection matches it by stem.
+
+    ARKit stores depth in the sensor's landscape orientation. When the RGB images
+    are portrait, the depth map is rotated 90 degrees clockwise to match (verified
+    against COLMAP points: ~3 cm median error clockwise vs ~1 m counter-clockwise).
+    Set LIDAR_DEPTH_ROTATION=ccw|none|cw to override.
+
+    Returns the number of converted maps (0 if there is nothing to convert).
+    """
+    import re
+    import numpy as np
+    import cv2
+
+    src_dir = os.path.join(data_dir, "depths")
+    images_dir = os.path.join(data_dir, "images")
+    out_dir = os.path.join(data_dir, "depth")
+    if not os.path.isdir(src_dir) or not os.path.isdir(images_dir):
+        return 0
+    if os.path.isdir(out_dir) and any(f.lower().endswith(".png") for f in os.listdir(out_dir)):
+        print(f"[LiDAR depth] {out_dir} already has PNGs, skipping .bin conversion")
+        return 0
+
+    bins = sorted(f for f in os.listdir(src_dir) if f.lower().endswith(".bin"))
+    if not bins:
+        return 0
+
+    # Map lidar stem ("scan_000") -> image filename. Images may have been flattened
+    # from images/<subdir>/scan_000.jpg to images/<subdir>_scan_000.jpg.
+    image_files = [f for f in os.listdir(images_dir)
+                   if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+    by_stem = {os.path.splitext(f)[0]: f for f in image_files}
+
+    def _find_image(lidar_stem):
+        if lidar_stem in by_stem:
+            return by_stem[lidar_stem]
+        matches = [f for s, f in by_stem.items() if s.endswith("_" + lidar_stem)]
+        return matches[0] if len(matches) == 1 else None
+
+    rotation = os.environ.get("LIDAR_DEPTH_ROTATION", "auto").lower()
+    os.makedirs(out_dir, exist_ok=True)
+    converted, skipped = 0, []
+    ranges = []
+    for fname in bins:
+        lidar_stem = re.sub(r"_depth(_smoothed)?$", "", os.path.splitext(fname)[0])
+        img_name = _find_image(lidar_stem)
+        if img_name is None:
+            skipped.append(f"{fname} (no matching image)")
+            continue
+        img = cv2.imread(os.path.join(images_dir, img_name), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            skipped.append(f"{fname} (unreadable image {img_name})")
+            continue
+        img_h, img_w = img.shape[:2]
+
+        raw = np.fromfile(os.path.join(src_dir, fname), dtype="<f4")
+        # Infer the sensor shape: landscape with the RGB aspect ratio, falling back
+        # to the standard ARKit 256x192.
+        long_side, short_side = max(img_w, img_h), min(img_w, img_h)
+        h = int(round(np.sqrt(raw.size * short_side / long_side)))
+        w = raw.size // h if h else 0
+        if h * w != raw.size:
+            h, w = 192, 256
+        if h * w != raw.size:
+            skipped.append(f"{fname} ({raw.size} floats is not a recognised depth size)")
+            continue
+        depth = raw.reshape(h, w)
+
+        portrait_rgb = img_h > img_w
+        landscape_depth = w > h
+        rot = rotation
+        if rot == "auto":
+            rot = "cw" if portrait_rgb and landscape_depth else "none"
+        if rot == "cw":
+            depth = np.rot90(depth, -1)
+        elif rot == "ccw":
+            depth = np.rot90(depth, 1)
+
+        depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+        depth[depth < 0] = 0.0
+        if depth.shape != (img_h, img_w):
+            # Nearest-neighbour avoids blending foreground/background depth at edges.
+            depth = cv2.resize(np.ascontiguousarray(depth), (img_w, img_h),
+                               interpolation=cv2.INTER_NEAREST)
+        depth_mm = np.clip(depth * 1000.0, 0, 65535).astype(np.uint16)
+        out_name = os.path.splitext(img_name)[0] + ".png"
+        cv2.imwrite(os.path.join(out_dir, out_name), depth_mm)
+        valid = depth[depth > 0]
+        if valid.size:
+            ranges.append((float(valid.min()), float(valid.max())))
+        converted += 1
+
+    if converted:
+        lo = min(r[0] for r in ranges) if ranges else 0.0
+        hi = max(r[1] for r in ranges) if ranges else 0.0
+        print(f"[LiDAR depth] Converted {converted}/{len(bins)} .bin maps -> {out_dir} "
+              f"(rotation={rot}, range {lo:.2f}-{hi:.2f} m)")
+    for s in skipped[:5]:
+        print(f"[LiDAR depth] WARNING: skipped {s}")
+    if len(skipped) > 5:
+        print(f"[LiDAR depth] WARNING: ... and {len(skipped) - 5} more skipped")
+    return converted
+
+
 # Ensures colmap/sparse symlink exists for depth alignment script
 def ensure_colmap_sparse_link(data_dir):
     """Create colmap/sparse symlink if sparse/ exists but colmap/sparse does not."""
@@ -101,13 +212,21 @@ def _generate_sfm_depths_pycolmap(data_dir: str, colmap_sparse: str) -> None:
     sfm_depths_dir = os.path.join(data_dir, "sfm_depths")
     os.makedirs(sfm_depths_dir, exist_ok=True)
 
+    # COLMAP stores image names relative to the image root, e.g.
+    # "face_iphone/scan_000.jpg". clean_images_dir() flattens such files to
+    # images/face_iphone_scan_000.jpg, and mono_depth is named from the flattened
+    # file. Derive SFM depth stems the same way so both sets match; otherwise the
+    # reconcile step deletes every real SFM depth and keeps only zero stubs.
+    def _flat_stem(colmap_name):
+        return "_".join(Path(os.path.splitext(colmap_name)[0]).parts)
+
     # Build a stem->camera map so stubs have the correct (H, W).
     # Fall back to reading the image file if the camera lookup fails.
     stem_to_hw = {}
     for image_id, image in recon.images.items():
         cam = recon.cameras[image.camera_id] if image.camera_id in recon.cameras else None
         if cam is not None:
-            stem = os.path.splitext(os.path.basename(image.name))[0]
+            stem = _flat_stem(image.name)
             stem_to_hw[stem] = (cam.height, cam.width)
 
     # Pre-create zero depth maps for every image so the count always matches mono_depth.
@@ -132,43 +251,107 @@ def _generate_sfm_depths_pycolmap(data_dir: str, colmap_sparse: str) -> None:
                             H, W = 1, 1
                     np.save(zero_path, np.zeros((H, W), dtype=np.float32))
 
+    # All 3D points as one array, plus an id->row lookup for observation-based images.
+    point_ids = np.fromiter(recon.points3D.keys(), dtype=np.int64)
+    all_xyz = np.stack([np.asarray(recon.points3D[int(pid)].xyz) for pid in point_ids])
+    id_to_row = {int(pid): i for i, pid in enumerate(point_ids)}
+
+    def _project(cam, pts_cam):
+        """Project camera-space points (N,3, z>0) to pixel coords (N,2)."""
+        xy = pts_cam[:, :2] / pts_cam[:, 2:3]
+        try:
+            uv = np.asarray(cam.img_from_cam(xy), dtype=np.float64)
+            if uv.shape == xy.shape:
+                return uv
+        except Exception:
+            pass
+        # Fallback: pinhole intrinsics (exact for PINHOLE / SIMPLE_PINHOLE).
+        K = np.asarray(cam.calibration_matrix(), dtype=np.float64)
+        return xy @ K[:2, :2].T + K[:2, 2]
+
     generated = 0
+    filled_counts = []
+    all_depth_samples = []
+    used_all_points = 0
     for image_id, image in recon.images.items():
-        if not image.has_pose:
+        has_pose = image.has_pose() if callable(image.has_pose) else image.has_pose
+        if not has_pose:
             continue
         cam = recon.cameras[image.camera_id]
         W, H = cam.width, cam.height
         depth_map = np.zeros((H, W), dtype=np.float32)
 
-        # Get the camera-from-world rotation and translation for depth computation
-        pose = image.cam_from_world()  # Rigid3d
-        R = pose.rotation.matrix()    # 3x3
-        t = pose.translation           # (3,)
+        cfw = image.cam_from_world() if callable(image.cam_from_world) else image.cam_from_world
+        R = np.asarray(cfw.rotation.matrix(), dtype=np.float64)
+        t = np.asarray(cfw.translation, dtype=np.float64)
 
+        # Prefer the image's own 2D-3D observations (they encode visibility).
+        # Models built from known poses (e.g. ARKit/iPhone captures) often have
+        # points3D but no per-image keypoints; in that case project every 3D point
+        # and resolve occlusion with a coarse depth test below.
+        obs_rows = []
         for p2d in image.points2D:
-            if not p2d.has_point3D:
-                continue
-            if p2d.point3D_id not in recon.points3D:
-                continue
-            p3d = recon.points3D[p2d.point3D_id]
-            # Project to image coordinates
-            uv = image.project_point(p3d.xyz)
-            if uv is None:
-                continue
-            # Depth = Z in camera space = R[2,:] @ xyz + t[2]
-            z = float(R[2] @ p3d.xyz + t[2])
-            if z <= 0:
-                continue
-            u, v = int(round(float(uv[0]))), int(round(float(uv[1])))
-            if 0 <= u < W and 0 <= v < H:
-                if depth_map[v, u] == 0 or z < depth_map[v, u]:
-                    depth_map[v, u] = z
+            has3d = p2d.has_point3D() if callable(p2d.has_point3D) else p2d.has_point3D
+            if has3d and int(p2d.point3D_id) in id_to_row:
+                obs_rows.append(id_to_row[int(p2d.point3D_id)])
+        if obs_rows:
+            xyz = all_xyz[np.asarray(obs_rows)]
+        else:
+            xyz = all_xyz
+            used_all_points += 1
 
-        stem = os.path.splitext(os.path.basename(image.name))[0]
+        pts_cam = xyz @ R.T + t
+        pts_cam = pts_cam[pts_cam[:, 2] > 1e-6]
+        if len(pts_cam):
+            uv = _project(cam, pts_cam)
+            u = np.round(uv[:, 0]).astype(np.int64)
+            v = np.round(uv[:, 1]).astype(np.int64)
+            z = pts_cam[:, 2].astype(np.float32)
+            inb = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+            u, v, z = u[inb], v[inb], z[inb]
+
+            if not obs_rows and len(z):
+                # Without visibility info, background points can land on pixels
+                # where the foreground surface is simply unsampled. Reject points
+                # much deeper than the nearest point in their 16x16-pixel block.
+                B = 16
+                bw = (W + B - 1) // B
+                blk = (v // B) * bw + (u // B)
+                blk_min = np.full(((H + B - 1) // B) * bw, np.inf, dtype=np.float32)
+                np.minimum.at(blk_min, blk, z)
+                keep = z <= blk_min[blk] * 1.15
+                u, v, z = u[keep], v[keep], z[keep]
+
+            if len(z):
+                # Per-pixel z-buffer: keep the nearest point for each pixel.
+                zbuf = np.full(H * W, np.inf, dtype=np.float32)
+                np.minimum.at(zbuf, v * W + u, z)
+                zbuf[np.isinf(zbuf)] = 0.0
+                depth_map = zbuf.reshape(H, W)
+
+        filled = int((depth_map > 0).sum())
+        filled_counts.append(filled)
+        if filled:
+            all_depth_samples.append(depth_map[depth_map > 0][:: max(1, filled // 2000)])
+
+        stem = _flat_stem(image.name)
         np.save(os.path.join(sfm_depths_dir, stem + ".npy"), depth_map)
         generated += 1
 
     print(f"[SFM depths] Generated {generated} depth maps in {sfm_depths_dir}")
+    if used_all_points:
+        print(f"[SFM depths] {used_all_points} images had no 2D-3D observations; "
+              f"projected all 3D points with occlusion filtering")
+    if filled_counts:
+        print(f"[SFM depths] Filled pixels per image: min={min(filled_counts)} "
+              f"median={int(np.median(filled_counts))} max={max(filled_counts)}")
+    if all_depth_samples:
+        _d = np.concatenate(all_depth_samples)
+        print(f"[SFM depths] Depth range: p5={np.percentile(_d, 5):.3f} "
+              f"median={np.median(_d):.3f} p95={np.percentile(_d, 95):.3f} "
+              f"(alignment uses 0.1-10.0; {100 * ((_d > 0.1) & (_d < 10)).mean():.1f}% in range)")
+    else:
+        print("[SFM depths] WARNING: every SFM depth map is empty — depth alignment will be invalid")
 
 
 def main():
@@ -489,6 +672,11 @@ def main():
         )
         normals_generator.main()
 
+    # Convert raw ARKit LiDAR depth (depths/<stem>_depth*.bin, float32 meters at the
+    # sensor's native resolution, e.g. 256x192) into depth/<image_stem>.png uint16 mm
+    # at RGB resolution, so the sensor-depth injection below picks it up.
+    convert_lidar_bins(data_dir)
+
     # Inject depth_file_path into transforms.json only when sensor depth is valid
     # uint16 mm PNGs (cv2.IMREAD_ANYDEPTH gives uint16, x0.001 -> meters in plausible range).
     # ARKit .depth.png files are uint8 confidence maps and are NOT valid sensor depth.
@@ -563,6 +751,15 @@ def main():
                     print(f"Injected depth_file_path into {_injected} frames from {_depth_dir_name}/")
                     # Write marker so training knows to use EdgeAwareLogL1 for sensor depth
                     open(os.path.join(data_dir, ".sensor_depth_valid"), 'w').close()
+                    # dn-splatter loads sensor depth only when every frame has a
+                    # depth_file_path; otherwise it needs mono depth for all frames.
+                    _frames = _transforms.get("frames", [])
+                    _sensor_depth_all_frames = bool(_frames) and all(
+                        "depth_file_path" in _fr for _fr in _frames
+                    )
+                    if not _sensor_depth_all_frames:
+                        print(f"WARNING: sensor depth matched only {_injected}/{len(_frames)} frames; "
+                              f"mono depth will still be generated.")
                 else:
                     print(f"WARNING: Could not match sensor depth files to transforms.json frames. Falling back to mono depth.")
 
@@ -657,16 +854,25 @@ def main():
         except Exception as e:
             print(f"WARNING: Could not patch MiDaS beit.py: {e}")
 
-    # Generate scale-aligned mono depth (always run regardless of sensor depth)
-    if not args.skip_depth:
+    # Generate scale-aligned mono depth (ZoeDepth + SFM alignment) only when it will
+    # be used. When valid sensor depth covers every frame, dn-splatter trains on it
+    # and never reads mono_depth/, so skip the ~1.3 GB download and several minutes.
+    if locals().get('_sensor_depth_all_frames', False) and not args.skip_depth:
+        print("Valid sensor depth found for every frame; skipping ZoeDepth mono depth generation.")
+    elif not args.skip_depth:
         # Monkey-patch torch.hub.load to always pass skip_validation=True so the
         # GitHub fork-check HTTP call (which fails in network-restricted environments
         # with HTTP 504) is bypassed for all subsequent hub.load calls, including
         # those made inside dn-splatter's depth_from_pretrain.py.
+        # Also force trust_repo=True so torch.hub never blocks on the interactive
+        # "Do you trust this repository? (y/N)" prompt for untrusted repos such as
+        # intel-isl/MiDaS (pulled transitively by ZoeDepth) — that prompt hangs
+        # non-interactive Batch/SageMaker runs and requires a manual "y" locally.
         import torch.hub as _hub
         _orig_hub_load = _hub.load
         def _hub_load_no_validate(*a, **kw):
             kw.setdefault("skip_validation", True)
+            kw.setdefault("trust_repo", True)
             return _orig_hub_load(*a, **kw)
         _hub.load = _hub_load_no_validate
         # Also patch torch.hub.load globally so depth_from_pretrain.py

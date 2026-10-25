@@ -146,6 +146,11 @@ if __name__ == "__main__":
             error_message = """Error Code 700: Required environment variables not set.
                 Check that the payload has the required fields"""
             raise RuntimeError(error_message)
+
+        # A directory input may be given with a trailing slash (e.g. "scene/").
+        # Output names are built from os.path.splitext(FILENAME)[0], which keeps the
+        # slash and produces paths like "<uuid>/scene/.mp4", so normalize it once here.
+        config['FILENAME'] = config['FILENAME'].rstrip('/\\')
         
         # Setup path constants
         OUTPUT_TAR_PATH = "/opt/ml/model/model.tar.gz"
@@ -163,12 +168,20 @@ if __name__ == "__main__":
         ENABLE_MULTI_GPU = "false"
         LOCAL_DEBUG = os.environ.get('LOCAL_DEBUG', config.get('LOCAL_DEBUG', 'false')).lower() == 'true'
         ENABLE_TASK_TOKEN_CALLBACK = IS_BATCH and bool(TASK_TOKEN) and not LOCAL_DEBUG
-        ENABLE_DEPTH_LOSS = config['MODEL'] == 'gsplat-depth' or config.get('ENABLE_DEPTH_LOSS', 'false').lower() == 'true'
+        # Faster-GS (NeRFICG) is a standalone trainer: it never routes through gsplat depth loss
+        # or nerfstudio, trains on a single GPU, and outputs in the raw COLMAP world frame.
+        IS_FASTER_GS = config['MODEL'] == 'faster-gs'
+        FASTER_GS_MODELS_DIR = os.path.join(config['DATASET_PATH'], "faster_gs_models")
+        ENABLE_DEPTH_LOSS = not IS_FASTER_GS and (
+            config['MODEL'] == 'gsplat-depth' or config.get('ENABLE_DEPTH_LOSS', 'false').lower() == 'true'
+        )
         GENERATE_COLLISION = config.get('GENERATE_COLLISION', 'false').lower() == 'true'
         GENERATE_LOD = config.get('GENERATE_LOD', 'false').lower() == 'true'
+        # Single mesh switch: dn-splatter/ags-mesh models use their native extractor,
+        # other splat models use the Gaussian-splat TSDF extractor (see Extract-Mesh).
         GENERATE_MESH = config.get('GENERATE_MESH', 'true').lower() == 'true'
-        EXTRACT_MESH_GS = config.get('EXTRACT_MESH_GS', 'false').lower() == 'true'
         ENABLE_ABSGRAD = config.get('ENABLE_ABSGRAD', 'false').lower() == 'true'
+        REFINE_POSES = config.get('REFINE_POSES', 'false').lower() == 'true'
         ENHANCE_DEPTH = config.get('ENHANCE_DEPTH', 'false').lower() == 'true'
 
         # Collision voxelization requires metric world scale to produce accurate collision geometry.
@@ -400,7 +413,7 @@ if __name__ == "__main__":
     transforms_out_path = os.path.join(config['DATASET_PATH'], "transforms.json")
     colmap_vocab_path = os.path.join(config['CODE_PATH'], "vocab_tree_flickr100K_words32K.bin")
 
-    if config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"):
+    if config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc"):
         model = "splatfacto"
     elif config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
         model = config['MODEL']
@@ -725,7 +738,7 @@ if __name__ == "__main__":
                     log.info(f"Generated {_filled} blank masks for images without existing masks")
 
         # Ensure colmap/sparse structure exists for NerfStudio (not needed for 3DGRUT or depth loss)
-        if colmap_zip_found and config['MODEL'] not in ('3dgrt', '3dgut') and not ENABLE_DEPTH_LOSS:
+        if colmap_zip_found and config['MODEL'] not in ('3dgrt', '3dgut', 'faster-gs') and not ENABLE_DEPTH_LOSS:
             colmap_sparse_0 = os.path.join(config['DATASET_PATH'], 'colmap', 'sparse', '0')
             colmap_sparse_0_populated = os.path.isdir(colmap_sparse_0) and bool(os.listdir(colmap_sparse_0))
             if not colmap_sparse_0_populated:
@@ -874,7 +887,7 @@ if __name__ == "__main__":
                             log.info(f"Moved 3dgrut_models directory from {model_src_dir} to {model_ckpt_path}")
                 else:
                     # For splatfacto models, keep files in dataset directory
-                    if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"]:
+                    if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
                         log.info(f"Keeping nerfstudio_models in dataset directory for splatfacto: {model_src_dir}")
                         # Don't move - files are already in correct location
                     else:
@@ -883,7 +896,7 @@ if __name__ == "__main__":
                         log.info(f"Moved nerfstudio_models from {model_src_dir} to {model_ckpt_path}")
             if os.path.exists(config_yml_src): # only for Nerfstudio
                 # For splatfacto models, keep config.yml in dataset directory and update it there
-                if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"]:
+                if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
                     log.info(f"Keeping nerfstudio_models and config.yml in dataset directory for splatfacto resume: {model_src_dir}")
                     ckpt_files = sorted([f for f in os.listdir(model_src_dir) if f.endswith('.ckpt')])
                     log.info(f"Splatfacto resume checkpoint files found at: {ckpt_files}")
@@ -947,7 +960,7 @@ if __name__ == "__main__":
             log.info(f"Successfully extracted and organized model archive for resume training")
         
         # Final verification for splatfacto models
-        if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"]:
+        if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
             dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
             dataset_config_path = os.path.join(config['DATASET_PATH'], "config.yml")
             log.info(f"Final check - Checkpoint dir: {os.path.exists(dataset_models_path)}, Config: {os.path.exists(dataset_config_path)}")
@@ -956,7 +969,7 @@ if __name__ == "__main__":
                 log.info(f"Available checkpoints: {ckpt_files}")
         
         # Verify checkpoint files and config are in correct location
-        if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"]:
+        if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
             dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
             dataset_config_path = os.path.join(config['DATASET_PATH'], "config.yml")
             if os.path.exists(dataset_models_path):
@@ -987,7 +1000,9 @@ if __name__ == "__main__":
     ##################################
     # CONFIGURE MULTI-GPU DISTRIBUTED TRAINING
     ##################################
-    if int(pipeline.config.num_gpus) > 1:
+    if int(pipeline.config.num_gpus) > 1 and IS_FASTER_GS:
+        log.info(f"{pipeline.config.num_gpus} GPUs detected, but Faster-GS trains on a single GPU (GPU 0); multi-GPU disabled")
+    elif int(pipeline.config.num_gpus) > 1:
         ENABLE_MULTI_GPU = "true"
         #os.environ['MAX_JOBS'] = '4'
         log.info(f"Multi-GPU enabled: {pipeline.config.num_gpus} GPUs (gsplat distributed training)")
@@ -1424,32 +1439,6 @@ if __name__ == "__main__":
         pipeline.report_error(740, error_message)
 
     ##################################
-    # PREPARE-DEPTHS COMPONENT:
-    # Convert EXR depth maps to uint16 PNG for splatfacto-depth supervision
-    ##################################
-    try:
-        if config['MODEL'] == "splatfacto-depth":
-            raw_depths_dir = os.path.join(config['DATASET_PATH'], "depths_exr")
-            depths_out_dir = os.path.join(config['DATASET_PATH'], "depths")
-            if os.path.isdir(raw_depths_dir) and any(f.endswith(".exr") for f in os.listdir(raw_depths_dir)):
-                depth_scale = config.get('DEPTH_SCALE', '1000.0')
-                pipeline.create_component(
-                    name="Prepare-Depths",
-                    comp_type=ComponentType.PRE_PROCESSING,
-                    comp_environ=ComponentEnvironment.PYTHON,
-                    command="pre_processing/prepare_depths.py",
-                    args=["-i", raw_depths_dir, "-o", depths_out_dir, "--depth-scale", depth_scale],
-                    cwd=current_dir_path,
-                    requires_gpu=False
-                )
-                log.info(f"Prepare-Depths: converting EXR from {raw_depths_dir} -> {depths_out_dir}")
-            else:
-                log.info("splatfacto-depth: no depths_exr/ directory found, skipping EXR conversion (expecting pre-converted PNG in depths/)")
-    except Exception as e:
-        error_message = f"Issue creating Prepare-Depths component: {e}"
-        pipeline.report_error(741, error_message)
-
-    ##################################
     # PRE_PROCESSING COMPONENT:
     # Enhance sparse LiDAR depth images using PromptDA
     ##################################
@@ -1510,7 +1499,8 @@ if __name__ == "__main__":
                     "--SiftExtraction.max_num_features", str(sift_max_num_features),
                     "--FeatureExtraction.use_gpu", "1"
                 ]
-                if ENABLE_MULTI_GPU == "true" or \
+                # Faster-GS's rasterizer is pinhole-only, so solve SfM with PINHOLE cameras
+                if ENABLE_MULTI_GPU == "true" or IS_FASTER_GS or \
                     config['MODEL'] == "3dgut" or config['MODEL'] == "3dgrt":
                     if config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == "false" and \
                         config['USE_POSE_PRIOR_TRANSFORM_JSON'] == "false":
@@ -1901,7 +1891,7 @@ if __name__ == "__main__":
                     750,
                     f"Reconstruction software name given not implemented:{config['RECON_SOFTWARE_NAME']}"
                 )
-        elif colmap_zip_needs_conversion and config['MODEL'] not in ('3dgrt', '3dgut'):
+        elif colmap_zip_needs_conversion and config['MODEL'] not in ('3dgrt', '3dgut', 'faster-gs'):
             # zip had COLMAP sparse data but no transforms.json — run conversion now
             log.info("colmap_zip_needs_conversion=True: adding Colmap-to-Nerfstudio component")
             args = ["--data_dir", config['DATASET_PATH']]
@@ -1915,11 +1905,19 @@ if __name__ == "__main__":
                 requires_gpu=False
             )
         elif (config['RUN_TRAIN'] == "true"
-              and config['MODEL'] not in ('3dgrt', '3dgut')
+              and config['MODEL'] not in ('3dgrt', '3dgut', 'faster-gs')
               and not os.path.exists(os.path.join(config['DATASET_PATH'], "transforms.json"))):
-            _has_sparse = (
-                os.path.isfile(os.path.join(config['DATASET_PATH'], "colmap", "sparse", "0", "cameras.bin"))
-                or os.path.isfile(os.path.join(config['DATASET_PATH'], "sparse", "0", "cameras.bin"))
+            # A COLMAP model is present if cameras.bin OR cameras.txt exists at
+            # either the colmap/sparse/0 or sparse/0 layout. The downstream
+            # converter (colmap_to_nerfstudio_cam.py -> colmap_to_json) accepts
+            # both the binary and text formats, so the detection here must too —
+            # otherwise a .txt-format or sparse/0-only model is silently skipped
+            # and the dn-splatter normal-nerfstudio dataparser later fails with
+            # FileNotFoundError: transforms.json.
+            _has_sparse = any(
+                os.path.isfile(os.path.join(config['DATASET_PATH'], *_loc, _f))
+                for _loc in (("colmap", "sparse", "0"), ("sparse", "0"))
+                for _f in ("cameras.bin", "cameras.txt")
             )
             if _has_sparse:
                 log.info("transforms.json missing but COLMAP model found — adding conversion component")
@@ -2119,7 +2117,23 @@ if __name__ == "__main__":
                     "--pipeline.model.normal-lambda", normal_lambda,
                     "--pipeline.model.use-normal-tv-loss", "True",
                     "--pipeline.model.stop-split-at", str(stop_split_at),
+                    # dn-splatter defaults use_absgrad=True; pass ENABLE_ABSGRAD explicitly so
+                    # the pipeline setting applies here like it does for the other models.
+                    "--pipeline.model.use-absgrad", "True" if ENABLE_ABSGRAD else "False",
+                    # REFINE_POSES: jointly optimize a per-image rotation + translation
+                    # correction (SO3xR3) to absorb small pose errors such as ARKit drift.
+                    "--pipeline.model.camera-optimizer.mode", "SO3xR3" if REFINE_POSES else "off",
                 ])
+                # THREED_ISP=bilagrid: per-image bilateral grid color correction during
+                # training. PPISP is gsplat-only, so it falls back to the bilateral grid
+                # here, matching the Splatfacto behavior.
+                dn_isp_mode = config.get('THREED_ISP', 'none').lower()
+                dn_use_bilagrid = dn_isp_mode in ("bilagrid", "ppisp")
+                if dn_isp_mode == "ppisp":
+                    log.info("PPISP not supported with dn-splatter (nerfstudio), using Bilateral-Grid instead")
+                args.extend(["--pipeline.model.use-bilateral-grid", "True" if dn_use_bilagrid else "False"])
+                log.info(f"DN-Splatter absgrad: {ENABLE_ABSGRAD}, refine poses: {REFINE_POSES}, "
+                         f"bilateral grid: {dn_use_bilagrid}")
                 if config['LOG_VERBOSITY'] != "debug":
                     args.extend([
                         "--logging.local-writer.enable", "False",
@@ -2152,10 +2166,10 @@ if __name__ == "__main__":
                     requires_gpu=True
                 )
             # Single GPU gsplat
-            elif ENABLE_MULTI_GPU == "false" and \
+            elif ENABLE_MULTI_GPU == "false" and not IS_FASTER_GS and \
                 config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
                 args = [
-                    "splatfacto" if config['MODEL'] == "splatfacto-depth" else config['MODEL'],
+                    config['MODEL'],
                     "--viewer.quit-on-train-completion=True"
                 ]
                 if config['LOG_VERBOSITY'] != "debug":
@@ -2169,7 +2183,7 @@ if __name__ == "__main__":
                         "--pipeline.model.predict-normals", "True",
                         "--max-num-iterations", str(config['MAX_STEPS']),
                     ])
-                elif config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth"):
+                elif config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc"):
                     if config['RUN_RECON'] == "false" and not colmap_zip_found: # Resume training
                         dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
                         has_ckpt = os.path.exists(dataset_models_path) and any(
@@ -2271,18 +2285,6 @@ if __name__ == "__main__":
                 ])
                 if auto_scale_value == "True":
                     args.extend(["--center-method", "poses"])
-                if config['MODEL'] == "splatfacto-depth":
-                    # Check both depths/ and depth_images/ directory names
-                    depths_dir = os.path.join(config['DATASET_PATH'], "depths")
-                    depth_images_dir = os.path.join(config['DATASET_PATH'], "depth_images")
-                    if os.path.isdir(depths_dir):
-                        args.extend(["--depths-path", "depths"])
-                        log.info("splatfacto-depth: passing --depths-path depths to colmap dataparser")
-                    elif os.path.isdir(depth_images_dir):
-                        args.extend(["--depths-path", "depth_images"])
-                        log.info("splatfacto-depth: passing --depths-path depth_images to colmap dataparser")
-                    else:
-                        log.warning("splatfacto-depth: no depths/ or depth_images/ directory found, training without depth supervision")
                 if ZIP_HAS_MASKS and config['SPHERICAL_CAMERA'] != "true":
                     masks_path = os.path.join(config['DATASET_PATH'], 'masks')
                     args.extend(["--masks-path", masks_path])
@@ -2297,7 +2299,7 @@ if __name__ == "__main__":
                     requires_gpu=True
                 )
             # Multi-gpu gsplat
-            elif ENABLE_MULTI_GPU == "true" and \
+            elif ENABLE_MULTI_GPU == "true" and not IS_FASTER_GS and \
                 config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
                 #multi-gpu, use gsplat training strategy
                 num_gpus = int(pipeline.config.num_gpus)
@@ -2365,6 +2367,33 @@ if __name__ == "__main__":
                     comp_environ=ComponentEnvironment.EXECUTABLE,
                     command="/opt/ml/code/training/run_gsplat_trainer.sh",
                     args=eval_args,
+                    cwd=current_dir_path,
+                    requires_gpu=True
+                )
+            # Faster-GS (NeRFICG): stages images + sparse/0 (undistorting to PINHOLE if
+            # needed), trains, and exports the PLY straight to ply_path. Resume from a
+            # model.tar.gz retrains from the archived dataset (no checkpoint continuation).
+            elif IS_FASTER_GS:
+                if config['RUN_RECON'] == "false" and not colmap_zip_found:
+                    log.info("Faster-GS does not support checkpoint resume; training from the archived dataset")
+                args = [
+                    "train",
+                    "--data-dir", config['DATASET_PATH'],
+                    "--image-dir", image_path,
+                    "--ply-out", ply_path,
+                    "--run-dir-out", FASTER_GS_MODELS_DIR,
+                    "--max-steps", str(int(config['MAX_STEPS'])),
+                    "--isp", config.get('THREED_ISP', 'none').lower(),
+                    "--model-name", "faster_gs",
+                ]
+                if ENABLE_ABSGRAD:
+                    args.append("--absgrad")
+                pipeline.create_component(
+                    name="Train",
+                    comp_type=ComponentType.TRAINING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="training/run_faster_gs.py",
+                    args=args,
                     cwd=current_dir_path,
                     requires_gpu=True
                 )
@@ -2453,7 +2482,8 @@ if __name__ == "__main__":
     # Transform checkpoints splat training to .ply
     ##################################
     try:
-        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and (not ENABLE_DEPTH_LOSS or config['MODEL'] == "splatfacto-depth"):
+        # Faster-GS exports its PLY inside the Train component (run_faster_gs.py train)
+        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and not ENABLE_DEPTH_LOSS and not IS_FASTER_GS:
             if ENABLE_MULTI_GPU == "true":
                 ckpt_dir = os.path.join(output_path, "ckpts")
                 args = [
@@ -2578,7 +2608,7 @@ if __name__ == "__main__":
     try:
         # Nerfstudio models (non-multi-GPU)
         if ENABLE_MULTI_GPU == "false":
-            if (not ENABLE_DEPTH_LOSS or config['MODEL'] == "splatfacto-depth") and (config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc", "splatfacto-depth", "nerfacto", "splatfacto-w-light", "dn-splatter", "dn-splatter-big", "ags-mesh")):
+            if not ENABLE_DEPTH_LOSS and (config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc", "nerfacto", "splatfacto-w-light", "dn-splatter", "dn-splatter-big", "ags-mesh")):
                 if resume_training_active:
                     # Resume training - use config from dataset directory for splatfacto models
                     if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
@@ -2629,6 +2659,17 @@ if __name__ == "__main__":
                     cwd=current_dir_path,
                     requires_gpu=True
                 )
+            elif IS_FASTER_GS:
+                # Converts the held-out test-set metrics NeRFICG writes during training into metrics.json
+                pipeline.create_component(
+                    name="FasterGS-Metrics",
+                    comp_type=ComponentType.TRAINING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="training/run_faster_gs.py",
+                    args=["metrics", "--run-dir", FASTER_GS_MODELS_DIR, "--output", EVAL_METRIC_PATH],
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
     except Exception as e:
         error_message = f"Issue calculating metrics: {e}"
         pipeline.report_error(771, error_message)
@@ -2639,7 +2680,7 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['ENABLE_VIDEO_EXPORT'] == "true" and ENABLE_MULTI_GPU == "false":
-            if (not ENABLE_DEPTH_LOSS or config['MODEL'] == "splatfacto-depth") and (config['MODEL'] in ("nerfacto", "splatfacto", "splatfacto-mcmc", "splatfacto-big", "splatfacto-depth", "splatfacto-w-light", "dn-splatter", "dn-splatter-big", "ags-mesh")):
+            if not ENABLE_DEPTH_LOSS and (config['MODEL'] in ("nerfacto", "splatfacto", "splatfacto-mcmc", "splatfacto-big", "splatfacto-w-light", "dn-splatter", "dn-splatter-big", "ags-mesh")):
                 model = "splatfacto"
                 if config['MODEL'] == "splatfacto-w-light":
                     model = "splatfacto-w-light"
@@ -2704,6 +2745,30 @@ if __name__ == "__main__":
                     comp_environ=ComponentEnvironment.PYTHON,
                     command="post_processing/images_to_video.py",
                     args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
+            elif IS_FASTER_GS:
+                # Render the training views in capture order, then encode them to render.mp4
+                pipeline.create_component(
+                    name="FasterGS-Render-Images",
+                    comp_type=ComponentType.POST_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="training/run_faster_gs.py",
+                    args=["render", "--run-dir", FASTER_GS_MODELS_DIR, "--subset", "train"],
+                    cwd=current_dir_path,
+                    requires_gpu=True
+                )
+                pipeline.create_component(
+                    name="Images-to-Video",
+                    comp_type=ComponentType.POST_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="post_processing/images_to_video.py",
+                    args=[
+                        "-i", os.path.join(FASTER_GS_MODELS_DIR, "inference"),
+                        "-o", os.path.join(output_path, "render.mp4"),
+                        "-r", "24"
+                    ],
                     cwd=current_dir_path,
                     requires_gpu=False
                 )
@@ -2913,7 +2978,8 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['MODEL'] != "nerfacto":
-            if config['MODEL'] not in ("3dgut", "3dgrt"):
+            # Faster-GS, like 3DGRUT, outputs in the raw COLMAP world frame (y-down)
+            if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs"):
                 # gsplat-depth uses --no-normalize-world-space (raw COLMAP/OpenCV space)
                 # nerfstudio models use OpenGL-normalized space
                 rotation = '-90,0,0' if ENABLE_DEPTH_LOSS else '270,0,180'
@@ -3000,7 +3066,7 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['ENABLE_SOG'] == "true" and config['MODEL'] != "nerfacto":
-            if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
+            if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs"):
                 # gsplat-depth uses --no-normalize-world-space (raw COLMAP/OpenCV space)
                 # nerfstudio models use OpenGL-normalized space
                 rotation = '-90,0,0' if ENABLE_DEPTH_LOSS else '270,0,180'
@@ -3228,7 +3294,7 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
-            if config['MODEL'] not in ("3dgut", "3dgrt"):
+            if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs"):
                 is_lhyu = config.get('SPZ_COORDS', 'rhyu') == 'lhyu'
                 preserve_scale = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
                 if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and preserve_scale:
@@ -3254,7 +3320,7 @@ if __name__ == "__main__":
                 # Read the dataparser_scale from nerfstudio config.yml and apply its inverse
                 # so the SPZ viewer sees a normalized (~1-unit) scene instead of a zoomed-out one.
                 preserve_scale = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
-                if preserve_scale and config['MODEL'] not in ('3dgut', '3dgrt', 'nerfacto'):
+                if preserve_scale and config['MODEL'] not in ('3dgut', '3dgrt', 'nerfacto', 'faster-gs'):
                     import yaml as _yaml
                     _config_yml = os.path.join(
                         config['CODE_PATH'], 'outputs', 'unnamed',
@@ -3428,10 +3494,18 @@ if __name__ == "__main__":
 
     ##################################
     # POST-PROCESS COMPONENT:
-    # Extract mesh from dn-splatter/ags-mesh model
+    # Extract mesh (GENERATE_MESH). Both extractors write <output_path>/mesh.glb,
+    # which the single S3-Export-Mesh component below uploads.
+    #   - dn-splatter / dn-splatter-big / ags-mesh: native gs-mesh o3dtsdf extractor
+    #   - other splat models: Gaussian-splat TSDF extractor with texture baking
+    #   - nerfacto / 3dgrt / 3dgut / faster-gs: not supported
     ##################################
+    MESH_DN_MODELS = ("dn-splatter", "dn-splatter-big", "ags-mesh")
+    # faster-gs: Extract-Mesh-GS expects a nerfstudio-space PLY + transforms.json; Faster-GS
+    # exports in the raw COLMAP frame without transforms.json, so it is not supported yet.
+    MESH_UNSUPPORTED_MODELS = ("nerfacto", "3dgrt", "3dgut", "faster-gs")
     try:
-        if GENERATE_MESH and config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
+        if GENERATE_MESH and config['MODEL'] in MESH_DN_MODELS:
             mesh_ply_path = os.path.join(output_path, "mesh.ply")
             mesh_glb_path = os.path.join(output_path, "mesh.glb")
             model_config_path = f"outputs/unnamed/{config['MODEL']}/{TRAIN_EXPERIMENT_NAME}/config.yml"
@@ -3455,6 +3529,25 @@ if __name__ == "__main__":
                 cwd=current_dir_path,
                 requires_gpu=True
             )
+        elif GENERATE_MESH and config['MODEL'] not in MESH_UNSUPPORTED_MODELS:
+            transforms_path = os.path.join(config['DATASET_PATH'], "transforms.json")
+            args = [
+                "--ply", ply_path,
+                "--transforms", transforms_path,
+                "--output-dir", output_path,
+                "--name", "mesh",
+            ]
+            pipeline.create_component(
+                name="Extract-Mesh-GS",
+                comp_type=ComponentType.POST_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="post_processing/extract_mesh_gs.py",
+                args=args,
+                cwd=current_dir_path,
+                requires_gpu=True
+            )
+        elif GENERATE_MESH:
+            log.info(f"GENERATE_MESH: mesh extraction is not supported for model {config['MODEL']}, skipping")
     except Exception as e:
         error_message = f"Issue creating mesh extraction component: {e}"
         pipeline.report_error(802, error_message)
@@ -3464,7 +3557,7 @@ if __name__ == "__main__":
     # Export mesh GLB to S3
     ##################################
     try:
-        if GENERATE_MESH and config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
+        if GENERATE_MESH and config['MODEL'] not in MESH_UNSUPPORTED_MODELS:
             mesh_glb_path = os.path.join(output_path, "mesh.glb")
             base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()
             pipeline.create_component(
@@ -3480,55 +3573,6 @@ if __name__ == "__main__":
     except Exception as e:
         error_message = f"Issue uploading mesh GLB to S3: {e}"
         pipeline.report_error(803, error_message)
-
-    ##################################
-    # POST-PROCESS COMPONENT:
-    # Extract mesh from any Gaussian splat using mesh_extraction module
-    ##################################
-    try:
-        if EXTRACT_MESH_GS and config['MODEL'] not in ("nerfacto", "3dgrt", "3dgut"):
-            gs_mesh_glb_path = os.path.join(output_path, "gs_mesh.glb")
-            transforms_path = os.path.join(config['DATASET_PATH'], "transforms.json")
-            args = [
-                "--ply", ply_path,
-                "--transforms", transforms_path,
-                "--output-dir", output_path,
-                "--name", "gs_mesh",
-            ]
-            pipeline.create_component(
-                name="Extract-Mesh-GS",
-                comp_type=ComponentType.POST_PROCESSING,
-                comp_environ=ComponentEnvironment.PYTHON,
-                command="post_processing/extract_mesh_gs.py",
-                args=args,
-                cwd=current_dir_path,
-                requires_gpu=True
-            )
-    except Exception as e:
-        error_message = f"Issue creating GS mesh extraction component: {e}"
-        pipeline.report_error(804, error_message)
-
-    ##################################
-    # POST-PROCESS COMPONENT:
-    # Export GS mesh GLB to S3
-    ##################################
-    try:
-        if EXTRACT_MESH_GS and config['MODEL'] not in ("nerfacto", "3dgrt", "3dgut"):
-            gs_mesh_glb_path = os.path.join(output_path, "gs_mesh.glb")
-            base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()
-            pipeline.create_component(
-                name="S3-Export-Mesh-GS",
-                comp_type=ComponentType.POST_PROCESSING,
-                comp_environ=ComponentEnvironment.EXECUTABLE,
-                command="aws",
-                args=["s3", "cp", gs_mesh_glb_path,
-                      f"{config['S3_OUTPUT']}/{config['UUID']}/{base_name}.gs_mesh.glb"],
-                cwd=current_dir_path,
-                requires_gpu=False
-            )
-    except Exception as e:
-        error_message = f"Issue uploading GS mesh GLB to S3: {e}"
-        pipeline.report_error(805, error_message)
 
     ##################################
     # POST-PROCESS COMPONENT:
@@ -4197,7 +4241,7 @@ if __name__ == "__main__":
                             if arg == "--pipeline.model.color-corrected-metrics" and j+1 < len(component.args):
                                 component.args[j+1] = "False"
                     # Set the image cache to disk if there are a lot of images to prevent OOM
-                    if config['MODEL'] != "nerfacto" and config['MODEL'] != "3dgrt" and config['MODEL'] != "3dgut" and ENABLE_MULTI_GPU == "false":
+                    if config['MODEL'] not in ("nerfacto", "3dgrt", "3dgut", "faster-gs") and ENABLE_MULTI_GPU == "false":
                         if num_images > GPU_MAX_IMAGES:
                             if "colmap" in component.args:
                                 index = component.args.index("colmap")
@@ -4210,7 +4254,8 @@ if __name__ == "__main__":
                                 component.args.insert(index, "0")
                                 component.args.insert(index, "--pipeline.datamanager.dataloader-num-workers")
                     if ENABLE_MULTI_GPU == "false":
-                        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and not ENABLE_DEPTH_LOSS and \
+                        # Faster-GS reads sparse/0 (or colmap/sparse/0) directly, so skip the nerfstudio move
+                        if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs") and not ENABLE_DEPTH_LOSS and \
                                 config['MODEL'] not in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
                             if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
                                 config['RECON_SOFTWARE_NAME'] == "map_anything" or config['RECON_SOFTWARE_NAME'] == "hloc":
@@ -4367,7 +4412,7 @@ if __name__ == "__main__":
                         raise e
                     # Copy checkpoint and config to output directory immediately after training
                     # so they are available for debugging if export crashes
-                    if ENABLE_MULTI_GPU == "false" and config['MODEL'] not in ["3dgut", "3dgrt"]:
+                    if ENABLE_MULTI_GPU == "false" and config['MODEL'] not in ["3dgut", "3dgrt", "faster-gs"]:
                         try:
                             output_ckpt_dst = os.path.join(output_path, "nerfstudio_models")
                             output_config_dst = os.path.join(output_path, "config.yml")
@@ -4460,7 +4505,7 @@ if __name__ == "__main__":
                     log.info("DEBUG: Continuing after PLY copy/upload...")
                     # Copy nerfstudio_models and config.yml to dataset directory for archive
                     if config['RUN_TRAIN'] == "true" and ENABLE_MULTI_GPU != "true":
-                        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
+                        if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs"):
                             # Copy nerfstudio_models directory to dataset
                             dataset_models_path = os.path.join(config['DATASET_PATH'], "nerfstudio_models")
                             # For splatfacto initial training, copy from outputs directory
@@ -4493,6 +4538,18 @@ if __name__ == "__main__":
                     if not os.path.exists(config['DATASET_PATH']):
                         log.error(f"CRITICAL: Dataset missing before cleanup: {config['DATASET_PATH']}")
                         raise RuntimeError(f"Dataset disappeared before cleanup: {config['DATASET_PATH']}")
+                    if IS_FASTER_GS:
+                        # Drop the Faster-GS staging folder (symlinks or an undistorted image copy)
+                        # and the video frames so model.tar.gz does not carry duplicate images.
+                        # rmtree removes symlinks without following them.
+                        for _fgs_tmp in (os.path.join(config['DATASET_PATH'], "faster_gs_input"),
+                                         os.path.join(FASTER_GS_MODELS_DIR, "inference")):
+                            if os.path.lexists(_fgs_tmp):
+                                if os.path.islink(_fgs_tmp):
+                                    os.unlink(_fgs_tmp)
+                                else:
+                                    shutil.rmtree(_fgs_tmp, ignore_errors=True)
+                                log.info(f"Removed Faster-GS temporary data from archive: {_fgs_tmp}")
                     cleanup_dataset(config['DATASET_PATH'])
                     if not os.path.exists(config['DATASET_PATH']):
                         log.error(f"CRITICAL: Dataset missing after cleanup: {config['DATASET_PATH']}")
@@ -4528,7 +4585,7 @@ if __name__ == "__main__":
                         # S3 ARCHIVE UPLOAD COMPONENT
                         # Copy nerfstudio_models and config.yml to dataset directory for archive
                         if config['RUN_TRAIN'] == "true" and ENABLE_MULTI_GPU != "true":
-                            if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
+                            if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs"):
                                 dataset_source = config['DATASET_PATH']
                                 # Copy nerfstudio_models directory to dataset
                                 dataset_models_path = os.path.join(dataset_source, "nerfstudio_models")
@@ -4568,7 +4625,23 @@ if __name__ == "__main__":
                         os.makedirs(os.path.dirname(OUTPUT_TAR_PATH), exist_ok=True)
                         pipeline.run_component(i)
                         log.info(f"Uploaded model.tar.gz to {config['S3_OUTPUT']}/{config['UUID']}/output/model.tar.gz")
-                case "Nerfstudio-Metrics" | "3DGRUT-Metrics" | "GSplat-Metrics":
+                case "FasterGS-Render-Images":
+                    # Video is an optional output: a render failure must not fail the job
+                    try:
+                        pipeline.run_component(i)
+                    except Exception as _render_err:
+                        log.warning(f"Faster-GS render failed, continuing without render.mp4: {_render_err}")
+                case "Images-to-Video" if IS_FASTER_GS:
+                    _frames = list(Path(FASTER_GS_MODELS_DIR, "inference").rglob("*.png"))
+                    if not _frames:
+                        log.info("Skipping Images-to-Video: no Faster-GS frames were rendered")
+                        i += 1
+                        continue
+                    try:
+                        pipeline.run_component(i)
+                    except Exception as _video_err:
+                        log.warning(f"Faster-GS video encoding failed, continuing without render.mp4: {_video_err}")
+                case "Nerfstudio-Metrics" | "3DGRUT-Metrics" | "GSplat-Metrics" | "FasterGS-Metrics":
                     # For GSplat-Metrics, force single GPU and find checkpoint files
                     if component.name == "GSplat-Metrics":
                         original_cuda = os.environ.get('CUDA_VISIBLE_DEVICES', '')
@@ -4704,8 +4777,16 @@ if __name__ == "__main__":
                             config['ENABLE_SPZ'] == "true" and os.path.exists(orig_ply_path):
                         shutil.copy2(orig_ply_path, spz_ply_path)
                         log.info(f"Copied rotated orig.ply to spz.ply for gsplat SPZ")
+                case "Extract-Mesh-GS":
+                    # Mesh extraction is an optional extra output: a failure here must
+                    # not fail a job whose splat outputs were already produced. The
+                    # dn-splatter extractor (Extract-Mesh) already exits 0 on failure.
+                    try:
+                        pipeline.run_component(i)
+                    except Exception as _mesh_err:
+                        log.warning(f"Mesh extraction failed, continuing without mesh.glb: {_mesh_err}")
                 case "S3-Export-Mesh":
-                    # Skip gracefully if mesh.glb wasn't produced (IsoOctree failed or was skipped)
+                    # Skip gracefully if mesh.glb wasn't produced (extraction failed or was skipped)
                     _mesh_glb = os.path.join(output_path, "mesh.glb")
                     if not os.path.exists(_mesh_glb):
                         log.info(f"Skipping S3-Export-Mesh: mesh.glb not found (mesh extraction was skipped)")
@@ -4901,25 +4982,29 @@ if __name__ == "__main__":
         try:
             _summary_ply = orig_ply_path if os.path.exists(orig_ply_path) else ply_path
             if os.path.exists(_summary_ply):
+                # splat-transform 3.x replaced --summary with --info (structure) and
+                # --stats (per-column statistics). Log --info for readability.
                 _summary_result = subprocess.run(
-                    ["splat-transform", _summary_ply, "--summary", "null"],
+                    ["splat-transform", _summary_ply, "--info", "text", "null"],
                     capture_output=True, text=True
                 )
                 _summary_out = _summary_result.stdout + _summary_result.stderr
                 log.info(f"Splat Summary:\n{_summary_out}")
-                # Parse gaussian count and SH bands from summary output for DynamoDB
+                # Read gaussian count and SH bands from the PLY header for DynamoDB,
+                # so the metrics don't depend on splat-transform's output format.
                 _splat_metrics = {}
-                for _line in _summary_out.splitlines():
-                    if "gaussians" in _line.lower() or "splats" in _line.lower():
-                        import re as _re
-                        _m = _re.search(r'(\d[\d,]*)', _line.replace(',', ''))
-                        if _m:
-                            _splat_metrics['gaussian_count'] = int(_m.group(1))
-                    if "sh" in _line.lower() and "band" in _line.lower():
-                        import re as _re
-                        _m = _re.search(r'(\d+)', _line)
-                        if _m:
-                            _splat_metrics['sh_bands'] = int(_m.group(1))
+                _f_rest = 0
+                with open(_summary_ply, 'rb') as _ph:
+                    for _raw in _ph:
+                        _line = _raw.decode('ascii', 'ignore').strip()
+                        if _line.startswith('element vertex '):
+                            _splat_metrics['gaussian_count'] = int(_line.split()[-1])
+                        elif _line.startswith('property') and _line.split()[-1].startswith('f_rest_'):
+                            _f_rest += 1
+                        elif _line == 'end_header':
+                            break
+                # f_rest_* holds 3 * ((bands + 1)^2 - 1) coefficients: 0/9/24/45 -> 0/1/2/3 bands
+                _splat_metrics['sh_bands'] = {0: 0, 9: 1, 24: 2, 45: 3}.get(_f_rest, 0)
                 if _splat_metrics and ddb_table_name:
                     update_dynamodb_metrics(
                         uuid=config['UUID'],

@@ -39,6 +39,7 @@ from nerfstudio.engine.callbacks import (
     TrainingCallbackLocation,
 )
 from nerfstudio.engine.optimizers import Optimizers
+from nerfstudio.model_components.lib_bilagrid import BilateralGrid
 from nerfstudio.models.splatfacto import (
     RGB2SH,
     SplatfactoModel,
@@ -247,6 +248,21 @@ class DNSplatterModel(SplatfactoModel):
             num_cameras=self.num_train_data, device="cpu"
         )
 
+        # Per-image bilateral grid (--pipeline.model.use-bilateral-grid True), ported
+        # from nerfstudio Splatfacto. It learns a per-image color transform applied to
+        # the rendered RGB during training only, absorbing exposure / white-balance
+        # changes between frames (e.g. iPhone auto-exposure) so they are not baked into
+        # the Gaussians or compensated by moving camera poses. Splatfacto's inherited
+        # get_param_groups adds the "bilateral_grid" optimizer group and its
+        # get_loss_dict adds the grid's total-variation loss.
+        if self.config.use_bilateral_grid:
+            self.bil_grids = BilateralGrid(
+                num=self.num_train_data,
+                grid_X=self.config.grid_shape[0],
+                grid_Y=self.config.grid_shape[1],
+                grid_W=self.config.grid_shape[2],
+            )
+
         if self.config.regularization_strategy == "dn-splatter":
             self.regularization_strategy = DNRegularization()
         elif self.config.regularization_strategy == "ags-mesh":
@@ -268,7 +284,11 @@ class DNSplatterModel(SplatfactoModel):
         # Initialize gsplat densification strategy (required by step_post_backward)
         self.strategy = DefaultStrategy(
             prune_opa=self.config.cull_alpha_thresh,
-            grow_grad2d=self.config.densify_grad_thresh / 4.0 if self.config.use_absgrad else self.config.densify_grad_thresh,
+            # Use the threshold as-is, matching nerfstudio Splatfacto. Absgrad produces
+            # larger gradient magnitudes than plain grads, so lowering the threshold for
+            # absgrad (previously /4.0) made ~4x more Gaussians densify and ran out of
+            # GPU memory (6M+ Gaussians by step 4400 on 96 images).
+            grow_grad2d=self.config.densify_grad_thresh,
             grow_scale3d=self.config.densify_size_thresh,
             grow_scale2d=self.config.split_screen_size,
             prune_scale3d=self.config.cull_scale_thresh,
@@ -504,6 +524,12 @@ class DNSplatterModel(SplatfactoModel):
         rgb = render[:, ..., :3] + (1 - alpha) * background
         rgb = torch.clamp(rgb, 0.0, 1.0)
 
+        # Apply the per-image bilateral grid during training only (as in Splatfacto),
+        # so evaluation, rendering, and exported splats use the uncorrected colors.
+        if self.config.use_bilateral_grid and self.training:
+            if camera.metadata is not None and "cam_idx" in camera.metadata:
+                rgb = self._apply_bilateral_grid(rgb, camera.metadata["cam_idx"], H, W)
+
         # visible gaussians
         self.vis_indices = torch.where(self.info["radii"][0].max(dim=-1).values > 0 if self.info["radii"][0].dim() == 2 else self.info["radii"][0] > 0)[0]
 
@@ -714,7 +740,13 @@ class DNSplatterModel(SplatfactoModel):
 
         main_loss = rgb_loss + regularization_strategy_loss
 
-        return {"main_loss": main_loss, "scale_reg": scale_reg}
+        # Keep any extra terms Splatfacto added (e.g. the camera optimizer's pose
+        # regularizer when --pipeline.model.camera-optimizer.mode is not "off").
+        # Returning only main_loss/scale_reg silently dropped them, which leaves
+        # refined poses with no penalty for drifting away from the input poses.
+        loss_dict["main_loss"] = main_loss
+        loss_dict["scale_reg"] = scale_reg
+        return loss_dict
 
     def get_metrics_dict(self, outputs, batch) -> Dict[str, torch.Tensor]:
         """Compute and returns metrics.

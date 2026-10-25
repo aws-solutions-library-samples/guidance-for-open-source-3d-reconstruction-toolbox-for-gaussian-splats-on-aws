@@ -79,7 +79,6 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             "enableUsdz": false,
             "enableVideoExport": true,
             "generateMesh": true,
-            "extractMeshGs": false,
             "plyCoords": "rhyu",
             "spzCoords": "rhyu",
             "sogCoords": "rhyu",
@@ -283,7 +282,7 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
 - **Training:**
     - **Enable:** (boolean), whether to enable 3DGS training or not. Future plans will enable user to only perform SfM
     - **Maximum steps:** (integer), The maximum training steps to use while training the splat
-    - **Splat model:** (string), splatfacto, splatfacto-mcmc, splatfacto-big, splatfacto-w-light, 3dgrt, 3dgut, nerfacto, dn-splatter, ags-mesh, gsplat-depth. The 3DGS model to use for training
+    - **Splat model:** (string), splatfacto, splatfacto-mcmc, splatfacto-big, splatfacto-w-light, 3dgrt, 3dgut, nerfacto, dn-splatter, ags-mesh, gsplat-depth, faster-gs. The 3DGS model to use for training
         - Pointers:
             - **splatfacto:** a great, generalized model that is perfect to start with if you are unsure what model to choose
             - **splatfacto-big:** high quality model that should be used to output feature-rich scenes and objects. This will yield a larger .ply file.
@@ -292,6 +291,7 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             - **nerfacto:** used for testing and comparisons between NeRF and GS. The output will be a NeRF. Beware, this model will need more images than GS in order to maintain higher quality.
             - **3dgut:** used for enabling Distorted Cameras and Secondary Rays in Gaussian Splatting. Great for fisheye camera input.
             - **3dgrt:** used for 3D Gaussian Ray Tracing and Fast Tracing of Particle Scenes. Great for highly detailed scenes at the cost of processing power and time
+            - **faster-gs:** [Faster-GS](https://github.com/nerficg-project/faster-gaussian-splatting) (CVPR 2026) running on the NeRFICG framework. The fast option alongside splatfacto/gsplat. It runs with Speedy-Splat pruning, which trains about 2× faster than Faster-GS defaults with far fewer Gaussians (smaller PLYs and faster rendering), at some cost to fine detail compared with splatfacto. It trains on a single GPU (GPU 0 on multi-GPU instances) and needs pinhole cameras: SfM runs with `PINHOLE`, and an existing non-pinhole COLMAP model is undistorted automatically before training. `3dIsp` `ppisp` (or `bilagrid`, mapped to PPISP) enables per-image photometric compensation. `enableAbsGrad` enables AbsGS densification. Every 8th image is held out for metrics. The PLY is exported in the COLMAP world frame. Not supported: mesh export, resume training from a checkpoint (a `model.tar.gz` input retrains from the archived dataset), and `preserveSceneScale` (the output is always in COLMAP scale).
             - **dn-splatter:** depth and normal supervised Gaussian Splatting via the dn-splatter library. Improves geometric accuracy by incorporating monocular depth and normal priors during training. Best suited for scenes where surface geometry matters. Requires a Colmap reconstruction.
 
                 **Sensor depth (optional):** If your dataset includes LiDAR or RGB-D sensor depth images (e.g. from an iPhone, RealSense, or similar), you can include them in the zip to enable sensor-depth-guided alignment of the scale-aligned mono depths. The pipeline automatically detects and uses them.
@@ -308,7 +308,7 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             - **ags-mesh:** advanced Gaussian Splatting with mesh extraction, built on dn-splatter. Produces a mesh output alongside the Gaussian splat. Best for rigid objects where a clean surface mesh is desired in addition to the splat. Requires a Colmap reconstruction. Accepts the same optional sensor depth format as dn-splatter above.
             - **gsplat-depth:** Gaussian Splatting with sparse depth loss supervision using gsplat's `simple_trainer`. Anchors Gaussians to the Colmap or LiDAR-derived point cloud for improved metric accuracy. Useful when accurate geometry is required and a pose prior with point cloud data is available. Video export and nerfstudio metrics are not available with this model.
     - **Preserve scene scale:** (boolean), whether to preserve the reconstruction scale during gaussian splat training
-    - **3D image signal processing:** (string), technique to use for scene signal processing. Current options are bilagrid (bilateral grid), ppisp (physically plausible image signal processing)
+    - **3D image signal processing:** (string), technique to use for scene signal processing. Current options are bilagrid (bilateral grid), ppisp (physically plausible image signal processing). For `dn-splatter`, `dn-splatter-big`, and `ags-mesh`, `bilagrid` learns a per-image color correction during training (useful for iPhone auto-exposure/white-balance changes); `ppisp` is not available for these models and falls back to `bilagrid`.
     - **Enable depth loss:** (boolean), whether to enable sparse depth supervision during training. The primary use case is when a LiDAR-derived point cloud is provided as pose prior input (via `usePosePriorColmapModelFiles`), giving the trainer accurate metric depth to anchor the Gaussians. It also works with standard colmap point cloud projections as a weaker depth signal. When enabled, overrides the model choice and uses gsplat's `simple_trainer` with depth loss. Requires a colmap reconstruction. Improves geometric accuracy especially for scenes with strong depth cues. Video export and nerfstudio metrics are not available when this is enabled.
     - **Enhance depth:** (boolean), whether to enhance sparse LiDAR depth maps using [PromptDA](https://github.com/DepthAnything/PromptDA) before training. PromptDA uses a vision transformer (DINOv2 ViT-L) to densify sparse metric depth by fusing the RGB image with the sparse depth as a prompt, producing dense metric-aligned depth maps. This is particularly useful when using LiDAR pose priors (`usePosePriorColmapModelFiles`) where the raw depth maps are low-resolution (e.g. 256×192 from ARKit). The enhanced depth maps are written back to the `depths/` directory before training begins.
         - Valid values: `"true"`, `"false"`
@@ -339,12 +339,9 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
     - **Generate LOD:** (boolean), whether to generate a streamed multi-LOD SOG bundle (`lod-meta.json`) from the splat. Produces 4 decimation levels (100%, 50%, 25%, 12.5%) that PlayCanvas viewers can stream progressively based on camera distance.
         - Valid values: `"true"`, `"false"`
         - Default: `"false"`
-    - **Generate mesh:** (boolean), whether to extract a surface mesh from a trained `dn-splatter` or `ags-mesh` model using IsoOctree TSDF fusion (`isooctree_dn.py`). Outputs a `mesh.ply` and `mesh.glb` that are uploaded to S3 alongside the splat. Only applies when `model` is `dn-splatter`, `dn-splatter-big`, or `ags-mesh`.
+    - **Generate mesh:** (boolean), whether to extract a surface mesh from the trained model. The extractor depends on the model: `dn-splatter`, `dn-splatter-big`, and `ags-mesh` use their native TSDF extractor; other Gaussian splat models (splatfacto variants, gsplat) use TSDF fusion with surface regularization, xatlas UV unwrapping, and camera-projection texture baking. Both write `mesh.glb`, uploaded to S3 as `<name>.mesh.glb`. Not supported for `nerfacto`, `3dgrt`, `3dgut`, or `faster-gs`. A failed mesh extraction does not fail the job. The former `extractMeshGs` setting is accepted as an alias for this setting.
         - Valid values: `"true"`, `"false"`
         - Default: `"true"`
-    - **Extract mesh from Gaussian splat:** (boolean), whether to extract a high-quality textured mesh from any trained Gaussian splat using TSDF fusion, surface regularization, xatlas UV unwrapping, and camera-projection texture baking. Outputs `gs_mesh.glb` (and `gs_mesh.obj` + texture PNG) uploaded to S3. Works with all splatfacto and gsplat models. Not supported for `nerfacto`, `3dgrt`, or `3dgut`.
-        - Valid values: `"true"`, `"false"`
-        - Default: `"false"`
     - **Ply Coordinates:** (string), the coordinate system to transform the .ply to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
     - **Spz Coordinates:** (string), the coordinate system to transform the .spz to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
     - **Sog Coordinates:** (string), the coordinate system to transform the .sog to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)

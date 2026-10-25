@@ -59,7 +59,7 @@ instance_type = "ml.g6.4xlarge"
 # reconstruction.flHeuristicValue: e.g. "1.2" (coefficient for focal length heuristic)
 # reconstruction.enableFlMetric: "true" or "false" (convert focal length mm to pixels via 35mm-equivalent formula)
 # reconstruction.flMetricValue: e.g. "6.86" (focal length in mm from EXIF FocalLength tag, e.g. iPhone 14 Pro main = 6.86)
-# training.model: "splatfacto" or "splatfacto-big" or "splatfacto-w-light" or "splatfacto-mcmc" or "3dgrt" or "3dgut" or "nerfacto"
+# training.model: "splatfacto" or "splatfacto-big" or "splatfacto-w-light" or "splatfacto-mcmc" or "3dgrt" or "3dgut" or "nerfacto" or "faster-gs"
 # training.3dIsp: "none" or "bilagrid" or "ppisp"
 # training.preserveSceneScale: "true" or "false"
 # training.enableDepthLoss: "true" or "false"
@@ -111,7 +111,8 @@ file_contents = {
         "preserveSceneScale": "false",
         "enableDepthLoss": "false",
         "enableAbsGrad": "false",
-        "enhanceDepth": "false"
+        "enhanceDepth": "false",
+        "refinePoses": "false"
     },
     "postProcessing": {
         "cropOutputBounds": "false",

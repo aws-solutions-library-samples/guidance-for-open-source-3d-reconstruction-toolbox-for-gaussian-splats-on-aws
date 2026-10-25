@@ -222,62 +222,6 @@ def resize_to_4k(image_path, spherical_camera=False):
     # Return original image if no resize needed
     return image
 
-def _center_crop_and_resize(img, target_w: int, target_h: int,
-                            interpolation: int = cv2.INTER_AREA):
-    """Center-crop to target aspect ratio then resize to exact dimensions.
-
-    Returns the resized image, or None if already at target dimensions.
-    """
-    h, w = img.shape[:2]
-    if w == target_w and h == target_h:
-        return None
-    target_ratio = target_w / target_h
-    img_ratio = w / h
-    if img_ratio > target_ratio:
-        crop_w = int(h * target_ratio)
-        x_start = (w - crop_w) // 2
-        img = img[:, x_start:x_start + crop_w]
-    elif img_ratio < target_ratio:
-        crop_h = int(w / target_ratio)
-        y_start = (h - crop_h) // 2
-        img = img[y_start:y_start + crop_h, :]
-    return cv2.resize(img, (target_w, target_h), interpolation=interpolation)
-
-
-def _resize_auxiliary_dirs(image_dir: str, target_w: int, target_h: int):
-    """Resize mask/depth files in sibling directories to match image dimensions.
-
-    Uses INTER_NEAREST to preserve discrete mask values and depth precision.
-    Walks subdirectories so both flat and multi-camera layouts are handled.
-    """
-    parent_dir = os.path.dirname(image_dir)
-    extensions = ('.png', '.jpg', '.jpeg')
-    for dirname in ("masks", "depth", "depth_images", "depth_sensor"):
-        aux_dir = os.path.join(parent_dir, dirname)
-        if not os.path.isdir(aux_dir):
-            continue
-        resized_count = 0
-        total_count = 0
-        for root, _dirs, files in os.walk(aux_dir):
-            for f in files:
-                if not f.lower().endswith(extensions):
-                    continue
-                total_count += 1
-                filepath = os.path.join(root, f)
-                img = cv2.imread(filepath, cv2.IMREAD_UNCHANGED)
-                if img is None:
-                    continue
-                result = _center_crop_and_resize(
-                    img, target_w, target_h, cv2.INTER_NEAREST
-                )
-                if result is not None:
-                    cv2.imwrite(filepath, result)
-                    resized_count += 1
-        if resized_count:
-            print(f"Resized {resized_count}/{total_count} files in"
-                  f" {dirname}/ to {target_w}x{target_h}")
-
-
 def resize_images_to_common_dimensions(image_dir):
     """
     Resize all images in a directory to the smallest common dimensions
@@ -285,9 +229,6 @@ def resize_images_to_common_dimensions(image_dir):
     center-cropped to the target aspect ratio first, then scaled to
     the exact target dimensions. This ensures every image ends up at
     identical width x height without distortion.
-
-    Also resizes files in sibling masks/ and depth*/ directories so
-    that auxiliary data stays in sync with the images.
 
     Args:
         image_dir (str): Path to directory containing images
@@ -316,11 +257,9 @@ def resize_images_to_common_dimensions(image_dir):
         return None
 
     if len(dimensions) == 1:
-        target_w, target_h = dimensions.pop()
-        print(f"All {len(image_files)} images already have uniform dimensions:"
-              f" {target_w}x{target_h}")
-        _resize_auxiliary_dirs(image_dir, target_w, target_h)
-        return (target_w, target_h)
+        w, h = dimensions.pop()
+        print(f"All {len(image_files)} images already have uniform dimensions: {w}x{h}")
+        return (w, h)
 
     target_w = min(d[0] for d in dimensions)
     target_h = min(d[1] for d in dimensions)
@@ -333,77 +272,62 @@ def resize_images_to_common_dimensions(image_dir):
         img = cv2.imread(filepath)
         if img is None:
             continue
-        result = _center_crop_and_resize(img, target_w, target_h)
-        if result is not None:
-            cv2.imwrite(filepath, result)
-            resized_count += 1
+        h, w = img.shape[:2]
+        if w == target_w and h == target_h:
+            continue
+        # Center-crop to target aspect ratio, then resize
+        target_ratio = target_w / target_h
+        img_ratio = w / h
+        if img_ratio > target_ratio:
+            # Image is wider — crop width
+            crop_w = int(h * target_ratio)
+            x_start = (w - crop_w) // 2
+            img = img[:, x_start:x_start + crop_w]
+        elif img_ratio < target_ratio:
+            # Image is taller — crop height
+            crop_h = int(w / target_ratio)
+            y_start = (h - crop_h) // 2
+            img = img[y_start:y_start + crop_h, :]
+        img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(filepath, img)
+        resized_count += 1
 
     print(f"Resized {resized_count}/{len(image_files)} images to {target_w}x{target_h}")
-    _resize_auxiliary_dirs(image_dir, target_w, target_h)
     return (target_w, target_h)
 
-# COLMAP camera model id -> name mapping
-_COLMAP_CAMERA_MODEL_NAMES = {
-    0: 'SIMPLE_PINHOLE', 1: 'PINHOLE', 2: 'SIMPLE_RADIAL', 3: 'RADIAL',
-    4: 'OPENCV', 5: 'OPENCV_FISHEYE', 6: 'FULL_OPENCV', 7: 'FOV',
-    8: 'SIMPLE_RADIAL_FISHEYE', 9: 'RADIAL_FISHEYE', 10: 'THIN_PRISM_FISHEYE'
-}
-
-def _read_camera_params_from_bin(cameras_bin_path):
-    """Read camera parameters from binary cameras.bin file"""
-    import struct
-    with open(cameras_bin_path, 'rb') as f:
-        num_cameras = struct.unpack('<Q', f.read(8))[0]
-        if num_cameras == 0:
-            return None
-        camera_id = struct.unpack('<I', f.read(4))[0]
-        model_id = struct.unpack('<I', f.read(4))[0]
-        width = struct.unpack('<Q', f.read(8))[0]
-        height = struct.unpack('<Q', f.read(8))[0]
-        model_name = _COLMAP_CAMERA_MODEL_NAMES.get(model_id, 'PINHOLE')
-        # Number of params per model (matches COLMAP source: src/colmap/camera/models.h)
-        # SIMPLE_PINHOLE=3(f,cx,cy), PINHOLE=4(fx,fy,cx,cy), SIMPLE_RADIAL=4(f,cx,cy,k)
-        # RADIAL=5, OPENCV=8, OPENCV_FISHEYE=8, FULL_OPENCV=12, FOV=5
-        # SIMPLE_RADIAL_FISHEYE=4, RADIAL_FISHEYE=5, THIN_PRISM_FISHEYE=12
-        num_params = {0: 3, 1: 4, 2: 4, 3: 5, 4: 8, 5: 8, 6: 12,
-                      7: 5, 8: 4, 9: 5, 10: 12}.get(model_id, 4)
-        print(f"[cameras.bin] model_id={model_id} ({model_name}), num_params={num_params}, w={width}, h={height}")
-        params = struct.unpack(f'<{num_params}d', f.read(num_params * 8))
-    return {
-        'id': camera_id,
-        'model': model_name,
-        'width': int(width),
-        'height': int(height),
-        'params_str': ','.join(str(p) for p in params)
-    }
-
 def read_camera_params_from_file(cameras_txt_path):
-    """Read camera parameters from cameras.txt or cameras.bin file"""
+    """Read camera parameters from cameras.txt file"""
     try:
-        # Fall back to .bin if .txt doesn't exist
-        if not os.path.exists(cameras_txt_path):
-            bin_path = cameras_txt_path.replace('cameras.txt', 'cameras.bin')
-            if os.path.exists(bin_path):
-                return _read_camera_params_from_bin(bin_path)
-            raise FileNotFoundError(cameras_txt_path)
-
         with open(cameras_txt_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
-
+            
         for line in lines:
             line = line.strip()
             if line.startswith('#') or not line:
                 continue
+                
+            # Parse camera line
+            # Format: CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]
             parts = line.split()
             if len(parts) >= 5:
                 camera_id = int(parts[0])
                 model = parts[1]
                 width = int(parts[2])
                 height = int(parts[3])
+                
+                # Get the parameters - they might be comma-separated or space-separated
                 params_str = ' '.join(parts[4:])
+
+                # First, normalize the input by replacing commas with spaces
                 normalized_params = params_str.replace(',', ' ')
+
+                # Split by whitespace to get individual parameters
                 param_list = normalized_params.split()
+
+                # Join the parameters with commas to create the final comma-separated list
                 comma_separated = ','.join(param_list)
+
+                # Return the first camera entry
                 return {
                     'id': camera_id,
                     'model': model,
@@ -411,6 +335,7 @@ def read_camera_params_from_file(cameras_txt_path):
                     'height': height,
                     'params_str': comma_separated
                 }
+        
         return None
     except Exception as e:
         print(f"Error Code 700: error reading camera parameters from file: {str(e)}")
@@ -948,8 +873,7 @@ def extract_images_from_zip_temp(temp_path, image_path, dataset_path, log):
 def validate_and_resize_images(image_path, config, log, pipeline):
     """
     Validate image files and resize them if needed.
-    Also resizes sibling mask/depth directories to keep them in sync.
-
+    
     Args:
         image_path: Path to directory containing images
         config: Configuration dictionary
@@ -961,6 +885,7 @@ def validate_and_resize_images(image_path, config, log, pipeline):
     filenames = [f for f in all_files if os.path.splitext(f)[1].lower() in IMAGE_EXTS]
     if filenames:
         log.info(f"Found {len(filenames)} images in archive (skipped {len(all_files) - len(filenames)} non-image files).")
+        # Check first image to determine if resizing is needed
         first_filepath = os.path.join(image_path, filenames[0])
         first_image = cv2.imread(first_filepath)
         if first_image is not None:
@@ -972,10 +897,6 @@ def validate_and_resize_images(image_path, config, log, pipeline):
                 for filename in filenames:
                     filepath = os.path.join(image_path, filename)
                     resize_to_4k(filepath, config['SPHERICAL_CAMERA'] == "true")
-                resized_img = cv2.imread(first_filepath)
-                if resized_img is not None:
-                    rh, rw = resized_img.shape[:2]
-                    _resize_auxiliary_dirs(image_path, rw, rh)
             else:
                 log.info(f"Images do not need resizing (first image: {width}x{height}). Skipping resize for all {len(filenames)} images.")
         else:
@@ -983,10 +904,6 @@ def validate_and_resize_images(image_path, config, log, pipeline):
             for filename in filenames:
                 filepath = os.path.join(image_path, filename)
                 resize_to_4k(filepath, config['SPHERICAL_CAMERA'] == "true")
-            resized_img = cv2.imread(os.path.join(image_path, filenames[0]))
-            if resized_img is not None:
-                rh, rw = resized_img.shape[:2]
-                _resize_auxiliary_dirs(image_path, rw, rh)
     else:
         log.info("No image files found in image directory - this is expected for resume training")
 
@@ -1520,6 +1437,13 @@ def remove_unobserved_images_for_gsplat(sparse_0_path, log):
         log.info("remove_unobserved_images_for_gsplat: all images have 3D observations, nothing to remove")
         return
 
+    if not kept:
+        log.warning(
+            "remove_unobserved_images_for_gsplat: ALL images lack "
+            "2D-3D correspondences in images.bin — skipping removal"
+        )
+        return
+
     log.info(f"remove_unobserved_images_for_gsplat: removing {len(removed)} unobserved images: {removed}")
 
     shutil.copy2(images_bin, images_bin + ".bak_unobserved")
@@ -1539,23 +1463,18 @@ def remove_unobserved_images_for_gsplat(sparse_0_path, log):
 
 def remove_fully_masked_images_for_gsplat(image_path, sparse_0_path, masks_dir, log):
     """
-    Remove images from images.bin (and from disk) where the segmentation mask
-    covers all pixels — i.e. there are no valid (unmasked) pixels to train on.
+    Remove images from images.bin when their segmentation mask has no valid pixels.
 
-    Args:
-        image_path:    Path to images/ directory
-        sparse_0_path: Path to colmap/sparse/0 containing images.bin
-        masks_dir:     Path to masks/ directory (flat, after flattening)
-        log:           Logger instance
+    gsplat treats mask values > 127 as keep-pixels. Images whose mask is entirely
+  <= 127 have no usable content for depth-loss training and are dropped.
     """
     import struct
-    import cv2
 
-    if not os.path.isdir(masks_dir):
-        return
+    from PIL import Image
 
     images_bin = os.path.join(sparse_0_path, "images.bin")
     if not os.path.exists(images_bin):
+        log.warning("remove_fully_masked_images_for_gsplat: images.bin missing, skipping")
         return
 
     with open(images_bin, "rb") as f:
@@ -1577,22 +1496,32 @@ def remove_fully_masked_images_for_gsplat(image_path, sparse_0_path, masks_dir, 
             points2d_raw = f.read(num_pts * 24) if num_pts else b""
             records.append((image_id, qvec, tvec, camera_id, name, num_pts, points2d_raw))
 
-    fully_masked = []
-    for _, _, _, _, name, _, _ in records:
-        mask_path = os.path.join(masks_dir, name)
-        if os.path.isfile(mask_path):
-            m = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-            if m is not None and not (m > 127).any():
-                fully_masked.append(name)
+    kept = []
+    removed = []
+    for image_id, qvec, tvec, camera_id, name, num_pts, points2d_raw in records:
+        mask_file = os.path.join(masks_dir, name)
+        if os.path.isfile(mask_file):
+            with Image.open(mask_file) as mask_img:
+                mask_arr = mask_img.convert("L")
+                if not any(pixel > 127 for pixel in mask_arr.getdata()):
+                    removed.append(name)
+                    image_file = os.path.join(image_path, name)
+                    if os.path.isfile(image_file):
+                        os.remove(image_file)
+                    if os.path.isfile(mask_file):
+                        os.remove(mask_file)
+                    continue
+        kept.append((image_id, qvec, tvec, camera_id, name, num_pts, points2d_raw))
 
-    if not fully_masked:
-        log.info("remove_fully_masked_images_for_gsplat: no fully-masked images found")
+    if not removed:
+        log.info("remove_fully_masked_images_for_gsplat: no fully masked images found")
         return
 
-    log.info(f"remove_fully_masked_images_for_gsplat: removing {len(fully_masked)} fully-masked images: {fully_masked}")
+    log.info(
+        f"remove_fully_masked_images_for_gsplat: removing {len(removed)} images: {removed}"
+    )
 
-    kept = [r for r in records if r[4] not in fully_masked]
-    shutil.copy2(images_bin, images_bin + ".bak_fullymask")
+    shutil.copy2(images_bin, images_bin + ".bak_fully_masked")
     with open(images_bin, "wb") as f:
         f.write(struct.pack("<Q", len(kept)))
         for image_id, qvec, tvec, camera_id, name, num_pts, points2d_raw in kept:
@@ -1604,13 +1533,9 @@ def remove_fully_masked_images_for_gsplat(image_path, sparse_0_path, masks_dir, 
             f.write(struct.pack("<Q", num_pts))
             f.write(points2d_raw)
 
-    # Remove image files from disk so the dataloader doesn't try to open them
-    for name in fully_masked:
-        img_file = os.path.join(image_path, name)
-        if os.path.isfile(img_file):
-            os.remove(img_file)
-
-    log.info(f"remove_fully_masked_images_for_gsplat: kept {len(kept)}/{num_images} images")
+    log.info(
+        f"remove_fully_masked_images_for_gsplat: kept {len(kept)}/{num_images} images"
+    )
 
 
 def rebuild_points3d_tracks_for_gsplat(sparse_0_path, log):

@@ -59,6 +59,36 @@ def run_gs_mesh_tsdf(config_path, output_dir, voxel_size=None, sdf_trunc=None):
     return result.returncode
 
 
+def run_gs_mesh_dn(config_path, output_dir, poisson_depth=9, total_points=2000000):
+    """Run gs-mesh dn: backproject rendered depth + normals, then Poisson.
+
+    Unlike TSDF fusion it has no voxel-size parameter, so it does not depend on
+    the scene's scale. Used as the fallback when TSDF produces an empty mesh.
+    """
+    cmd = [
+        "gs-mesh", "dn",
+        "--load-config", config_path,
+        "--output-dir", output_dir,
+        "--poisson-depth", str(poisson_depth),
+        "--total-points", str(total_points),
+    ]
+    print(f"Running gs-mesh dn: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=False)
+    return result.returncode
+
+
+def count_triangles(mesh_ply):
+    """Number of triangles in a mesh PLY (0 if missing or unreadable)."""
+    if not mesh_ply or not os.path.exists(mesh_ply) or os.path.getsize(mesh_ply) == 0:
+        return 0
+    try:
+        import open3d as o3d
+        return len(o3d.io.read_triangle_mesh(mesh_ply).triangles)
+    except Exception as e:
+        print(f"Warning: could not read {mesh_ply}: {e}")
+        return 0
+
+
 def find_mesh_ply(output_dir):
     """Find the mesh PLY file produced by gs-mesh in the output directory."""
     for fname in os.listdir(output_dir):
@@ -144,38 +174,53 @@ def main():
         print(f"Info: config not found, skipping mesh extraction: {args.config_path}")
         sys.exit(0)
 
+    import shutil
+
+    tsdf = ("o3dtsdf", lambda d: run_gs_mesh_tsdf(
+        args.config_path, d,
+        voxel_size=args.voxel_size or (0.004 if args.method == "sugar-coarse" else None),
+        sdf_trunc=args.sdf_trunc or (0.02 if args.method == "sugar-coarse" else None),
+    ))
+    dn = ("dn", lambda d: run_gs_mesh_dn(
+        args.config_path, d,
+        poisson_depth=args.poisson_depth,
+        total_points=args.total_points,
+    ))
     if args.method == "sugar-coarse":
-        rc = run_gs_mesh_sugar(
-            args.config_path, output_dir,
+        attempts = [("sugar-coarse", lambda d: run_gs_mesh_sugar(
+            args.config_path, d,
             poisson_depth=args.poisson_depth,
             total_points=args.total_points,
-        )
-        if rc != 0:
-            print(f"sugar-coarse failed (rc={rc}), falling back to o3dtsdf")
-            rc = run_gs_mesh_tsdf(
-                args.config_path, output_dir,
-                voxel_size=args.voxel_size or 0.004,
-                sdf_trunc=args.sdf_trunc or 0.02,
-            )
+        )), tsdf, dn]
     else:
-        rc = run_gs_mesh_tsdf(
-            args.config_path, output_dir,
-            voxel_size=args.voxel_size,
-            sdf_trunc=args.sdf_trunc,
-        )
+        attempts = [tsdf, dn]
 
-    if rc != 0:
-        print(f"gs-mesh failed with return code {rc} — skipping mesh extraction (non-fatal)")
+    # Run each method in its own folder so an empty or partial mesh from a failed
+    # attempt is never picked up as the result.
+    mesh_ply = None
+    work_dirs = []
+    for name, run in attempts:
+        work_dir = os.path.join(output_dir, f"_gs_mesh_{name}")
+        shutil.rmtree(work_dir, ignore_errors=True)
+        work_dirs.append(work_dir)
+        rc = run(work_dir)
+        candidate = find_mesh_ply(work_dir) if os.path.isdir(work_dir) else None
+        n_tri = count_triangles(candidate)
+        if rc == 0 and n_tri > 0:
+            print(f"{name}: mesh with {n_tri} triangles")
+            mesh_ply = candidate
+            break
+        print(f"{name} produced no usable mesh (rc={rc}, triangles={n_tri}); trying next method")
+
+    if mesh_ply is None:
+        print("All mesh extraction methods failed — skipping mesh extraction (non-fatal)")
+        for d in work_dirs:
+            shutil.rmtree(d, ignore_errors=True)
         sys.exit(0)
 
-    mesh_ply = find_mesh_ply(output_dir)
-    if not mesh_ply or not os.path.exists(mesh_ply) or os.path.getsize(mesh_ply) == 0:
-        print(f"Warning: no mesh PLY found in {output_dir}, skipping GLB conversion")
-        sys.exit(0)
-
-    if os.path.abspath(mesh_ply) != os.path.abspath(args.output_ply):
-        import shutil
-        shutil.move(mesh_ply, args.output_ply)
+    shutil.move(mesh_ply, args.output_ply)
+    for d in work_dirs:
+        shutil.rmtree(d, ignore_errors=True)
 
     convert_ply_to_glb(args.output_ply, args.output_glb)
 

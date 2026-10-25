@@ -191,6 +191,51 @@ def upload_to_s3(archive: Path, bucket: str) -> None:
     print("Upload complete.")
 
 
+def ensure_writable_dir(out_dir: Path) -> None:
+    """Create out_dir if needed and verify the current user can write to it.
+
+    Exits with a clear, actionable message instead of a raw traceback when the
+    directory exists but is owned by another user (the classic case: it was
+    created by a prior `sudo`/root or container run on a shared filesystem).
+    """
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        print(f"ERROR: cannot create output directory: {out_dir}")
+        print("  The parent directory is not writable by the current user.")
+        _print_permission_hint(out_dir)
+        sys.exit(1)
+
+    # Directory exists — confirm we can actually write a file into it.
+    probe = out_dir / ".write_test"
+    try:
+        probe.touch()
+        probe.unlink()
+    except PermissionError:
+        import getpass
+
+        owner = "unknown"
+        try:
+            owner = out_dir.owner()
+        except Exception:
+            pass
+        print(f"ERROR: output directory is not writable: {out_dir}")
+        print(f"  Current user: {getpass.getuser()}   Directory owner: {owner}")
+        print("  This usually means the directory was created by a previous")
+        print("  root/sudo or container run on a shared filesystem (e.g. EFS).")
+        _print_permission_hint(out_dir)
+        sys.exit(1)
+
+
+def _print_permission_hint(out_dir: Path) -> None:
+    """Print copy-paste remediation steps for a non-writable output dir."""
+    print("  Fix it with either of:")
+    print(f"    sudo chown -R $(id -un):$(id -gn) {out_dir}")
+    print("  or build to a directory you own:")
+    print("    python build_models_tar.py --output-dir /tmp/models-out")
+    print("  And run this script WITHOUT sudo so the directory stays user-owned.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--upload", metavar="s3://BUCKET", help="Upload models.tar.gz to S3 after building")
@@ -199,8 +244,12 @@ def main():
 
     script_dir = Path(__file__).parent.resolve()
     out_dir = Path(args.output_dir) if args.output_dir else script_dir / "models"
-    out_dir.mkdir(parents=True, exist_ok=True)
     archive = out_dir / "models.tar.gz"
+
+    # Validate the output directory is writable BEFORE downloading ~2 GB of
+    # models, so a permission problem fails fast with an actionable message
+    # instead of a raw traceback after the long download step.
+    ensure_writable_dir(out_dir)
 
     print("=== Building models.tar.gz ===")
     print(f"Output: {archive}")

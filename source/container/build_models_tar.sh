@@ -28,20 +28,70 @@
 #
 # Optional: upload to S3 after building
 #   bash build_models_tar.sh --upload s3://your-bucket-name
+#
+# Optional: write models.tar.gz to a directory you own (recommended on shared
+# filesystems like EFS to avoid permission problems):
+#   bash build_models_tar.sh --output-dir /tmp/models-out
 
 set -e
 
 UPLOAD_BUCKET=""
-if [[ "$1" == "--upload" && -n "$2" ]]; then
-    UPLOAD_BUCKET="$2"
-fi
+OUTPUT_DIR_OVERRIDE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --upload)
+            UPLOAD_BUCKET="$2"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR_OVERRIDE="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT_DIR="$SCRIPT_DIR/models"
+OUT_DIR="${OUTPUT_DIR_OVERRIDE:-$SCRIPT_DIR/models}"
 TMP_DIR="$(mktemp -d)"
 ARCHIVE="$OUT_DIR/models.tar.gz"
 
-mkdir -p "$OUT_DIR"
+# Validate the output directory is writable BEFORE downloading ~2 GB of models,
+# so a permission problem fails fast with an actionable message instead of
+# crashing on the final `tar` step after the long download.
+ensure_writable_dir() {
+    local dir="$1"
+    if ! mkdir -p "$dir" 2>/dev/null; then
+        echo "ERROR: cannot create output directory: $dir" >&2
+        echo "  The parent directory is not writable by the current user." >&2
+        print_permission_hint "$dir"
+        exit 1
+    fi
+    if ! ( touch "$dir/.write_test" && rm -f "$dir/.write_test" ) 2>/dev/null; then
+        local owner
+        owner="$(stat -c '%U' "$dir" 2>/dev/null || echo unknown)"
+        echo "ERROR: output directory is not writable: $dir" >&2
+        echo "  Current user: $(id -un)   Directory owner: $owner" >&2
+        echo "  This usually means the directory was created by a previous" >&2
+        echo "  root/sudo or container run on a shared filesystem (e.g. EFS)." >&2
+        print_permission_hint "$dir"
+        exit 1
+    fi
+}
+
+print_permission_hint() {
+    local dir="$1"
+    echo "  Fix it with either of:" >&2
+    echo "    sudo chown -R \$(id -un):\$(id -gn) $dir" >&2
+    echo "  or build to a directory you own:" >&2
+    echo "    bash build_models_tar.sh --output-dir /tmp/models-out" >&2
+    echo "  And run this script WITHOUT sudo so the directory stays user-owned." >&2
+}
+
+ensure_writable_dir "$OUT_DIR"
 
 echo "=== Building models.tar.gz ==="
 echo "Temp dir: $TMP_DIR"

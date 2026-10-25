@@ -94,7 +94,8 @@ def validate_config(config: dict):
             "3dIsp": None,
             "numGaussians": None,
             "enableAbsGrad": None,
-            "enhanceDepth": None
+            "enhanceDepth": None,
+            "refinePoses": None
         },
         "postProcessing": {
             "cropOutputBounds": None,
@@ -111,8 +112,7 @@ def validate_config(config: dict):
             "collisionSceneType": None,
             "collisionSeedPos": None,
             "generateLod": None,
-            "generateMesh": None,
-            "extractMeshGs": None
+            "generateMesh": None
         },
         "sphericalCamera": {
             "enable": None,
@@ -170,6 +170,14 @@ def lambda_handler(event, context):
 
     # Ensure the required props were configured
     validate_config(json_content)
+
+    # generateMesh is the single mesh switch. The removed extractMeshGs setting is
+    # still honored as an alias so older requests that set it keep getting a mesh.
+    _post = json_content.get("postProcessing") or {}
+    generate_mesh = str(
+        str(_post.get("generateMesh", "true")).lower() == "true"
+        or str(_post.get("extractMeshGs", "false")).lower() == "true"
+    ).lower()
 
     if 'status_code' not in json_content:
         # Get the payload from the event
@@ -278,13 +286,13 @@ def lambda_handler(event, context):
                     "enableDepthLoss": str(json_content["training"].get("enableDepthLoss", "false")),
                     "enableAbsGrad": str(json_content["training"].get("enableAbsGrad", "false")),
                     "enhanceDepth": str(json_content["training"].get("enhanceDepth", "false")),
+                    "refinePoses": str(json_content["training"].get("refinePoses", "false")),
                     "enableVideoExport": str(json_content["postProcessing"].get("enableVideoExport", "true")),
                     "generateCollision": str(json_content["postProcessing"].get("generateCollision", "false")),
                     "collisionSceneType": str(json_content["postProcessing"].get("collisionSceneType", "outdoor")),
                     "collisionSeedPos": str(json_content["postProcessing"].get("collisionSeedPos", "0,0,0")),
                     "generateLod": str(json_content["postProcessing"].get("generateLod", "false")),
-                    "generateMesh": str(json_content["postProcessing"].get("generateMesh", "true")),
-                    "extractMeshGs": str(json_content["postProcessing"].get("extractMeshGs", "false"))
+                    "generateMesh": generate_mesh
                 }
 
                 try:
@@ -357,7 +365,7 @@ def lambda_handler(event, context):
                     "THREED_ISP": str(json_content["training"].get("3dIsp", "none")),
                     "ENABLE_ABSGRAD": str(json_content["training"].get("enableAbsGrad", "false")),
                     "ENHANCE_DEPTH": str(json_content["training"].get("enhanceDepth", "false")),
-                    "DEPTH_SCALE": str(json_content["training"].get("depthScale", "1000.0")),
+                    "REFINE_POSES": str(json_content["training"].get("refinePoses", "false")),
                     "CROP_OUTPUT_BOUNDS": str(json_content["postProcessing"]["cropOutputBounds"]).lower(),
                     "CROP_MODE": str(json_content["postProcessing"]["cropMode"]),
                     "CLEAN_SPLAT": str(json_content["postProcessing"].get("cleanSplat", "false")).lower(),
@@ -382,8 +390,7 @@ def lambda_handler(event, context):
                     "COLLISION_SCENE_TYPE": str(json_content["postProcessing"].get("collisionSceneType", "outdoor")),
                     "COLLISION_SEED_POS": str(json_content["postProcessing"].get("collisionSeedPos", "0,0,0")),
                     "GENERATE_LOD": str(json_content["postProcessing"].get("generateLod", "false")),
-                    "GENERATE_MESH": str(json_content["postProcessing"].get("generateMesh", "true")),
-                    "EXTRACT_MESH_GS": str(json_content["postProcessing"].get("extractMeshGs", "false")),
+                    "GENERATE_MESH": generate_mesh,
                     "DDB_TABLE_NAME": os.environ.get("DDB_TABLE_NAME", ""),
                     "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-east-1"))
                 },
