@@ -92,14 +92,22 @@ if os.path.isdir(path):
 
             colmap_to_json(recon_dir=Path(sparse_path), output_dir=Path(path), ply_filename=ply_path)
 
-            # Inject mask_path into each frame if a masks directory exists
+            # Inject mask_path into each frame if a masks directory exists.
+            # nerfstudio loads masks as single-channel images (black = ignore, any other
+            # value = keep) and needs a mask on every frame or on none. Each mask is
+            # therefore rewritten as a binary 8-bit PNG named after the image stem, and
+            # frames without a mask get an all-white one.
             import json
+            import numpy as np
+            from PIL import Image
             masks_dir = os.path.join(path, "masks")
             transforms_path = os.path.join(path, "transforms.json")
             if os.path.isdir(masks_dir) and os.path.isfile(transforms_path):
                 with open(transforms_path, "r") as f:
                     data = json.load(f)
-                for frame in data.get("frames", []):
+                frames = data.get("frames", [])
+                unmasked, partly_masked = [], 0
+                for frame in frames:
                     frame.pop("mask_path", None)  # strip any pre-existing mask_path from external pipeline
                     img_name = frame["file_path"]
                     # Strip leading "images/" prefix if present — mask path mirrors image subpath
@@ -107,12 +115,37 @@ if os.path.isdir(path):
                         img_name = img_name[len("images/"):]
                     elif img_name.startswith("./images/"):
                         img_name = img_name[len("./images/"):]
-                    mask_file = os.path.join(masks_dir, img_name)
-                    if os.path.isfile(mask_file):
-                        frame["mask_path"] = f"masks/{img_name}"
+                    mask_name = os.path.splitext(img_name)[0] + ".png"
+                    # Masks are named like the image, after its stem (the Atlas app writes
+                    # scan_000.png for scan_000.jpg), or COLMAP-style (<image>.png).
+                    src = next((c for c in (img_name, mask_name, img_name + ".png")
+                                if os.path.isfile(os.path.join(masks_dir, c))), None)
+                    if src is None:
+                        unmasked.append((frame, mask_name))
+                        continue
+                    # Same threshold as the gsplat mask loader. Gray anti-aliased edges
+                    # would otherwise count as keep pixels.
+                    with Image.open(os.path.join(masks_dir, src)) as m:
+                        keep = np.asarray(m.convert("L")) > 127
+                    Image.fromarray(keep.astype(np.uint8) * 255).save(
+                        os.path.join(masks_dir, mask_name), format="PNG")
+                    frame["mask_path"] = f"masks/{mask_name}"
+                    partly_masked += int(not keep.all())
+                if unmasked and len(unmasked) < len(frames):
+                    for frame, mask_name in unmasked:
+                        try:
+                            with Image.open(os.path.join(path, frame["file_path"])) as im:
+                                size = im.size
+                        except OSError:
+                            continue  # unreadable image; dropped later by dataset sanitizing
+                        os.makedirs(os.path.dirname(os.path.join(masks_dir, mask_name)), exist_ok=True)
+                        Image.new("L", size, 255).save(os.path.join(masks_dir, mask_name), format="PNG")
+                        frame["mask_path"] = f"masks/{mask_name}"
+                    print(f"WARNING: {len(unmasked)} frames had no mask; gave them an all-white mask")
                 with open(transforms_path, "w") as f:
                     json.dump(data, f, indent=4)
-                print(f"Injected mask_path into transforms.json")
+                print(f"Injected mask_path into {sum('mask_path' in fr for fr in frames)}/{len(frames)} "
+                      f"frames in transforms.json ({partly_masked} masks exclude part of the image)")
         except Exception as e:
             error_str = str(e).lower()
             if "einsum" in error_str or "subscripts" in error_str or "dimensions" in error_str:

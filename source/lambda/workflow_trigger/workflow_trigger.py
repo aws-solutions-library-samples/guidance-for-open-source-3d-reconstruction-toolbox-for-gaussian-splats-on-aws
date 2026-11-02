@@ -95,7 +95,8 @@ def validate_config(config: dict):
             "numGaussians": None,
             "enableAbsGrad": None,
             "enhanceDepth": None,
-            "refinePoses": None
+            "refinePoses": None,
+            "calibrateRig": None
         },
         "postProcessing": {
             "cropOutputBounds": None,
@@ -287,6 +288,7 @@ def lambda_handler(event, context):
                     "enableAbsGrad": str(json_content["training"].get("enableAbsGrad", "false")),
                     "enhanceDepth": str(json_content["training"].get("enhanceDepth", "false")),
                     "refinePoses": str(json_content["training"].get("refinePoses", "false")),
+                    "calibrateRig": str(json_content["training"].get("calibrateRig", "false")),
                     "enableVideoExport": str(json_content["postProcessing"].get("enableVideoExport", "true")),
                     "generateCollision": str(json_content["postProcessing"].get("generateCollision", "false")),
                     "collisionSceneType": str(json_content["postProcessing"].get("collisionSceneType", "outdoor")),
@@ -366,6 +368,7 @@ def lambda_handler(event, context):
                     "ENABLE_ABSGRAD": str(json_content["training"].get("enableAbsGrad", "false")),
                     "ENHANCE_DEPTH": str(json_content["training"].get("enhanceDepth", "false")),
                     "REFINE_POSES": str(json_content["training"].get("refinePoses", "false")),
+                    "CALIBRATE_RIG": str(json_content["training"].get("calibrateRig", "false")),
                     "CROP_OUTPUT_BOUNDS": str(json_content["postProcessing"]["cropOutputBounds"]).lower(),
                     "CROP_MODE": str(json_content["postProcessing"]["cropMode"]),
                     "CLEAN_SPLAT": str(json_content["postProcessing"].get("cleanSplat", "false")).lower(),

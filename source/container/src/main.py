@@ -116,6 +116,52 @@ from utils import (
     remove_fully_masked_images_for_gsplat
 )
 
+
+def world_frame_dataparser_args(config, user_supplied_model=False):
+    """nerfstudio dataparser args that keep the input world frame.
+
+    When the user supplies the camera poses and PRESERVE_SCENE_SCALE is on, the splat
+    should come out in that world frame. The poses can be supplied as pose priors
+    (transforms.json or COLMAP model files, e.g. ARKit) or as a ready COLMAP model with
+    reconstruction skipped; such a model may itself have been built from priors, which
+    we can't tell, so it is treated the same way. The nerfstudio dataparsers otherwise
+    re-orient the scene (orientation_method='up') and move its origin to the mean camera
+    position (center_method='poses'), so the output no longer lines up with the source
+    coordinates even though its scale is metric.
+    """
+    preserve = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
+    priors = config.get('USE_POSE_PRIOR_TRANSFORM_JSON', 'false') == 'true' or \
+        config.get('USE_POSE_PRIOR_COLMAP_MODEL_FILES', 'false') == 'true'
+    if preserve and (priors or user_supplied_model):
+        source = "pose priors" if priors else "uploaded COLMAP model"
+        print(f"PRESERVE_SCENE_SCALE with {source}: keeping the input world frame "
+              f"(--orientation-method none --center-method none)")
+        return ["--orientation-method", "none", "--center-method", "none"]
+    return []
+
+
+def safe_extract_zip(zip_file_path, dest_path):
+    """Extract a zip with zip-slip protection and Windows path separators fixed.
+
+    Some Windows zip tools (e.g. Windows PowerShell 5.1 Compress-Archive) store
+    entry names with backslashes ('scene\\colmap\\sparse\\0\\cameras.bin'). On
+    Linux, zipfile treats those as one flat file name, so the folder structure
+    is lost. Normalize them to '/' before extracting.
+    """
+    real_dest = os.path.realpath(dest_path)
+    with zipfile.ZipFile(zip_file_path, "r") as zip_ref:
+        members = zip_ref.infolist()
+        fixed = 0
+        for info in members:
+            if "\\" in info.filename:
+                info.filename = info.filename.replace("\\", "/")
+                fixed += 1
+            entry_path = os.path.realpath(os.path.join(dest_path, info.filename))
+            if not entry_path.startswith(real_dest + os.sep):
+                raise ValueError(f"Zip slip detected: {info.filename}")
+        zip_ref.extractall(dest_path, members=members)
+    return fixed
+
 if __name__ == "__main__":
     ##################################
     # INITIALIZATION
@@ -172,9 +218,10 @@ if __name__ == "__main__":
         # or nerfstudio, trains on a single GPU, and outputs in the raw COLMAP world frame.
         IS_FASTER_GS = config['MODEL'] == 'faster-gs'
         FASTER_GS_MODELS_DIR = os.path.join(config['DATASET_PATH'], "faster_gs_models")
-        ENABLE_DEPTH_LOSS = not IS_FASTER_GS and (
-            config['MODEL'] == 'gsplat-depth' or config.get('ENABLE_DEPTH_LOSS', 'false').lower() == 'true'
-        )
+        # gsplat simple_trainer with sparse COLMAP-point depth loss. gsplat-depth uses
+        # the "default" densification strategy, gsplat-depth-mcmc the "mcmc" strategy
+        # (capped at NUM_GAUSSIANS).
+        IS_GSPLAT_DEPTH = config['MODEL'] in ('gsplat-depth', 'gsplat-depth-mcmc')
         GENERATE_COLLISION = config.get('GENERATE_COLLISION', 'false').lower() == 'true'
         GENERATE_LOD = config.get('GENERATE_LOD', 'false').lower() == 'true'
         # Single mesh switch: dn-splatter/ags-mesh models use their native extractor,
@@ -183,6 +230,7 @@ if __name__ == "__main__":
         ENABLE_ABSGRAD = config.get('ENABLE_ABSGRAD', 'false').lower() == 'true'
         REFINE_POSES = config.get('REFINE_POSES', 'false').lower() == 'true'
         ENHANCE_DEPTH = config.get('ENHANCE_DEPTH', 'false').lower() == 'true'
+        CALIBRATE_RIG = config.get('CALIBRATE_RIG', 'false').lower() == 'true'
 
         # Collision voxelization requires metric world scale to produce accurate collision geometry.
         # Force PRESERVE_SCENE_SCALE on whenever GENERATE_COLLISION is enabled.
@@ -417,7 +465,7 @@ if __name__ == "__main__":
         model = "splatfacto"
     elif config['MODEL'] in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
         model = config['MODEL']
-    elif config['MODEL'] == "gsplat-depth":
+    elif config['MODEL'] in ("gsplat-depth", "gsplat-depth-mcmc"):
         model = "splatfacto"
     else:
         model = config['MODEL']
@@ -510,13 +558,9 @@ if __name__ == "__main__":
         if config['FILENAME'].endswith('.zip') and os.path.exists(zip_path):
             # Extract zip to temp directory
             temp_path = os.path.join(config['DATASET_PATH'], 'temp')
-            with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                # Validate entries to prevent zip slip attacks
-                for entry in zip_ref.namelist():
-                    entry_path = os.path.realpath(os.path.join(temp_path, entry))
-                    if not entry_path.startswith(os.path.realpath(temp_path) + os.sep):
-                        raise ValueError(f"Zip slip detected: {entry}")
-                zip_ref.extractall(temp_path)
+            _fixed = safe_extract_zip(zip_path, temp_path)
+            if _fixed:
+                log.warning(f"Zip used Windows '\\' path separators in {_fixed} entries; normalized to '/'")
             
             # Check if extracted content is in a subdirectory
             temp_contents = os.listdir(temp_path)
@@ -579,7 +623,16 @@ if __name__ == "__main__":
                     for _subdir in ('images', 'masks', 'depths'):
                         _src = os.path.join(_colmap_dir, _subdir)
                         _dst = os.path.join(config['DATASET_PATH'], _subdir)
-                        if os.path.isdir(_src) and not os.path.exists(_dst):
+                        # images/ (and sparse/0/) are created as empty placeholders at
+                        # startup, so an existing but file-less folder must not block
+                        # the hoist; otherwise models that skip the later copy step
+                        # (e.g. gsplat-depth) train with an empty images/ folder.
+                        _dst_empty = os.path.isdir(_dst) and not any(
+                            _fs for _r, _d, _fs in os.walk(_dst)
+                        )
+                        if os.path.isdir(_src) and (not os.path.exists(_dst) or _dst_empty):
+                            if _dst_empty:
+                                shutil.rmtree(_dst)
                             shutil.move(_src, _dst)
                             log.info(
                                 f"Hoisted colmap/{_subdir}/ to"
@@ -738,7 +791,7 @@ if __name__ == "__main__":
                     log.info(f"Generated {_filled} blank masks for images without existing masks")
 
         # Ensure colmap/sparse structure exists for NerfStudio (not needed for 3DGRUT or depth loss)
-        if colmap_zip_found and config['MODEL'] not in ('3dgrt', '3dgut', 'faster-gs') and not ENABLE_DEPTH_LOSS:
+        if colmap_zip_found and config['MODEL'] not in ('3dgrt', '3dgut', 'faster-gs') and not IS_GSPLAT_DEPTH:
             colmap_sparse_0 = os.path.join(config['DATASET_PATH'], 'colmap', 'sparse', '0')
             colmap_sparse_0_populated = os.path.isdir(colmap_sparse_0) and bool(os.listdir(colmap_sparse_0))
             if not colmap_sparse_0_populated:
@@ -1440,6 +1493,28 @@ if __name__ == "__main__":
 
     ##################################
     # PRE_PROCESSING COMPONENT:
+    # Re-estimate the multi-camera rig (e.g. iPhone + Insta360 X5) from the
+    # session's images. Runs before anything reads the poses. It only changes the
+    # dataset when the upload has COLMAP rig files and the fit passes its quality
+    # gate; otherwise the original poses are kept (see calibrate_rig/report.json).
+    ##################################
+    try:
+        if CALIBRATE_RIG:
+            pipeline.create_component(
+                name="Calibrate-Rig",
+                comp_type=ComponentType.PRE_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="pre_processing/calibrate_rig.py",
+                args=["--dataset", config['DATASET_PATH'], "--gpu", "on" if USE_GPU == "true" else "off"],
+                cwd=current_dir_path,
+                requires_gpu=True
+            )
+    except Exception as e:
+        error_message = f"Issue creating rig calibration component: {e}"
+        pipeline.report_error(805, error_message)
+
+    ##################################
+    # PRE_PROCESSING COMPONENT:
     # Enhance sparse LiDAR depth images using PromptDA
     ##################################
     try:
@@ -1747,7 +1822,7 @@ if __name__ == "__main__":
                 # Run undistorter for multi-GPU or when using 3DGRUT with pose priors
                 # For depth loss: convert cameras.bin to PINHOLE in-place instead —
                 # the undistorter renames images in images.bin which breaks point_indices
-                if ENABLE_DEPTH_LOSS and ENABLE_MULTI_GPU == "false":
+                if IS_GSPLAT_DEPTH and ENABLE_MULTI_GPU == "false":
                     pipeline.create_component(
                         name="Convert-Cameras-To-Pinhole",
                         comp_type=ComponentType.RECONSTRUCTION,
@@ -1983,12 +2058,13 @@ if __name__ == "__main__":
                 config['RECON_SOFTWARE_NAME'] == "map_anything" or config['RECON_SOFTWARE_NAME'] == "hloc":
                 data_model = "colmap"
             # Single GPU gsplat with depth loss — override model choice and use gsplat simple_trainer
-            if ENABLE_DEPTH_LOSS and ENABLE_MULTI_GPU == "false":
+            if IS_GSPLAT_DEPTH and ENABLE_MULTI_GPU == "false":
                 isp_mode = config.get('THREED_ISP', 'none').lower()
-                if config['MODEL'] == "splatfacto-mcmc":
+                if config['MODEL'] == "gsplat-depth-mcmc":
                     model = "mcmc"
                 else:
                     model = "default"
+                log.info(f"GSplat depth-loss strategy: {model}")
                 args = [
                     model,
                     "--max_steps", str(int(config['MAX_STEPS'])),
@@ -2005,13 +2081,18 @@ if __name__ == "__main__":
                     args.extend(["--no-normalize-world-space", "--depth_lambda", "1e-4"])
                 if model == "mcmc":
                     num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
-                    args.extend(["--mcmc.cap-max", str(num_gaussians)])
+                    # simple_trainer's MCMC options live under Config.strategy
+                    args.extend(["--strategy.cap-max", str(num_gaussians)])
                 if isp_mode == "ppisp":
                     args.extend(["--post_processing", "ppisp", "--batch_size", "1"])
                 elif isp_mode == "bilagrid":
                     args.extend(["--post_processing", "bilateral_grid"])
                 if ENABLE_ABSGRAD:
                     args.append("--strategy.absgrad")
+                # REFINE_POSES: gsplat's per-image pose correction (pose_opt, off by default)
+                if REFINE_POSES:
+                    args.append("--pose_opt")
+                log.info(f"GSplat refine poses: {REFINE_POSES}")
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -2147,6 +2228,15 @@ if __name__ == "__main__":
                     "--normal-format", "dsine",
                     "--load-depths", "True",
                 ])
+                # normal-nerfstudio defaults to auto_scale_poses=True, which divides all
+                # camera positions by the largest one (scene squeezed into ~[-1, 1]). The
+                # sensor depth is scaled by the same factor, so training is consistent, but
+                # the exported splat is no longer metric. Honour PRESERVE_SCENE_SCALE like
+                # the splatfacto branch does, and keep the pose-prior world frame too.
+                if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
+                    args.extend(["--auto-scale-poses", "False"])
+                    log.info("DN-Splatter: PRESERVE_SCENE_SCALE=true -> --auto-scale-poses False (metric output)")
+                args.extend(world_frame_dataparser_args(config, user_supplied_model=colmap_zip_found))
                 if has_sensor_depth:
                     # Sensor depth is loaded via transforms.json depth_file_path entries;
                     # normal-nerfstudio dataparser does not accept --depth-mode as a CLI arg.
@@ -2238,6 +2328,14 @@ if __name__ == "__main__":
                             args.extend(["--pipeline.model.use-bilateral-grid", "True"])
                         if ENABLE_ABSGRAD:
                             args.extend(["--pipeline.model.use-absgrad", "True"])
+                        # REFINE_POSES: per-image rotation + translation correction (SO3xR3).
+                        # Initial training only: a resumed checkpoint has no pose_adjustment
+                        # tensor when it was trained with the optimizer off.
+                        args.extend([
+                            "--pipeline.model.camera-optimizer.mode",
+                            "SO3xR3" if REFINE_POSES else "off",
+                        ])
+                        log.info(f"Splatfacto refine poses: {REFINE_POSES}")
                 elif config['MODEL'] == "splatfacto-w-light":
                     if config['RUN_RECON'] == "false": # Resume training
                         if os.path.exists(model_ckpt_path):
@@ -2285,6 +2383,7 @@ if __name__ == "__main__":
                 ])
                 if auto_scale_value == "True":
                     args.extend(["--center-method", "poses"])
+                args.extend(world_frame_dataparser_args(config, user_supplied_model=colmap_zip_found))
                 if ZIP_HAS_MASKS and config['SPHERICAL_CAMERA'] != "true":
                     masks_path = os.path.join(config['DATASET_PATH'], 'masks')
                     args.extend(["--masks-path", masks_path])
@@ -2306,12 +2405,12 @@ if __name__ == "__main__":
                 batch_size = 1
                 steps_scaler = 1.0 / num_gpus  # Scale by number of GPUs only
                 #steps_scaler = 0.96*(num_gpus*batch_size)**(-1.689)
-                if config['MODEL'] == "splatfacto-mcmc":
+                if config['MODEL'] in ("splatfacto-mcmc", "gsplat-depth-mcmc"):
                     model = "mcmc"
                 else:
                     model = "default"
                 isp_mode = config.get('THREED_ISP', 'none').lower()
-                depth_loss_flag = "--depth-loss" if ENABLE_DEPTH_LOSS else "--no-depth-loss"
+                depth_loss_flag = "--depth-loss" if IS_GSPLAT_DEPTH else "--no-depth-loss"
                 args = [
                     model,
                     "--max_steps", str(int(config['MAX_STEPS'])),
@@ -2324,19 +2423,24 @@ if __name__ == "__main__":
                     #depth_loss_flag,
                     "--data-dir", config['DATASET_PATH']
                 ]
-                if ENABLE_DEPTH_LOSS:
+                if IS_GSPLAT_DEPTH:
                     args.extend(["--depth_lambda", "1e-3"])
                 if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
                     args.extend(["--no-normalize-world-space", "--depth_lambda", "1e-4"])
                 if model == "mcmc":
                     num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
-                    args.extend(["--mcmc.cap-max", str(num_gaussians)])
+                    # simple_trainer's MCMC options live under Config.strategy
+                    args.extend(["--strategy.cap-max", str(num_gaussians)])
                 if isp_mode == "ppisp":
                     log.info("PPISP not supported with multi-GPU gsplat (requires single GPU), skipping")
                 elif isp_mode == "bilagrid":
                     log.info("Bilateral grid not supported with multi-GPU gsplat (requires single GPU), skipping")
                 if ENABLE_ABSGRAD:
                     args.append("--strategy.absgrad")
+                # REFINE_POSES: gsplat's per-image pose correction (pose_opt, off by default)
+                if REFINE_POSES:
+                    args.append("--pose_opt")
+                log.info(f"Multi-GPU gsplat refine poses: {REFINE_POSES}")
                 pipeline.create_component(
                     name="Train",
                     comp_type=ComponentType.TRAINING,
@@ -2483,7 +2587,7 @@ if __name__ == "__main__":
     ##################################
     try:
         # Faster-GS exports its PLY inside the Train component (run_faster_gs.py train)
-        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and not ENABLE_DEPTH_LOSS and not IS_FASTER_GS:
+        if config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt" and not IS_GSPLAT_DEPTH and not IS_FASTER_GS:
             if ENABLE_MULTI_GPU == "true":
                 ckpt_dir = os.path.join(output_path, "ckpts")
                 args = [
@@ -2586,7 +2690,7 @@ if __name__ == "__main__":
     # Export PLY from gsplat depth loss checkpoint
     ##################################
     try:
-        if ENABLE_DEPTH_LOSS and config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
+        if IS_GSPLAT_DEPTH and config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
             ckpt_dir = os.path.join(output_path, "ckpts")
             pipeline.create_component(
                 name="Nerfstudio-Export",
@@ -2608,7 +2712,7 @@ if __name__ == "__main__":
     try:
         # Nerfstudio models (non-multi-GPU)
         if ENABLE_MULTI_GPU == "false":
-            if not ENABLE_DEPTH_LOSS and (config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc", "nerfacto", "splatfacto-w-light", "dn-splatter", "dn-splatter-big", "ags-mesh")):
+            if not IS_GSPLAT_DEPTH and (config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc", "nerfacto", "splatfacto-w-light", "dn-splatter", "dn-splatter-big", "ags-mesh")):
                 if resume_training_active:
                     # Resume training - use config from dataset directory for splatfacto models
                     if config['MODEL'] in ["splatfacto", "splatfacto-big", "splatfacto-mcmc"]:
@@ -2680,7 +2784,7 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['ENABLE_VIDEO_EXPORT'] == "true" and ENABLE_MULTI_GPU == "false":
-            if not ENABLE_DEPTH_LOSS and (config['MODEL'] in ("nerfacto", "splatfacto", "splatfacto-mcmc", "splatfacto-big", "splatfacto-w-light", "dn-splatter", "dn-splatter-big", "ags-mesh")):
+            if not IS_GSPLAT_DEPTH and (config['MODEL'] in ("nerfacto", "splatfacto", "splatfacto-mcmc", "splatfacto-big", "splatfacto-w-light", "dn-splatter", "dn-splatter-big", "ags-mesh")):
                 model = "splatfacto"
                 if config['MODEL'] == "splatfacto-w-light":
                     model = "splatfacto-w-light"
@@ -2982,7 +3086,7 @@ if __name__ == "__main__":
             if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs"):
                 # gsplat-depth uses --no-normalize-world-space (raw COLMAP/OpenCV space)
                 # nerfstudio models use OpenGL-normalized space
-                rotation = '-90,0,0' if ENABLE_DEPTH_LOSS else '270,0,180'
+                rotation = '-90,0,0' if IS_GSPLAT_DEPTH else '270,0,180'
             else:
                 # 3DGRUT outputs need 180° on right and up axes for PlayCanvas viewer
                 rotation = '180,180,0'
@@ -3069,7 +3173,7 @@ if __name__ == "__main__":
             if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs"):
                 # gsplat-depth uses --no-normalize-world-space (raw COLMAP/OpenCV space)
                 # nerfstudio models use OpenGL-normalized space
-                rotation = '-90,0,0' if ENABLE_DEPTH_LOSS else '270,0,180'
+                rotation = '-90,0,0' if IS_GSPLAT_DEPTH else '270,0,180'
             else:
                 # 3DGRUT outputs need 180° on right and up axes for PlayCanvas viewer
                 rotation = '180,180,0'
@@ -3265,7 +3369,7 @@ if __name__ == "__main__":
     ##################################
     try:
         if config['MODEL'] != "nerfacto" and config['ENABLE_SPZ'] == "true":
-            is_gsplat = ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS
+            is_gsplat = ENABLE_MULTI_GPU == "true" or IS_GSPLAT_DEPTH
             preserve_scale = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
             # For normalized gsplat, spz.ply is copied from orig.ply (already coord-transformed
             # and rotated), so skip the coord transform step entirely.
@@ -3297,10 +3401,10 @@ if __name__ == "__main__":
             if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs"):
                 is_lhyu = config.get('SPZ_COORDS', 'rhyu') == 'lhyu'
                 preserve_scale = config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true'
-                if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and preserve_scale:
+                if (ENABLE_MULTI_GPU == "true" or IS_GSPLAT_DEPTH) and preserve_scale:
                     # gsplat raw COLMAP space (--no-normalize-world-space)
                     rotation = '-90,0,180' if is_lhyu else '-90,0,0'
-                elif ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS:
+                elif ENABLE_MULTI_GPU == "true" or IS_GSPLAT_DEPTH:
                     # gsplat normalized: spz.ply copied from orig.ply (rhyu space)
                     # Apply 180,0,0 to match the orientation Babylon.js SPZ expects
                     rotation = '180,0,0'
@@ -3709,13 +3813,9 @@ if __name__ == "__main__":
                         else: # Archive of images or archive with a video
                             # unzip archive into temp directory
                             temp_path = os.path.join(config['DATASET_PATH'], 'temp')
-                            with zipfile.ZipFile(input_file_path, "r") as zip_ref:
-                                # Validate entries to prevent zip slip attacks
-                                for entry in zip_ref.namelist():
-                                    entry_path = os.path.realpath(os.path.join(temp_path, entry))
-                                    if not entry_path.startswith(os.path.realpath(temp_path) + os.sep):
-                                        raise ValueError(f"Zip slip detected: {entry}")
-                                zip_ref.extractall(temp_path)
+                            _fixed = safe_extract_zip(input_file_path, temp_path)
+                            if _fixed:
+                                log.warning(f"Zip used Windows '\\' path separators in {_fixed} entries; normalized to '/'")
                             
                             # Check for video files first (.mov, .mp4)
                             all_files = []
@@ -4217,16 +4317,17 @@ if __name__ == "__main__":
                                 _args[_j + 1] = _normal_supervision
                                 break
                     # Check image count and resolution at runtime to configure color correction
-                    # For spherical camera, images are in pano_camera* subdirectories under image_path
-                    if config['SPHERICAL_CAMERA'] == "true":
-                        image_files = [
-                            os.path.join(root, f)
-                            for root, _, files in os.walk(image_path)
-                            for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg'))
-                        ]
-                    else:
-                        image_files = [os.path.join(image_path, f) for f in os.listdir(image_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                    # and image caching. Count recursively: spherical runs use pano_camera*/
+                    # subdirs and rig/colmap-prefix zips use images/<camera>/ subdirs. A flat
+                    # listdir counted 0 for those, so the disk-cache guard below never fired
+                    # and nerfstudio cached 500+ images in RAM until the OOM killer hit (-9).
+                    image_files = [
+                        os.path.join(root, f)
+                        for root, _, files in os.walk(image_path)
+                        for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                    ]
                     num_images = len(image_files)
+                    log.info(f"Train runtime: {num_images} images under {image_path}")
                     is_4k_or_higher = False
                     if image_files:
                         sample_img = Image.open(image_files[0])
@@ -4255,7 +4356,7 @@ if __name__ == "__main__":
                                 component.args.insert(index, "--pipeline.datamanager.dataloader-num-workers")
                     if ENABLE_MULTI_GPU == "false":
                         # Faster-GS reads sparse/0 (or colmap/sparse/0) directly, so skip the nerfstudio move
-                        if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs") and not ENABLE_DEPTH_LOSS and \
+                        if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs") and not IS_GSPLAT_DEPTH and \
                                 config['MODEL'] not in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
                             if config['RECON_SOFTWARE_NAME'] == "colmap" or config['RECON_SOFTWARE_NAME'] == "glomap" or \
                                 config['RECON_SOFTWARE_NAME'] == "map_anything" or config['RECON_SOFTWARE_NAME'] == "hloc":
@@ -4304,7 +4405,7 @@ if __name__ == "__main__":
                         # gsplat's colmap.py keys point_indices by the image name in images.bin
                         # (e.g. 'face_01/pano_011.png'). After clean_images_dir flattens subdirs,
                         # the actual files are 'face_01_pano_011.png'. Flatten images.bin to match.
-                        if ENABLE_DEPTH_LOSS and ENABLE_MULTI_GPU == "false":
+                        if IS_GSPLAT_DEPTH and ENABLE_MULTI_GPU == "false":
                             _sparse_0 = os.path.join(config['DATASET_PATH'], "colmap", "sparse", "0")
                             if not os.path.exists(_sparse_0):
                                 _sparse_0 = os.path.join(config['DATASET_PATH'], "sparse", "0")
@@ -4328,10 +4429,14 @@ if __name__ == "__main__":
                                     remove_fully_masked_images_for_gsplat(
                                         image_path, _sparse_0, _masks_dir, log
                                     )
-                        # 3DGRUT reads the COLMAP model from sparse/0/,
-                        # but the colmap-prefix zip layout puts it at
-                        # colmap/sparse/0/.  Copy the files over.
-                        if config['MODEL'] == '3dgut':
+                        # 3DGRUT and gsplat's simple_trainer (gsplat-depth) read the
+                        # COLMAP model from sparse/0/, but the colmap-prefix zip layout
+                        # puts it at colmap/sparse/0/, and an empty sparse/0/
+                        # placeholder is created at startup. Copy the files over
+                        # (after flattening above, so the flattened images.bin is used).
+                        if config['MODEL'] == '3dgut' or (
+                            IS_GSPLAT_DEPTH and ENABLE_MULTI_GPU == "false"
+                        ):
                             _s0 = os.path.join(
                                 config['DATASET_PATH'], 'sparse', '0',
                             )
@@ -4345,7 +4450,18 @@ if __name__ == "__main__":
                             )
                             if _s0_empty and os.path.isdir(_cs0):
                                 os.makedirs(_s0, exist_ok=True)
+                                # gsplat only needs per-image poses. Leave out COLMAP 4
+                                # rig files: pycolmap derives image poses from them when
+                                # present, so a rig that is incomplete (images without a
+                                # frame) or inconsistent with images.bin breaks loading.
+                                # Without them pycolmap uses the images.bin poses.
+                                _skip_rig = config['MODEL'] != '3dgut'
+                                _skipped = []
                                 for _sf in os.listdir(_cs0):
+                                    if _skip_rig and _sf in ('rigs.bin', 'frames.bin',
+                                                             'rigs.txt', 'frames.txt'):
+                                        _skipped.append(_sf)
+                                        continue
                                     shutil.copy2(
                                         os.path.join(_cs0, _sf),
                                         os.path.join(_s0, _sf),
@@ -4353,7 +4469,8 @@ if __name__ == "__main__":
                                 log.info(
                                     "Copied COLMAP model from"
                                     " colmap/sparse/0/ to sparse/0/"
-                                    " for 3DGRUT"
+                                    f" for {config['MODEL']}"
+                                    + (f" (left out {', '.join(_skipped)})" if _skipped else "")
                                 )
 
                         # 3DGRUT expects masks as <stem>_mask.png next
@@ -4479,7 +4596,7 @@ if __name__ == "__main__":
                         log.warning(f"USDZ-Add-Collision-Mesh output not found at {usdz_tmp_path}, keeping original")
                 case "Extract-Video-Thumbnail":
                     # For multi-GPU, copy auto-generated video before extracting thumbnail
-                    if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and config['ENABLE_VIDEO_EXPORT'] == "true":
+                    if (ENABLE_MULTI_GPU == "true" or IS_GSPLAT_DEPTH) and config['ENABLE_VIDEO_EXPORT'] == "true":
                         videos_dir = os.path.join(output_path, "videos")
                         if os.path.exists(videos_dir):
                             video_files = sorted([f for f in os.listdir(videos_dir) if f.startswith('traj_') and f.endswith('.mp4')])
@@ -4772,7 +4889,7 @@ if __name__ == "__main__":
                     # For normalized gsplat, orig.ply is now correctly oriented.
                     # Copy it to spz.ply so SPZ starts from the same correct orientation
                     # instead of the pre-rotation splat.ply copy.
-                    if (ENABLE_MULTI_GPU == "true" or ENABLE_DEPTH_LOSS) and \
+                    if (ENABLE_MULTI_GPU == "true" or IS_GSPLAT_DEPTH) and \
                             config.get('PRESERVE_SCENE_SCALE', 'false').lower() != 'true' and \
                             config['ENABLE_SPZ'] == "true" and os.path.exists(orig_ply_path):
                         shutil.copy2(orig_ply_path, spz_ply_path)
@@ -4900,11 +5017,48 @@ if __name__ == "__main__":
                         pipeline.run_component(i)
                     except RuntimeError as _lod_err:
                         log.warning(f"Generate-LOD failed (non-fatal, skipping): {_lod_err}")
+                case "Calibrate-Rig":
+                    # Non-fatal: calibrate_rig.py keeps (or restores) the original
+                    # poses whenever it cannot produce a trustworthy rig.
+                    try:
+                        pipeline.run_component(i)
+                    except RuntimeError as _rig_err:
+                        log.warning(f"Calibrate-Rig failed (non-fatal, original poses kept): {_rig_err}")
+                    _rig_report = os.path.join(config['DATASET_PATH'], "calibrate_rig", "report.json")
+                    if os.path.isfile(_rig_report):
+                        try:
+                            with open(_rig_report) as _rf:
+                                _rr = _json.load(_rf)
+                            log.info(f"Calibrate-Rig: {_rr.get('status')} - {_rr.get('reason')}")
+                        except Exception:
+                            pass
                 case "Enhance-Depth":
                     # Resolve depth dir at runtime — files may have been extracted from zip
                     _rt_depth_dir = os.path.join(config['DATASET_PATH'], "depth")
                     if not os.path.isdir(_rt_depth_dir):
                         _rt_depth_dir = os.path.join(config['DATASET_PATH'], "depth_images")
+                    # Raw ARKit LiDAR (depths/*.bin) is converted to depth/*.png at
+                    # training time by dn_splatter_preprocess; convert it now so
+                    # PromptDA can enhance it (the dense 256x192 map is PromptDA's
+                    # native prompt).
+                    _bins_dir = os.path.join(config['DATASET_PATH'], "depths")
+                    if not os.path.isdir(_rt_depth_dir) and os.path.isdir(_bins_dir) and any(
+                        f.lower().endswith(".bin") for f in os.listdir(_bins_dir)
+                    ):
+                        try:
+                            _train_dir = os.path.join(current_dir_path, 'training')
+                            if _train_dir not in sys.path:
+                                sys.path.insert(0, _train_dir)
+                            from dn_splatter_preprocess import convert_lidar_bins
+                            _n = convert_lidar_bins(config['DATASET_PATH'])
+                            log.info(f"Enhance-Depth: converted {_n} ARKit LiDAR .bin maps to depth/")
+                            _rt_depth_dir = os.path.join(config['DATASET_PATH'], "depth")
+                        except Exception as _e:
+                            log.warning(f"Enhance-Depth: LiDAR .bin conversion failed: {_e}")
+                    if config['MODEL'] not in ("dn-splatter", "dn-splatter-big", "ags-mesh"):
+                        log.warning(f"ENHANCE_DEPTH=true, but MODEL={config['MODEL']} does not train on "
+                                    "depth maps (only dn-splatter/dn-splatter-big/ags-mesh do); "
+                                    "the enhanced depth will not be used")
                     if os.path.isdir(_rt_depth_dir):
                         # Patch the --depth-dir arg with the resolved path
                         try:
@@ -4914,7 +5068,7 @@ if __name__ == "__main__":
                             pass
                         pipeline.run_component(i)
                     else:
-                        log.warning("ENHANCE_DEPTH=true but no depth/ or depth_images/ directory found, skipping")
+                        log.warning("ENHANCE_DEPTH=true but no depth/, depth_images/ or depths/*.bin found, skipping")
                 case _: # Default case, run Component
                     pipeline.run_component(i)
                     # After autoscale runs, normalize image dimensions

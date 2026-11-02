@@ -106,6 +106,8 @@ class SharedState:
         self.isp_3d = "none"
         self.enable_absgrad = "false"
         self.enhance_depth = "false"
+        self.refine_poses = "false"
+        self.calibrate_rig = "false"
         self.enable_fl_heuristic = "false"
         self.fl_heuristic_value = 1.2
         self.enable_fl_metric = "false"
@@ -214,6 +216,25 @@ def parse_aws_credentials(creds_string):
         return f"Error parsing credentials: {str(e)}"
 
 
+def scan_all_items(table):
+    """Return every item in a DynamoDB table.
+
+    A single scan() returns at most 1 MB of data. Job records carry the full job
+    configuration, so once the table grows past that limit some jobs (in hash
+    order, not time order) silently disappear from the tables. Follow
+    LastEvaluatedKey until the scan is complete.
+    """
+    items = []
+    kwargs = {}
+    while True:
+        response = table.scan(**kwargs)
+        items.extend(response.get('Items', []))
+        last_key = response.get('LastEvaluatedKey')
+        if not last_key:
+            return items
+        kwargs['ExclusiveStartKey'] = last_key
+
+
 def refresh_s3_contents():
     """Refresh contents from DynamoDB and return grouped data by job ID - optimized"""
     try:
@@ -222,7 +243,7 @@ def refresh_s3_contents():
         dynamodb = boto3.resource('dynamodb', region_name=shared_state.aws_region)
         table = dynamodb.Table(shared_state.ddb_table_name)
         
-        response = table.scan()
+        response = {'Items': scan_all_items(table)}
         
         print(f"DEBUG: Found {len(response.get('Items', []))} total items in DynamoDB")
         
@@ -319,7 +340,7 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
                 use_transform_json, training_enable, max_steps, num_gaussians, spherical_enable, remove_bg, remove_objects,
                 object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam, log_verbosity, mask_threshold, 
                 crop_output_bounds, crop_mode, clean_splat, enable_spz, enable_sog, video_start_time, video_stop_time,
-                preserve_scene_scale, enable_absgrad, enhance_depth):
+                preserve_scene_scale, enable_absgrad, enhance_depth, refine_poses="false", calibrate_rig="false"):
     unique_uuid = uuid.uuid4()
     original_filename = os.path.basename(video_file) if video_file else "No file selected"
     
@@ -352,6 +373,7 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
             "softwareName": sfm_software,
             "posePriors": {
                 "usePosePriorColmapModelFiles": use_colmap_model == "true",
+                "calibrateRig": calibrate_rig == "true",
                 "usePosePriorTransformJson": {
                     "enable": use_transform_json == "true",
                     "sourceCoordinateName": source_coordinate,
@@ -381,7 +403,8 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
             "preserveSceneScale": preserve_scene_scale == "true",
             "3dIsp": shared_state.isp_3d,
             "enableAbsGrad": enable_absgrad == "true",
-            "enhanceDepth": enhance_depth == "true"
+            "enhanceDepth": enhance_depth == "true",
+            "refinePoses": refine_poses == "true"
         },
         "postProcessing": {
             "cropOutputBounds": crop_output_bounds == "true" if isinstance(crop_output_bounds, str) else crop_output_bounds,
@@ -505,6 +528,7 @@ def create_upload_aws_tab():
                                 "softwareName": shared_state.sfm,
                                 "posePriors": {
                                     "usePosePriorColmapModelFiles": shared_state.use_colmap_model == "true",
+                                    "calibrateRig": shared_state.calibrate_rig == "true",
                                     "usePosePriorTransformJson": {
                                         "enable": shared_state.use_transform_json == "true",
                                         "sourceCoordinateName": shared_state.source_coordinate,
@@ -534,7 +558,8 @@ def create_upload_aws_tab():
                                 "preserveSceneScale": shared_state.preserve_scene_scale == "true",
                                 "3dIsp": shared_state.isp_3d,
                                 "enableAbsGrad": shared_state.enable_absgrad == "true",
-                                "enhanceDepth": shared_state.enhance_depth == "true"
+                                "enhanceDepth": shared_state.enhance_depth == "true",
+                                "refinePoses": shared_state.refine_poses == "true"
                             },
                             "postProcessing": {
                                 "cropOutputBounds": shared_state.crop_output_bounds == "true",
@@ -868,6 +893,12 @@ def create_advanced_settings_tab():
                     choices=["true", "false"],
                     value="false"
                 )
+                calibrate_rig = gr.Radio(
+                    label="Calibrate Camera Rig",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Before training, re-estimate how the 360 camera is mounted to the iPhone (the COLMAP rig) from this session's images. Multi-camera mobile exports with rigs.bin only; keeps the original poses if the fit is not reliable."
+                )
             with gr.Column():
                 gr.Markdown("### Pose Priors-Transform JSON")
                 use_transform_json = gr.Radio(
@@ -919,10 +950,11 @@ def create_advanced_settings_tab():
                         "dn-splatter",
                         "ags-mesh",
                         "gsplat-depth",
+                        "gsplat-depth-mcmc",
                         "faster-gs"
                     ],
                     value="splatfacto",
-                    info="faster-gs: Faster-GS (NeRFICG) with Speedy-Splat pruning. The fastest option, with smaller splats; single GPU. Supports 3D ISP (PPISP) and AbsGrad; no mesh export or resume."
+                    info="gsplat-depth / gsplat-depth-mcmc: gsplat with sparse depth loss from the COLMAP/LiDAR points; the -mcmc variant uses the MCMC strategy capped at Max Gaussians. faster-gs: Faster-GS (NeRFICG) with Speedy-Splat pruning. The fastest option, with smaller splats; single GPU. Supports 3D ISP (PPISP) and AbsGrad; no mesh export or resume."
                 )
                 preserve_scene_scale = gr.Radio(
                     label="Preserve Scene Scale",
@@ -950,6 +982,12 @@ def create_advanced_settings_tab():
                     choices=["true", "false"],
                     value="false",
                     info="Use PromptDA to densify sparse LiDAR depth images before training. Requires a depth/ or depth_images/ folder in the dataset."
+                )
+                refine_poses = gr.Radio(
+                    label="Refine Camera Poses",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Jointly optimize a per-image pose correction during training to absorb small pose errors (e.g. LiDAR/ARKit odometry). Applies to splatfacto, gsplat, and dn-splatter/ags-mesh (initial training, not resume)."
                 )
         with gr.Row():
             with gr.Column():
@@ -1077,7 +1115,8 @@ def create_advanced_settings_tab():
                      shared_state.enable_fl_metric, shared_state.fl_metric_value,
                      shared_state.auto_matcher, shared_state.auto_mapper,
                      shared_state.autoscale_dataset, shared_state.autoscale_dataset_mode,
-                     shared_state.autogroup_images, shared_state.autogroup_target_name) = args
+                     shared_state.autogroup_images, shared_state.autogroup_target_name,
+                     shared_state.refine_poses, shared_state.calibrate_rig) = args
                     return "Advanced settings updated"
 
                 # Get all advanced settings components after they're defined
@@ -1096,7 +1135,8 @@ def create_advanced_settings_tab():
                     enable_fl_metric, fl_metric_value,
                     auto_matcher, auto_mapper,
                     autoscale_dataset, autoscale_dataset_mode,
-                    autogroup_images, autogroup_target_name
+                    autogroup_images, autogroup_target_name,
+                    refine_poses, calibrate_rig
                 ]
                 
                 def save_configuration(config_name, *settings):
@@ -1157,7 +1197,9 @@ def create_advanced_settings_tab():
                         'autoscale_dataset': settings[50],
                         'autoscale_dataset_mode': settings[51],
                         'autogroup_images': settings[52],
-                        'autogroup_target_name': settings[53]
+                        'autogroup_target_name': settings[53],
+                        'refine_poses': settings[54],
+                        'calibrate_rig': settings[55]
                     }
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -1245,6 +1287,8 @@ def create_advanced_settings_tab():
                         shared_state.autoscale_dataset_mode = config_data.get('autoscale_dataset_mode', 'RESIZE')
                         shared_state.autogroup_images = config_data.get('autogroup_images', 'false')
                         shared_state.autogroup_target_name = config_data.get('autogroup_target_name', '')
+                        shared_state.refine_poses = config_data.get('refine_poses', 'false')
+                        shared_state.calibrate_rig = config_data.get('calibrate_rig', 'false')
                         
                         return [
                             f"Configuration '{config_name}' loaded successfully",
@@ -1301,7 +1345,9 @@ def create_advanced_settings_tab():
                             config_data.get('autoscale_dataset', 'false'),
                             config_data.get('autoscale_dataset_mode', 'RESIZE'),
                             config_data.get('autogroup_images', 'false'),
-                            config_data.get('autogroup_target_name', '')
+                            config_data.get('autogroup_target_name', ''),
+                            config_data.get('refine_poses', 'false'),
+                            config_data.get('calibrate_rig', 'false')
                         ]
                     except Exception as e:
                         return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in advanced_components]
@@ -2151,8 +2197,8 @@ def get_job_progress_data():
         dynamodb = boto3.resource('dynamodb', region_name=shared_state.aws_region)
         table = dynamodb.Table(shared_state.ddb_table_name)
         
-        # Scan the table to get all jobs
-        response = table.scan()
+        # Scan the table to get all jobs (paginated; one scan() caps at 1 MB)
+        response = {'Items': scan_all_items(table)}
         jobs_data = []
         
         for item in response['Items']:
@@ -2622,7 +2668,9 @@ def create_debug_tab():
                         shared_state.video_stop_time,
                         shared_state.preserve_scene_scale,
                         shared_state.enable_absgrad,
-                        shared_state.enhance_depth
+                        shared_state.enhance_depth,
+                        shared_state.refine_poses,
+                        shared_state.calibrate_rig
                     )
 
         # Wire up the event handlers

@@ -39,8 +39,14 @@ injection = '''# Load per-image segmentation masks from masks/ directory
         seg_mask_dict = {}
         if os.path.isdir(seg_masks_dir):
             for _img_name in [imdata[k].name for k in imdata]:
-                _mpath = os.path.join(seg_masks_dir, _img_name)
-                if os.path.isfile(_mpath):
+                # Masks may be named exactly like the image, COLMAP-style
+                # (<image>.png), or as <image stem>.png (e.g. scan_000.jpg ->
+                # scan_000.png). Use the first that exists.
+                _cands = [_img_name, _img_name + ".png",
+                          os.path.splitext(_img_name)[0] + ".png"]
+                _mpath = next((os.path.join(seg_masks_dir, _c) for _c in _cands
+                               if os.path.isfile(os.path.join(seg_masks_dir, _c))), "")
+                if _mpath:
                     _m = _iio.imread(_mpath)
                     if _m.ndim == 3:
                         _m = _m[..., 0]  # take first channel if RGB/RGBA

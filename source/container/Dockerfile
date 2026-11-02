@@ -687,6 +687,7 @@ COPY ./src/pipeline/pre_processing/autoscale_dataset.py \
      ./src/pipeline/pre_processing/auto_matcher.py \
      ./src/pipeline/pre_processing/enhance_depth.py \
      ./src/pipeline/pre_processing/normalize_dataset.py \
+     ./src/pipeline/pre_processing/calibrate_rig.py \
      ${CODE_PATH}/pre_processing/
 COPY ./src/pipeline/post_processing/rotate_splat.py \
      ./src/pipeline/post_processing/mirror_splat.py \
@@ -743,4 +744,4 @@ RUN echo "=== VERSION VERIFICATION ===" \
     && echo "  NerfStudio: $(python -c 'import nerfstudio; print(getattr(nerfstudio, "__version__", "installed"))' 2>/dev/null || echo 'Not found')" \
     && echo "  GSplat: $(python -c 'import gsplat; print(gsplat.__version__)' 2>/dev/null || echo 'Not found')" \
     && echo "  FasterGS backend: $(python -c 'import FasterGSCudaBackend; print("installed")' 2>/dev/null || echo 'Not found')" \
-    && echo "=== END VERSION VERIFICATION === "
+    && echo "=== END VERSION VERIFICATION ==="

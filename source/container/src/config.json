@@ -62,5 +62,6 @@
     "NUM_GAUSSIANS": "1000000",
     "ENABLE_ABSGRAD": "false",
     "ENHANCE_DEPTH": "false",
-    "REFINE_POSES": "false"
+    "REFINE_POSES": "false",
+    "CALIBRATE_RIG": "false"
 }

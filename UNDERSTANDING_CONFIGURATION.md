@@ -68,7 +68,8 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
             "preserveSceneScale": false,
             "3dIsp": "bilagrid",
             "enableDepthLoss": false,
-            "enhanceDepth": false
+            "enhanceDepth": false,
+            "calibrateRig": false
         },
         "postProcessing": {
             "cropOutputBounds": true,
@@ -174,6 +175,7 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
 
         > ***Note:** All image files must be sequentially named and padded (e.g. 001.png, 002.png, etc.)*
     - **Pose Priors**
+        - **Calibrate camera rig (`calibrateRig`):** (boolean, default false), for multi-camera mobile exports that include COLMAP 4 rig files (`rigs.bin` + `frames.bin`), e.g. an iPhone with an Insta360 camera mounted to it. Before training, the pipeline runs a quick SfM on the session's images, measures how the 360 camera is actually mounted relative to the iPhone, and rewrites `rigs.bin` and the 360 camera poses in `images.bin`. The iPhone poses are not changed. Only sensors (cube faces or fisheye lenses) whose masks leave at least 30% of the image visible are used for the fit. If too few 360 images register (fewer than 10) or the fit is not reliable, the original poses are kept and the reason is logged. The result is written to `calibrate_rig/report.json` in the dataset, with the original files in `calibrate_rig/original/`. Uploads without rig files are not affected. This is different from `refinePoses`, which adjusts each image's pose during training.
         - **Use pose prior Colmap model files:** see [Colmap model text files](https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses){:target="_blank"}
             - The file schema for providing the already created Colmap model files looks like this
                 <details>

@@ -54,7 +54,9 @@ def convert_lidar_bins(data_dir):
     out_dir = os.path.join(data_dir, "depth")
     if not os.path.isdir(src_dir) or not os.path.isdir(images_dir):
         return 0
-    if os.path.isdir(out_dir) and any(f.lower().endswith(".png") for f in os.listdir(out_dir)):
+    if os.path.isdir(out_dir) and any(
+        f.lower().endswith(".png") for _, _, fs in os.walk(out_dir) for f in fs
+    ):
         print(f"[LiDAR depth] {out_dir} already has PNGs, skipping .bin conversion")
         return 0
 
@@ -62,16 +64,27 @@ def convert_lidar_bins(data_dir):
     if not bins:
         return 0
 
-    # Map lidar stem ("scan_000") -> image filename. Images may have been flattened
-    # from images/<subdir>/scan_000.jpg to images/<subdir>_scan_000.jpg.
-    image_files = [f for f in os.listdir(images_dir)
-                   if f.lower().endswith((".png", ".jpg", ".jpeg"))]
-    by_stem = {os.path.splitext(f)[0]: f for f in image_files}
+    # Map lidar stem ("scan_000") -> image path relative to images/. Images may be
+    # nested (images/<subdir>/scan_000.jpg, before clean_images_dir runs) or
+    # flattened (images/<subdir>_scan_000.jpg). Depth PNGs mirror the image's
+    # relative path, so dn-splatter's depth/ subdir flattening still matches.
+    image_files = sorted(
+        os.path.relpath(os.path.join(r, f), images_dir)
+        for r, _, fs in os.walk(images_dir) for f in fs
+        if f.lower().endswith((".png", ".jpg", ".jpeg"))
+    )
+    by_stem = {}
+    for f in image_files:
+        by_stem.setdefault(os.path.splitext(os.path.basename(f))[0], []).append(f)
 
     def _find_image(lidar_stem):
-        if lidar_stem in by_stem:
-            return by_stem[lidar_stem]
-        matches = [f for s, f in by_stem.items() if s.endswith("_" + lidar_stem)]
+        matches = by_stem.get(lidar_stem) or [
+            f for s, fs in by_stem.items() if s.endswith("_" + lidar_stem) for f in fs
+        ]
+        if len(matches) > 1:
+            # Rig sessions reuse the scan name for every camera (face_iphone/scan_044.jpg,
+            # face_00/scan_044.jpg, ...). The ARKit LiDAR map belongs to the iPhone frame.
+            matches = [f for f in matches if "iphone" in f.lower()]
         return matches[0] if len(matches) == 1 else None
 
     rotation = os.environ.get("LIDAR_DEPTH_ROTATION", "auto").lower()
@@ -120,8 +133,9 @@ def convert_lidar_bins(data_dir):
             depth = cv2.resize(np.ascontiguousarray(depth), (img_w, img_h),
                                interpolation=cv2.INTER_NEAREST)
         depth_mm = np.clip(depth * 1000.0, 0, 65535).astype(np.uint16)
-        out_name = os.path.splitext(img_name)[0] + ".png"
-        cv2.imwrite(os.path.join(out_dir, out_name), depth_mm)
+        out_path = os.path.join(out_dir, os.path.splitext(img_name)[0] + ".png")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        cv2.imwrite(out_path, depth_mm)
         valid = depth[depth > 0]
         if valid.size:
             ranges.append((float(valid.min()), float(valid.max())))
@@ -192,6 +206,174 @@ def clean_images_dir(images_dir):
           f"remaining={len([f for f in os.listdir(images_dir) if os.path.isfile(os.path.join(images_dir, f))])}")
 
 
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg")
+
+
+def _flat_key(rel_path):
+    """Flattened stem of a path relative to images/ (or masks/, depth/).
+
+    Matches clean_images_dir's flattening: "face_00/scan_044.jpg" -> "face_00_scan_044".
+    A doubled image extension (COLMAP mask naming, "scan_044.jpg.png") is dropped too.
+    """
+    stem = os.path.splitext(rel_path)[0]
+    if os.path.splitext(stem)[1].lower() in _IMAGE_EXTS:
+        stem = os.path.splitext(stem)[0]
+    return "_".join(Path(stem).parts)
+
+
+def _image_wh(path):
+    """(width, height) of an image file read from its header, or None if unreadable."""
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            return img.size
+    except Exception:
+        pass
+    import cv2
+    img = cv2.imread(path)
+    return None if img is None else (img.shape[1], img.shape[0])
+
+
+def _center_crop_box(src_w, src_h, dst_w, dst_h):
+    """(x0, y0, crop_w, crop_h) of the centered crop with the dst aspect ratio.
+
+    This is the crop main() takes before resizing mixed-size images to a common size.
+    Everything that maps data onto those images must use the same box.
+    """
+    target_ratio = dst_w / dst_h
+    img_ratio = src_w / src_h
+    x0, y0, crop_w, crop_h = 0, 0, src_w, src_h
+    if img_ratio > target_ratio:
+        crop_w = int(src_h * target_ratio)
+        x0 = (src_w - crop_w) // 2
+    elif img_ratio < target_ratio:
+        crop_h = int(src_w / target_ratio)
+        y0 = (src_h - crop_h) // 2
+    return x0, y0, crop_w, crop_h
+
+
+def _crop_resize(arr, dst_w, dst_h, interpolation):
+    """Center-crop arr to the dst aspect ratio, then resize it to dst_w x dst_h."""
+    import cv2
+    h, w = arr.shape[:2]
+    x0, y0, crop_w, crop_h = _center_crop_box(w, h, dst_w, dst_h)
+    return cv2.resize(arr[y0:y0 + crop_h, x0:x0 + crop_w], (dst_w, dst_h),
+                      interpolation=interpolation)
+
+
+def _sync_cropped_images(data_dir, resized, dst_w, dst_h):
+    """Apply main()'s crop + resize to the other data that describes those images.
+
+    resized maps a flattened image stem to the image's original (width, height).
+    transforms.json was written for the original images, so without this the cropped
+    frames keep their old size and intrinsics, and their masks and depth maps stay
+    uncropped. COLMAP is left as is; _generate_sfm_depths_pycolmap maps its pixels.
+    """
+    import json
+    import cv2
+
+    if not resized:
+        return
+    # Masks and any existing depth maps, nested (masks/face_00/scan_044.png) or flat.
+    synced = 0
+    for sub in ("masks", "depth", "depth_images"):
+        sub_dir = os.path.join(data_dir, sub)
+        for root, _, files in os.walk(sub_dir):
+            for fname in files:
+                if not fname.lower().endswith(_IMAGE_EXTS):
+                    continue
+                path = os.path.join(root, fname)
+                if _flat_key(os.path.relpath(path, sub_dir)) not in resized:
+                    continue
+                arr = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+                if arr is None or arr.shape[1::-1] == (dst_w, dst_h):
+                    continue
+                cv2.imwrite(path, _crop_resize(arr, dst_w, dst_h, cv2.INTER_NEAREST))
+                synced += 1
+    if synced:
+        print(f"Cropped and resized {synced} masks/depth maps to {dst_w}x{dst_h} to match their images")
+
+    # Per-frame intrinsics: the crop shifts the principal point, the resize scales all.
+    transforms_path = os.path.join(data_dir, "transforms.json")
+    if not os.path.isfile(transforms_path):
+        return
+    with open(transforms_path, "r") as f:
+        meta = json.load(f)
+    updated, shared = 0, 0
+    for frame in meta.get("frames", []):
+        parts = Path(frame.get("file_path", "")).parts
+        if parts and parts[0] == "images":
+            parts = parts[1:]
+        key = _flat_key(os.path.join(*parts)) if parts else None
+        if key not in resized:
+            continue
+        if not all(k in frame for k in ("fl_x", "fl_y", "cx", "cy")):
+            shared += 1
+            continue
+        src_w = int(frame.get("w", resized[key][0]))
+        src_h = int(frame.get("h", resized[key][1]))
+        x0, y0, crop_w, crop_h = _center_crop_box(src_w, src_h, dst_w, dst_h)
+        sx, sy = dst_w / crop_w, dst_h / crop_h
+        frame["fl_x"] = float(frame["fl_x"]) * sx
+        frame["fl_y"] = float(frame["fl_y"]) * sy
+        frame["cx"] = (float(frame["cx"]) - x0) * sx
+        frame["cy"] = (float(frame["cy"]) - y0) * sy
+        frame["w"], frame["h"] = dst_w, dst_h
+        updated += 1
+    if updated:
+        with open(transforms_path, "w") as f:
+            json.dump(meta, f, indent=4)
+        print(f"Updated transforms.json intrinsics for {updated} cropped frames")
+    if shared:
+        print(f"WARNING: {shared} cropped frames use the shared intrinsics in transforms.json, "
+              f"which cannot describe both image sizes; those frames will be misaligned")
+
+
+def _drop_fully_masked_frames(data_dir, transforms_path):
+    """Remove frames whose mask keeps no pixel, e.g. X5 tiles that only see the operator or rig.
+
+    dn-splatter's depth loss averages over the unmasked pixels, so such a frame gives NaN
+    and ends training. The image file is deleted as well, because normals, mono depth and
+    SfM depth are generated from transforms.json and images/ and must keep matching the
+    frame list (the gsplat path does the same in remove_fully_masked_images_for_gsplat).
+
+    Returns the number of dropped frames.
+    """
+    import json
+    import numpy as np
+    from PIL import Image
+
+    with open(transforms_path, "r") as f:
+        meta = json.load(f)
+    frames = meta.get("frames", [])
+    kept, dropped = [], []
+    for fr in frames:
+        mask_path = os.path.join(data_dir, fr["mask_path"]) if "mask_path" in fr else None
+        if mask_path and os.path.isfile(mask_path):
+            with Image.open(mask_path) as m:
+                if not (np.asarray(m.convert("L")) > 127).any():
+                    dropped.append(fr)
+                    continue
+        kept.append(fr)
+    if not dropped:
+        return 0
+    if not kept:
+        print(f"WARNING: the mask of every one of the {len(frames)} frames hides the whole image "
+              f"(inverted masks?); keeping them all")
+        return 0
+    for fr in dropped:
+        img = os.path.join(data_dir, fr["file_path"])
+        if os.path.isfile(img):
+            os.remove(img)
+    meta["frames"] = kept
+    with open(transforms_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    names = [os.path.basename(fr["file_path"]) for fr in dropped]
+    print(f"Dropped {len(dropped)}/{len(frames)} frames whose mask hides the whole image: "
+          f"{', '.join(names[:8])}{' ...' if len(names) > 8 else ''}")
+    return len(dropped)
+
+
 def _generate_sfm_depths_pycolmap(data_dir: str, colmap_sparse: str) -> None:
     """Generate per-image SFM depth maps from a COLMAP reconstruction using pycolmap 4.x.
 
@@ -229,26 +411,46 @@ def _generate_sfm_depths_pycolmap(data_dir: str, colmap_sparse: str) -> None:
             stem = _flat_stem(image.name)
             stem_to_hw[stem] = (cam.height, cam.width)
 
+    # Size every map like the image on disk, not like its COLMAP camera: main() may have
+    # center-cropped and resized mixed-size images after COLMAP ran, and align_depth.py
+    # stacks these maps with mono depth computed from the images on disk.
+    images_dir = os.path.join(data_dir, "images")
+    disk_wh = {}
+    if os.path.isdir(images_dir):
+        for fname in os.listdir(images_dir):
+            if os.path.splitext(fname)[1].lower() in {".png", ".jpg", ".jpeg"}:
+                wh = _image_wh(os.path.join(images_dir, fname))
+                if wh is not None:
+                    disk_wh[os.path.splitext(fname)[0]] = wh
+
+    # Masks from transforms.json, by flattened image stem. Masked pixels get no SfM depth:
+    # the operator and rig are not in the point cloud, so the points that project there
+    # lie behind them, and fitting mono depth to those would skew the depth alignment.
+    stem_to_mask = {}
+    _tf_path = os.path.join(data_dir, "transforms.json")
+    if os.path.isfile(_tf_path):
+        import json
+        with open(_tf_path, "r") as f:
+            for fr in json.load(f).get("frames", []):
+                if "mask_path" in fr:
+                    stem_to_mask[os.path.splitext(os.path.basename(fr["file_path"]))[0]] = \
+                        os.path.join(data_dir, fr["mask_path"])
+
     # Pre-create zero depth maps for every image so the count always matches mono_depth.
     # Images with no triangulated points will keep their zero map; images with points
     # will have their map overwritten below.
-    images_dir = os.path.join(data_dir, "images")
     if os.path.isdir(images_dir):
         for fname in os.listdir(images_dir):
             if os.path.splitext(fname)[1].lower() in {".png", ".jpg", ".jpeg"}:
                 stem = os.path.splitext(fname)[0]
                 zero_path = os.path.join(sfm_depths_dir, stem + ".npy")
                 if not os.path.exists(zero_path):
-                    if stem in stem_to_hw:
+                    if stem in disk_wh:
+                        W, H = disk_wh[stem]
+                    elif stem in stem_to_hw:
                         H, W = stem_to_hw[stem]
                     else:
-                        # Fall back to reading image dimensions
-                        try:
-                            import cv2 as _cv2
-                            img = _cv2.imread(os.path.join(images_dir, fname))
-                            H, W = img.shape[:2] if img is not None else (1, 1)
-                        except Exception:
-                            H, W = 1, 1
+                        H, W = 1, 1
                     np.save(zero_path, np.zeros((H, W), dtype=np.float32))
 
     # All 3D points as one array, plus an id->row lookup for observation-based images.
@@ -273,12 +475,23 @@ def _generate_sfm_depths_pycolmap(data_dir: str, colmap_sparse: str) -> None:
     filled_counts = []
     all_depth_samples = []
     used_all_points = 0
+    cropped_maps = 0
+    masked_maps = 0
     for image_id, image in recon.images.items():
         has_pose = image.has_pose() if callable(image.has_pose) else image.has_pose
         if not has_pose:
             continue
+        if disk_wh and _flat_stem(image.name) not in disk_wh:
+            continue  # image was removed (e.g. fully masked); no mono depth to align
         cam = recon.cameras[image.camera_id]
-        W, H = cam.width, cam.height
+        W, H = disk_wh.get(_flat_stem(image.name), (cam.width, cam.height))
+        # The disk image differs from the camera when main() cropped and resized it:
+        # map COLMAP pixel coordinates through the same crop + scale.
+        crop = None
+        if (W, H) != (cam.width, cam.height):
+            x0, y0, crop_w, crop_h = _center_crop_box(cam.width, cam.height, W, H)
+            crop = (x0, y0, W / crop_w, H / crop_h)
+            cropped_maps += 1
         depth_map = np.zeros((H, W), dtype=np.float32)
 
         cfw = image.cam_from_world() if callable(image.cam_from_world) else image.cam_from_world
@@ -304,6 +517,9 @@ def _generate_sfm_depths_pycolmap(data_dir: str, colmap_sparse: str) -> None:
         pts_cam = pts_cam[pts_cam[:, 2] > 1e-6]
         if len(pts_cam):
             uv = _project(cam, pts_cam)
+            if crop is not None:
+                x0, y0, sx, sy = crop
+                uv = np.column_stack([(uv[:, 0] - x0) * sx, (uv[:, 1] - y0) * sy])
             u = np.round(uv[:, 0]).astype(np.int64)
             v = np.round(uv[:, 1]).astype(np.int64)
             z = pts_cam[:, 2].astype(np.float32)
@@ -329,6 +545,18 @@ def _generate_sfm_depths_pycolmap(data_dir: str, colmap_sparse: str) -> None:
                 zbuf[np.isinf(zbuf)] = 0.0
                 depth_map = zbuf.reshape(H, W)
 
+        mask_file = stem_to_mask.get(_flat_stem(image.name))
+        if mask_file and os.path.isfile(mask_file):
+            import cv2
+            mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
+            if mask is not None:
+                if mask.shape != (H, W):
+                    mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)
+                hidden = mask <= 127
+                if hidden.any():
+                    depth_map[hidden] = 0.0
+                    masked_maps += 1
+
         filled = int((depth_map > 0).sum())
         filled_counts.append(filled)
         if filled:
@@ -339,6 +567,11 @@ def _generate_sfm_depths_pycolmap(data_dir: str, colmap_sparse: str) -> None:
         generated += 1
 
     print(f"[SFM depths] Generated {generated} depth maps in {sfm_depths_dir}")
+    if cropped_maps:
+        print(f"[SFM depths] {cropped_maps} maps were mapped from their COLMAP camera size "
+              f"to the cropped/resized image on disk")
+    if masked_maps:
+        print(f"[SFM depths] Cleared SfM depth under the mask in {masked_maps} maps")
     if used_all_points:
         print(f"[SFM depths] {used_all_points} images had no 2D-3D observations; "
               f"projected all 3D points with occlusion filtering")
@@ -352,6 +585,124 @@ def _generate_sfm_depths_pycolmap(data_dir: str, colmap_sparse: str) -> None:
               f"(alignment uses 0.1-10.0; {100 * ((_d > 0.1) & (_d < 10)).mean():.1f}% in range)")
     else:
         print("[SFM depths] WARNING: every SFM depth map is empty — depth alignment will be invalid")
+
+
+def _fill_missing_depth_from_mono(data_dir, transforms_path, out_dir_name="depth_sensor",
+                                  min_points=100):
+    """Give frames without depth_file_path a mono depth map aligned to the SfM depth.
+
+    Only acts when some frames already have depth_file_path. Rig sessions have ARKit
+    LiDAR for the iPhone frames only, so the other cameras (e.g. Insta360 tiles) get
+    their ZoeDepth map scale/shift-aligned to their SfM depth and saved as uint16 mm
+    PNGs, the same format as the sensor depth. The fit is the closed form and SfM depth
+    range (0.1-10 m) of dn-splatter's align_depth.py, solved one image at a time.
+    Frames with fewer than min_points usable SfM depths, or a non-positive scale, use
+    the median fit of the frames that could be fitted (of the sensor-depth frames if
+    none of the frames without sensor depth could be).
+
+    Returns the number of frames that were given a depth_file_path.
+    """
+    import json
+    import numpy as np
+    import cv2
+
+    with open(transforms_path, "r") as f:
+        meta = json.load(f)
+    frames = meta.get("frames", [])
+    missing = [fr for fr in frames if "depth_file_path" not in fr]
+    if not missing or len(missing) == len(frames):
+        return 0
+
+    mono_dir = os.path.join(data_dir, "mono_depth")
+    sfm_dir = os.path.join(data_dir, "sfm_depths")
+
+    def _stem(frame):
+        return os.path.splitext(os.path.basename(frame.get("file_path", "")))[0]
+
+    def _load(path):
+        return np.load(path).squeeze().astype(np.float64) if os.path.isfile(path) else None
+
+    # mono_depth/<stem>.npy is ZoeDepth in mm, sfm_depths/<stem>.npy is in meters, so
+    # the fitted scale also converts mm -> m.
+    def _fit(stem):
+        mono = _load(os.path.join(mono_dir, stem + ".npy"))
+        sfm = _load(os.path.join(sfm_dir, stem + ".npy"))
+        if mono is None or sfm is None or mono.shape != sfm.shape:
+            return None
+        valid = (sfm > 0.1) & (sfm < 10.0) & np.isfinite(mono)
+        n_valid = int(valid.sum())
+        if n_valid < min_points:
+            return None
+        A = np.stack([mono[valid], np.ones(n_valid)], axis=1)
+        (scale, shift), *_ = np.linalg.lstsq(A, sfm[valid], rcond=None)
+        return (float(scale), float(shift)) if scale > 0 else None
+
+    fits = {}
+    for fr in missing:
+        fit = _fit(_stem(fr))
+        if fit is not None:
+            fits[_stem(fr)] = fit
+    pool = list(fits.values())
+    if not pool:
+        # No frame without sensor depth sees enough SfM points: take the typical fit
+        # from the frames that have sensor depth instead.
+        for fr in frames:
+            if "depth_file_path" in fr:
+                fit = _fit(_stem(fr))
+                if fit is not None:
+                    pool.append(fit)
+    if not pool:
+        print(f"WARNING: no frame has enough SfM depth to align mono depth, so the "
+              f"{len(missing)} frames without sensor depth cannot be filled")
+        return 0
+    median_fit = (float(np.median([s for s, _ in pool])),
+                  float(np.median([t for _, t in pool])))
+
+    out_dir = os.path.join(data_dir, out_dir_name)
+    os.makedirs(out_dir, exist_ok=True)
+    filled, used_median = 0, 0
+    for fr in missing:
+        stem = _stem(fr)
+        mono = _load(os.path.join(mono_dir, stem + ".npy"))
+        if mono is None:
+            continue
+        scale, shift = fits.get(stem, median_fit)
+        used_median += stem not in fits
+        depth_m = np.nan_to_num(scale * mono + shift, nan=0.0, posinf=0.0, neginf=0.0)
+        depth_mm = np.clip(depth_m * 1000.0, 0, 65535).astype(np.uint16)
+        cv2.imwrite(os.path.join(out_dir, stem + ".png"), depth_mm)
+        fr["depth_file_path"] = f"{out_dir_name}/{stem}.png"
+        filled += 1
+    if filled:
+        with open(transforms_path, "w") as f:
+            json.dump(meta, f, indent=2)
+    print(f"Filled depth_file_path for {filled}/{len(missing)} frames without sensor depth "
+          f"using SfM-aligned mono depth in {out_dir_name}/ ({used_median} used the median fit)")
+    return filled
+
+
+def _ensure_depth_paths_all_or_none(data_dir, transforms_path):
+    """Drop depth_file_path from every frame if only some frames have it.
+
+    dn-splatter's normal-nerfstudio dataparser asserts that depth_file_path is set for
+    every frame or for none. Without sensor depth it falls back to mono depth.
+    """
+    import json
+
+    with open(transforms_path, "r") as f:
+        meta = json.load(f)
+    frames = meta.get("frames", [])
+    with_depth = sum("depth_file_path" in fr for fr in frames)
+    if 0 < with_depth < len(frames):
+        for fr in frames:
+            fr.pop("depth_file_path", None)
+        with open(transforms_path, "w") as f:
+            json.dump(meta, f, indent=2)
+        marker = os.path.join(data_dir, ".sensor_depth_valid")
+        if os.path.exists(marker):
+            os.remove(marker)
+        print(f"WARNING: depth_file_path was set on only {with_depth}/{len(frames)} frames; "
+              f"removed it from every frame so training uses mono depth instead of failing")
 
 
 def main():
@@ -392,7 +743,7 @@ def main():
                 print(f"Mixed image dimensions detected {_dims} — normalizing to smallest common size")
                 _target_w = min(d[0] for d in _dims)
                 _target_h = min(d[1] for d in _dims)
-                _resized = 0
+                _resized = {}  # flattened image stem -> original (width, height)
                 for _f in _img_files:
                     _fp = os.path.join(images_dir, _f)
                     _img = _cv2.imread(_fp)
@@ -400,20 +751,12 @@ def main():
                         continue
                     _h, _w = _img.shape[:2]
                     if _w != _target_w or _h != _target_h:
-                        _target_ratio = _target_w / _target_h
-                        _img_ratio = _w / _h
-                        if _img_ratio > _target_ratio:
-                            _crop_w = int(_h * _target_ratio)
-                            _x = (_w - _crop_w) // 2
-                            _img = _img[:, _x:_x + _crop_w]
-                        elif _img_ratio < _target_ratio:
-                            _crop_h = int(_w / _target_ratio)
-                            _y = (_h - _crop_h) // 2
-                            _img = _img[_y:_y + _crop_h, :]
-                        _img = _cv2.resize(_img, (_target_w, _target_h), interpolation=_cv2.INTER_AREA)
+                        _img = _crop_resize(_img, _target_w, _target_h, _cv2.INTER_AREA)
                         _cv2.imwrite(_fp, _img)
-                        _resized += 1
-                print(f"Normalized {_resized}/{len(_img_files)} images to {_target_w}x{_target_h}")
+                        _resized[os.path.splitext(_f)[0]] = (_w, _h)
+                print(f"Normalized {len(_resized)}/{len(_img_files)} images to {_target_w}x{_target_h}")
+                # transforms.json, masks and depth maps still describe the uncropped images.
+                _sync_cropped_images(data_dir, _resized, _target_w, _target_h)
 
                 # Resize masks to match the new image dimensions
                 _masks_dir = os.path.join(data_dir, "masks")
@@ -628,6 +971,12 @@ def main():
               f"remaining={len(clean_frames)}")
 
     sanitize_transforms_json(data_dir)
+
+    # Drop frames whose mask hides the whole image before anything is generated per frame:
+    # X5 tiles that only see the operator or rig, or whose unmasked part fell outside the
+    # crop above. Their depth loss would be a mean over zero pixels (NaN).
+    if os.path.isfile(os.path.join(data_dir, "transforms.json")):
+        _drop_fully_masked_frames(data_dir, os.path.join(data_dir, "transforms.json"))
 
     # Patch normal_nerfstudio.py: replace natsorted with sorted for normal file paths.
     # natsorted can order files differently than the image list, causing normals from
@@ -1005,6 +1354,13 @@ def main():
                     _json.dump(_transforms, _f, indent=2)
                 print(f"Injected depth_file_path into {_injected} frames from depth_sensor/")
                 open(os.path.join(data_dir, '.sensor_depth_valid'), 'w').close()
+
+    # dn-splatter needs depth_file_path on every frame or on none. Rig sessions have
+    # LiDAR only for the iPhone frames: fill the rest with SfM-aligned mono depth, and
+    # if that is not possible, drop sensor depth so training falls back to mono depth.
+    if os.path.isfile(_transforms_path):
+        _fill_missing_depth_from_mono(data_dir, _transforms_path)
+        _ensure_depth_paths_all_or_none(data_dir, _transforms_path)
 
     # Only generate depth-normal consistency masks when valid sensor depth was confirmed
     # (depth_file_path entries injected, marked by .sensor_depth_valid).

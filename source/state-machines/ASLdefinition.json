@@ -153,6 +153,8 @@
           "THREED_ISP.$": "$.envVars.THREED_ISP",
           "ENABLE_ABSGRAD.$": "$.envVars.ENABLE_ABSGRAD",
           "ENHANCE_DEPTH.$": "$.envVars.ENHANCE_DEPTH",
+          "REFINE_POSES.$": "$.envVars.REFINE_POSES",
+          "CALIBRATE_RIG.$": "$.envVars.CALIBRATE_RIG",
           "ENABLE_SPZ.$": "$.envVars.ENABLE_SPZ",
           "ENABLE_SOG.$": "$.envVars.ENABLE_SOG",
           "ENABLE_USDZ.$": "$.envVars.ENABLE_USDZ",
