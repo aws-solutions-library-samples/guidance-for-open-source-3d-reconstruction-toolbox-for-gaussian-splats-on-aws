@@ -427,6 +427,23 @@ RUN pip install --no-cache-dir \
 # Install sharp-frame-extractor separately after scipy is available
 RUN pip install --no-cache-dir sharp-frame-extractor
 
+# Install adaptive-frame-extractor CLI (MIT, prebuilt for Ubuntu 24.04; bundles its own OpenCV/FFmpeg libs via rpath)
+# Used by ADAPTIVE_FRAME_EXTRACTION (pre_processing/video/adaptive_video_to_images.py). GUI parts are removed.
+ARG FRAME_EXTRACTOR_TAG=v0.2.0-rc.3
+ARG FRAME_EXTRACTOR_PKG=frame-extractor-0.2.0-Linux-x86_64
+ARG FRAME_EXTRACTOR_SHA256=431584d5b546ac645c156294ba7b0feaee7b57d32e4a15b21413c5177cb17753
+RUN wget -q https://github.com/morishuz/adaptive-frame-extractor/releases/download/${FRAME_EXTRACTOR_TAG}/${FRAME_EXTRACTOR_PKG}.tar.gz \
+    && echo "${FRAME_EXTRACTOR_SHA256}  ${FRAME_EXTRACTOR_PKG}.tar.gz" | sha256sum -c - \
+    && mkdir -p /opt/frame-extractor \
+    && tar -xzf ${FRAME_EXTRACTOR_PKG}.tar.gz -C /opt/frame-extractor --strip-components=1 \
+    && rm ${FRAME_EXTRACTOR_PKG}.tar.gz \
+    && rm -rf /opt/frame-extractor/bin/frame-extractor-gui /opt/frame-extractor/bin/fonts /opt/frame-extractor/bin/icons \
+        /opt/frame-extractor/bin/install-desktop-integration.py /opt/frame-extractor/share/icons /opt/frame-extractor/share/applications \
+    && ln -s /opt/frame-extractor/bin/configs /opt/frame-extractor/configs \
+    && ln -s /opt/frame-extractor/bin/frame-extractor /usr/local/bin/frame-extractor \
+    && frame-extractor --version \
+    && test -f /opt/frame-extractor/configs/medium.yaml
+
 # Install PromptDA for depth enhancement (ENHANCE_DEPTH feature)
 ENV PROMPTDA_HASH="9161547ca7151e14fcc8f490ad3cc02fa9437483"
 RUN git clone https://github.com/DepthAnything/PromptDA.git ${CODE_PATH}/PromptDA \
@@ -566,6 +583,7 @@ ENV NERFICG_HASH="e458ac6e41810ad6d9405687c1e698fadd28dac5"
 ENV FASTERGS_HASH="c60ea269b7cf3ebda527d640b6fdd31462f91b41"
 ENV FUSED_SSIM_HASH="a7c48d6dd7ac6dc39a7958c7c4452e0b10418f38"
 ENV PPISP_HASH="a247368047651db2e03e6f97a36e4f5bebbe5c5f"
+COPY ./src/pipeline/training/patch_faster_gs_masks.py /tmp/patch_faster_gs_masks.py
 RUN pip install --no-cache-dir munch lpips tabulate \
     && git clone https://github.com/nerficg-project/nerficg.git ${CODE_PATH}/nerficg \
     && cd ${CODE_PATH}/nerficg \
@@ -574,6 +592,7 @@ RUN pip install --no-cache-dir munch lpips tabulate \
     && grep -q '^_ALLOW_PROPRIETARY_LICENSED_CODE = False' src/Optim/knn_utils.py \
     && git clone https://github.com/nerficg-project/faster-gaussian-splatting.git src/Methods/FasterGS \
     && git -C src/Methods/FasterGS reset --hard ${FASTERGS_HASH} \
+    && python /tmp/patch_faster_gs_masks.py src/Methods/FasterGS/Trainer.py \
     && pip install --no-cache-dir --no-build-isolation --no-deps src/CudaUtils/MortonEncoding \
     && pip install --no-cache-dir --no-build-isolation --no-deps src/Methods/FasterGS/FasterGSCudaBackend \
     && (python -c "from fused_ssim import fused_ssim" 2>/dev/null \
@@ -658,7 +677,7 @@ RUN mkdir -p ${CODE_PATH}/reconstruction ${CODE_PATH}/training ${CODE_PATH}/sphe
     ${CODE_PATH}/post_processing ${CODE_PATH}/sam
 # Copy application source — grouped to minimize layers
 # Cache-bust: increment when pipeline source files change
-ARG PIPELINE_CACHE_BUST=27
+ARG PIPELINE_CACHE_BUST=46
 COPY ./src/entrypoint.sh ./src/main.py ./src/config.json ./src/pipeline/pipeline.py ./src/pipeline/utils.py ${CODE_PATH}/
 COPY ./src/pipeline/reconstruction/extract_poses_imgs.py \
      ./src/pipeline/reconstruction/process_pose_transforms.py \
@@ -676,10 +695,12 @@ COPY ./src/pipeline/reconstruction/spherical/panorama_sfm.py ${CODE_PATH}/spheri
 COPY ./src/pipeline/pre_processing/segmentation/remove_object_using_mask.py \
      ./src/pipeline/pre_processing/segmentation/remove_background.py \
      ./src/pipeline/pre_processing/segmentation/erase_object_using_mask.py \
+     ./src/pipeline/pre_processing/segmentation/remove_object_rig.py \
      ${CODE_PATH}/pre_processing/segmentation/
 COPY ./src/pipeline/pre_processing/segmentation/remove_background_sam2.py ${CODE_PATH}/sam/
 COPY ./src/pipeline/pre_processing/video/simple_video_to_images.py \
      ./src/pipeline/pre_processing/video/sharp_video_to_images.py \
+     ./src/pipeline/pre_processing/video/adaptive_video_to_images.py \
      ./src/pipeline/pre_processing/video/rotate_portrait_images.py \
      ${CODE_PATH}/pre_processing/video/
 COPY ./src/pipeline/pre_processing/autoscale_dataset.py \
@@ -688,6 +709,12 @@ COPY ./src/pipeline/pre_processing/autoscale_dataset.py \
      ./src/pipeline/pre_processing/enhance_depth.py \
      ./src/pipeline/pre_processing/normalize_dataset.py \
      ./src/pipeline/pre_processing/calibrate_rig.py \
+     ./src/pipeline/pre_processing/bundle_adjust_model.py \
+     ./src/pipeline/pre_processing/blur_filter.py \
+     ./src/pipeline/pre_processing/gps_priors.py \
+     ./src/pipeline/pre_processing/mask_io.py \
+     ./src/pipeline/pre_processing/lens_flare_mask.py \
+     ./src/pipeline/pre_processing/sky_mask.py \
      ${CODE_PATH}/pre_processing/
 COPY ./src/pipeline/post_processing/rotate_splat.py \
      ./src/pipeline/post_processing/mirror_splat.py \
@@ -744,4 +771,4 @@ RUN echo "=== VERSION VERIFICATION ===" \
     && echo "  NerfStudio: $(python -c 'import nerfstudio; print(getattr(nerfstudio, "__version__", "installed"))' 2>/dev/null || echo 'Not found')" \
     && echo "  GSplat: $(python -c 'import gsplat; print(gsplat.__version__)' 2>/dev/null || echo 'Not found')" \
     && echo "  FasterGS backend: $(python -c 'import FasterGSCudaBackend; print("installed")' 2>/dev/null || echo 'Not found')" \
-    && echo "=== END VERSION VERIFICATION ==="
+    && echo "=== END VERSION VERIFICATION === "

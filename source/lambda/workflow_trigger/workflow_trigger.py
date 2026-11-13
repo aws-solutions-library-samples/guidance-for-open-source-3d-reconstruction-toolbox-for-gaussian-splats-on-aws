@@ -180,6 +180,24 @@ def lambda_handler(event, context):
         or str(_post.get("extractMeshGs", "false")).lower() == "true"
     ).lower()
 
+    # Pre-training COLMAP model steps live under reconstruction.posePriors (where
+    # Gradio and generate_splat.py write them). calibrateRig is also accepted
+    # under training for requests written before it moved.
+    _pose_priors = (json_content.get("reconstruction") or {}).get("posePriors") or {}
+    _training = json_content.get("training") or {}
+    calibrate_rig = str(_pose_priors.get("calibrateRig", _training.get("calibrateRig", "false")))
+    bundle_adjust_colmap_model = str(_pose_priors.get("bundleAdjustColmapModel", "false"))
+    # Generated masks (optional; lens flare runs before sky).
+    _segmentation = json_content.get("segmentation") or {}
+    remove_lens_flare = str(_segmentation.get("removeLensFlare", "false")).lower()
+    remove_sky = str(_segmentation.get("removeSky", "false")).lower()
+    # Motion-adaptive video frame extraction (optional; combinable with filterBlurryImages).
+    _video = json_content.get("videoProcessing") or {}
+    adaptive_frame_extraction = str(_video.get("adaptiveFrameExtraction", "false")).lower()
+    adaptive_frame_density = str(_video.get("adaptiveFrameDensity", "auto")).lower()
+    if adaptive_frame_density not in ("auto", "low", "medium", "high"):
+        adaptive_frame_density = "auto"
+
     if 'status_code' not in json_content:
         # Get the payload from the event
         try:
@@ -288,7 +306,12 @@ def lambda_handler(event, context):
                     "enableAbsGrad": str(json_content["training"].get("enableAbsGrad", "false")),
                     "enhanceDepth": str(json_content["training"].get("enhanceDepth", "false")),
                     "refinePoses": str(json_content["training"].get("refinePoses", "false")),
-                    "calibrateRig": str(json_content["training"].get("calibrateRig", "false")),
+                    "calibrateRig": calibrate_rig,
+                    "bundleAdjustColmapModel": bundle_adjust_colmap_model,
+                    "removeLensFlare": remove_lens_flare,
+                    "removeSky": remove_sky,
+                    "adaptiveFrameExtraction": adaptive_frame_extraction,
+                    "adaptiveFrameDensity": adaptive_frame_density,
                     "enableVideoExport": str(json_content["postProcessing"].get("enableVideoExport", "true")),
                     "generateCollision": str(json_content["postProcessing"].get("generateCollision", "false")),
                     "collisionSceneType": str(json_content["postProcessing"].get("collisionSceneType", "outdoor")),
@@ -368,7 +391,12 @@ def lambda_handler(event, context):
                     "ENABLE_ABSGRAD": str(json_content["training"].get("enableAbsGrad", "false")),
                     "ENHANCE_DEPTH": str(json_content["training"].get("enhanceDepth", "false")),
                     "REFINE_POSES": str(json_content["training"].get("refinePoses", "false")),
-                    "CALIBRATE_RIG": str(json_content["training"].get("calibrateRig", "false")),
+                    "CALIBRATE_RIG": calibrate_rig,
+                    "BUNDLE_ADJUST_COLMAP_MODEL": bundle_adjust_colmap_model,
+                    "REMOVE_LENS_FLARE": remove_lens_flare,
+                    "REMOVE_SKY": remove_sky,
+                    "ADAPTIVE_FRAME_EXTRACTION": adaptive_frame_extraction,
+                    "ADAPTIVE_FRAME_DENSITY": adaptive_frame_density,
                     "CROP_OUTPUT_BOUNDS": str(json_content["postProcessing"]["cropOutputBounds"]).lower(),
                     "CROP_MODE": str(json_content["postProcessing"]["cropMode"]),
                     "CLEAN_SPLAT": str(json_content["postProcessing"].get("cleanSplat", "false")).lower(),

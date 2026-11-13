@@ -108,6 +108,11 @@ class SharedState:
         self.enhance_depth = "false"
         self.refine_poses = "false"
         self.calibrate_rig = "false"
+        self.bundle_adjust_colmap_model = "false"
+        self.remove_lens_flare = "false"
+        self.remove_sky = "false"
+        self.adaptive_frame_extraction = "false"
+        self.adaptive_frame_density = "auto"
         self.enable_fl_heuristic = "false"
         self.fl_heuristic_value = 1.2
         self.enable_fl_metric = "false"
@@ -340,7 +345,9 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
                 use_transform_json, training_enable, max_steps, num_gaussians, spherical_enable, remove_bg, remove_objects,
                 object_removal_action, objects_to_remove, source_coordinate, pose_world_to_cam, log_verbosity, mask_threshold, 
                 crop_output_bounds, crop_mode, clean_splat, enable_spz, enable_sog, video_start_time, video_stop_time,
-                preserve_scene_scale, enable_absgrad, enhance_depth, refine_poses="false", calibrate_rig="false"):
+                preserve_scene_scale, enable_absgrad, enhance_depth, refine_poses="false", calibrate_rig="false",
+                bundle_adjust_colmap_model="false", remove_lens_flare="false", remove_sky="false",
+                adaptive_frame_extraction="false", adaptive_frame_density="auto"):
     unique_uuid = uuid.uuid4()
     original_filename = os.path.basename(video_file) if video_file else "No file selected"
     
@@ -366,7 +373,9 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
             "maxNumImages": str(max_images),
             "videoStartTime": video_start_time if video_start_time is not None else None,
             "videoStopTime": video_stop_time if video_stop_time is not None else None,
-            "filterBlurryImages": filter_blurry == "true"
+            "filterBlurryImages": filter_blurry == "true",
+            "adaptiveFrameExtraction": adaptive_frame_extraction == "true",
+            "adaptiveFrameDensity": adaptive_frame_density or "auto"
         },
         "reconstruction": {
             "enable": sfm_enable == "true",
@@ -374,6 +383,7 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
             "posePriors": {
                 "usePosePriorColmapModelFiles": use_colmap_model == "true",
                 "calibrateRig": calibrate_rig == "true",
+                "bundleAdjustColmapModel": bundle_adjust_colmap_model == "true",
                 "usePosePriorTransformJson": {
                     "enable": use_transform_json == "true",
                     "sourceCoordinateName": source_coordinate,
@@ -436,7 +446,9 @@ def preview_json(s3_bucket_name, s3_input_prefix, s3_output_prefix, video_file,
                 "enable": remove_objects == "true",
                 "action": object_removal_action,
                 "objects": str(objects_to_remove)
-            }
+            },
+            "removeLensFlare": remove_lens_flare == "true",
+            "removeSky": remove_sky == "true"
         }
     }
     return json.dumps(file_contents, indent=2)
@@ -521,7 +533,9 @@ def create_upload_aws_tab():
                                 "maxNumImages": str(shared_state.max_images),
                                 "videoStartTime": shared_state.video_start_time if shared_state.video_start_time is not None else None,
                                 "videoStopTime": shared_state.video_stop_time if shared_state.video_stop_time is not None else None,
-                                "filterBlurryImages": shared_state.filter_blurry == "true"
+                                "filterBlurryImages": shared_state.filter_blurry == "true",
+                                "adaptiveFrameExtraction": shared_state.adaptive_frame_extraction == "true",
+                                "adaptiveFrameDensity": shared_state.adaptive_frame_density or "auto"
                             },
                             "reconstruction": {
                                 "enable": shared_state.sfm_enable == "true",
@@ -529,6 +543,7 @@ def create_upload_aws_tab():
                                 "posePriors": {
                                     "usePosePriorColmapModelFiles": shared_state.use_colmap_model == "true",
                                     "calibrateRig": shared_state.calibrate_rig == "true",
+                                    "bundleAdjustColmapModel": shared_state.bundle_adjust_colmap_model == "true",
                                     "usePosePriorTransformJson": {
                                         "enable": shared_state.use_transform_json == "true",
                                         "sourceCoordinateName": shared_state.source_coordinate,
@@ -592,7 +607,9 @@ def create_upload_aws_tab():
                                     "enable": shared_state.remove_objects == "true",
                                     "action": shared_state.object_removal_action,
                                     "objects": "['human']"
-                                }
+                                },
+                                "removeLensFlare": shared_state.remove_lens_flare == "true",
+                                "removeSky": shared_state.remove_sky == "true"
                             }
                         }
                         
@@ -724,7 +741,8 @@ def create_advanced_settings_tab():
                 filter_blurry = gr.Radio(
                 label="Filter Blurry Images",
                 choices=["true", "false"],
-                value="true"
+                value="true",
+                info="Videos: pick sharp frames. Image, pose-prior and COLMAP zips: drop images much blurrier than their neighbours (max 15% per folder) and remove them from the COLMAP model, database, transforms.json, masks and depth."
                 )
                 max_images = gr.Number(
                 label="Max Images",
@@ -743,6 +761,18 @@ def create_advanced_settings_tab():
                     value=None,
                     minimum=0.0,
                     info="End time in seconds (leave zero/blank for full video)"
+                )
+                adaptive_frame_extraction = gr.Radio(
+                    label="Adaptive Frame Extraction",
+                    choices=["true", "false"],
+                    value="false",
+                    info="Videos: pick keyframes by camera motion (more frames when moving fast, fewer when slow or stopped) instead of regular intervals. Combines with Filter Blurry Images (sharpest frame near each keyframe). Max Images is a cap."
+                )
+                adaptive_frame_density = gr.Dropdown(
+                    label="Adaptive Frame Density",
+                    choices=["auto", "low", "medium", "high"],
+                    value="auto",
+                    info="auto: tune the motion threshold to land near Max Images. low/medium/high: fixed motion thresholds (may give far fewer frames on slow footage)."
                 )
         with gr.Row():
             with gr.Column():
@@ -823,6 +853,20 @@ def create_advanced_settings_tab():
                         choices=["human"],
                         value=[]
                     )
+                with gr.Group():
+                    gr.HTML("<h4 style='margin: 0 0 10px 0; padding: 8px; background: rgba(0,0,0,0.05); border-radius: 4px; border-left: 3px solid #e0b000;'>☀️ Lens Flare & Sky Masking</h4>")
+                    remove_lens_flare = gr.Radio(
+                        label="Remove Lens Flare",
+                        choices=["true", "false"],
+                        value="false",
+                        info="Mask sun glare, streaks and veiling flare around bright light sources so COLMAP and training ignore them. Runs before sky removal. Not available with spherical (360) input."
+                    )
+                    remove_sky = gr.Radio(
+                        label="Remove Sky",
+                        choices=["true", "false"],
+                        value="false",
+                        info="Mask the sky (Grounding DINO + SAM 2, Apache-2.0) to avoid floaters; the sky is left empty in the splat. Not available with spherical (360) input."
+                    )
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### Reconstruction")
@@ -899,6 +943,12 @@ def create_advanced_settings_tab():
                     value="false",
                     info="Before training, re-estimate how the 360 camera is mounted to the iPhone (the COLMAP rig) from this session's images. Multi-camera mobile exports with rigs.bin only; keeps the original poses if the fit is not reliable."
                 )
+                bundle_adjust_colmap_model = gr.Radio(
+                    label="Bundle Adjust COLMAP Model",
+                    choices=["true", "false"],
+                    value="false",
+                    info="For an uploaded COLMAP model .zip trained as-is (SfM disabled), e.g. ARKit poses + LiDAR. Before training, matches features between neighbouring images using the known poses, then bundle-adjusts the poses. Intrinsics, rig and the metric scale are kept. If depths/*.bin LiDAR maps are present, points3D is rebuilt from them with the refined poses. Keeps the original model if the result does not improve."
+                )
             with gr.Column():
                 gr.Markdown("### Pose Priors-Transform JSON")
                 use_transform_json = gr.Radio(
@@ -935,7 +985,7 @@ def create_advanced_settings_tab():
                     value=1000000,
                     minimum=10000,
                     maximum=10000000,
-                    info="Maximum number of Gaussians for splatfacto-mcmc and gsplat-mcmc. Default: 1,000,000."
+                    info="Minimum Gaussian cap for splatfacto-mcmc and gsplat-depth-mcmc. At training time the cap is raised to 2.5x the SfM point count when that fits in GPU memory; the value used is in the job log. Default: 1,000,000."
                 )
                 model = gr.Dropdown(
                     label="Training Model",
@@ -1116,7 +1166,10 @@ def create_advanced_settings_tab():
                      shared_state.auto_matcher, shared_state.auto_mapper,
                      shared_state.autoscale_dataset, shared_state.autoscale_dataset_mode,
                      shared_state.autogroup_images, shared_state.autogroup_target_name,
-                     shared_state.refine_poses, shared_state.calibrate_rig) = args
+                     shared_state.refine_poses, shared_state.calibrate_rig,
+                     shared_state.bundle_adjust_colmap_model,
+                     shared_state.remove_lens_flare, shared_state.remove_sky,
+                     shared_state.adaptive_frame_extraction, shared_state.adaptive_frame_density) = args
                     return "Advanced settings updated"
 
                 # Get all advanced settings components after they're defined
@@ -1136,7 +1189,10 @@ def create_advanced_settings_tab():
                     auto_matcher, auto_mapper,
                     autoscale_dataset, autoscale_dataset_mode,
                     autogroup_images, autogroup_target_name,
-                    refine_poses, calibrate_rig
+                    refine_poses, calibrate_rig,
+                    bundle_adjust_colmap_model,
+                    remove_lens_flare, remove_sky,
+                    adaptive_frame_extraction, adaptive_frame_density
                 ]
                 
                 def save_configuration(config_name, *settings):
@@ -1199,7 +1255,12 @@ def create_advanced_settings_tab():
                         'autogroup_images': settings[52],
                         'autogroup_target_name': settings[53],
                         'refine_poses': settings[54],
-                        'calibrate_rig': settings[55]
+                        'calibrate_rig': settings[55],
+                        'bundle_adjust_colmap_model': settings[56],
+                        'remove_lens_flare': settings[57],
+                        'remove_sky': settings[58],
+                        'adaptive_frame_extraction': settings[59],
+                        'adaptive_frame_density': settings[60]
                     }
                     
                     configs_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -1289,6 +1350,11 @@ def create_advanced_settings_tab():
                         shared_state.autogroup_target_name = config_data.get('autogroup_target_name', '')
                         shared_state.refine_poses = config_data.get('refine_poses', 'false')
                         shared_state.calibrate_rig = config_data.get('calibrate_rig', 'false')
+                        shared_state.bundle_adjust_colmap_model = config_data.get('bundle_adjust_colmap_model', 'false')
+                        shared_state.remove_lens_flare = config_data.get('remove_lens_flare', 'false')
+                        shared_state.remove_sky = config_data.get('remove_sky', 'false')
+                        shared_state.adaptive_frame_extraction = config_data.get('adaptive_frame_extraction', 'false')
+                        shared_state.adaptive_frame_density = config_data.get('adaptive_frame_density', 'auto')
                         
                         return [
                             f"Configuration '{config_name}' loaded successfully",
@@ -1347,7 +1413,12 @@ def create_advanced_settings_tab():
                             config_data.get('autogroup_images', 'false'),
                             config_data.get('autogroup_target_name', ''),
                             config_data.get('refine_poses', 'false'),
-                            config_data.get('calibrate_rig', 'false')
+                            config_data.get('calibrate_rig', 'false'),
+                            config_data.get('bundle_adjust_colmap_model', 'false'),
+                            config_data.get('remove_lens_flare', 'false'),
+                            config_data.get('remove_sky', 'false'),
+                            config_data.get('adaptive_frame_extraction', 'false'),
+                            config_data.get('adaptive_frame_density', 'auto')
                         ]
                     except Exception as e:
                         return [f"Error loading configuration: {str(e)}"] + [gr.update() for _ in advanced_components]
@@ -2670,7 +2741,12 @@ def create_debug_tab():
                         shared_state.enable_absgrad,
                         shared_state.enhance_depth,
                         shared_state.refine_poses,
-                        shared_state.calibrate_rig
+                        shared_state.calibrate_rig,
+                        shared_state.bundle_adjust_colmap_model,
+                        shared_state.remove_lens_flare,
+                        shared_state.remove_sky,
+                        shared_state.adaptive_frame_extraction,
+                        shared_state.adaptive_frame_density
                     )
 
         # Wire up the event handlers

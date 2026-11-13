@@ -145,14 +145,23 @@ if __name__ == "__main__":
         os.makedirs(raw_input_path, exist_ok=True)
         os.rename(orig_image_path, raw_input_path)
         orig_image_path = raw_input_path
-    orig_imgs_list = os.listdir(orig_image_path)
-    mask_imgs_list = os.listdir(mask_image_path)
+    orig_imgs_list = sorted([f for f in os.listdir(orig_image_path)
+                              if os.path.isfile(os.path.join(orig_image_path, f))])
+    mask_imgs_list = sorted([f for f in os.listdir(mask_image_path)
+                              if os.path.isfile(os.path.join(mask_image_path, f))])
+
+    # Build stem->filename map for masks so we match by name, not by index
+    mask_by_stem = {os.path.splitext(f)[0]: f for f in mask_imgs_list}
 
     try:
         for i, orig_filename in enumerate(orig_imgs_list):
             print(f"Processing image {i+1} out of {len(orig_imgs_list)}...")
+            orig_stem = os.path.splitext(orig_filename)[0]
+            if orig_stem not in mask_by_stem:
+                print(f"WARNING: no mask found for {orig_filename}, skipping")
+                continue
             orig_filepath = os.path.join(orig_image_path, orig_filename)
-            mask_filepath = os.path.join(mask_image_path, mask_imgs_list[i])
+            mask_filepath = os.path.join(mask_image_path, mask_by_stem[orig_stem])
             output_filepath = os.path.join(output_path, orig_filename)
             orig_img = cv2.imread(orig_filepath, cv2.IMREAD_UNCHANGED)
             mask_gray_img = cv2.imread(mask_filepath)

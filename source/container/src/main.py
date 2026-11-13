@@ -108,12 +108,14 @@ from utils import (
     select_largest_colmap_model, create_tarball, has_alpha_channel,
     cleanup_dataset, cleanup_cuda_memory, validate_and_resize_images,
     extract_images_from_zip_temp, resize_images_to_common_dimensions,
+    normalize_uploaded_masks,
     setup_local_debug, copy_to_local_output, print_container_version_info,
     update_dynamodb_metrics, update_component_phase_completion,
     parse_3dgrut_metrics_from_log, parse_gsplat_metrics_from_log,
     send_task_success, send_task_failure, send_task_heartbeat,
-    flatten_images_for_gsplat,
-    remove_fully_masked_images_for_gsplat
+    flatten_images_for_gsplat, add_projected_observations_for_gsplat,
+    remove_fully_masked_images_for_gsplat,
+    rebuild_points3d_tracks_for_gsplat
 )
 
 
@@ -140,6 +142,120 @@ def world_frame_dataparser_args(config, user_supplied_model=False):
     return []
 
 
+# MCMC Gaussian cap estimate (splatfacto-mcmc, gsplat-depth-mcmc, multi-GPU gsplat mcmc).
+# MCMC starts with one Gaussian per SfM point and only adds Gaussians up to the cap,
+# so the cap must leave room to grow above the point count.
+MCMC_CAP_POINTS_FACTOR = 2.5      # target at least this many Gaussians per SfM point
+MCMC_CAP_HARD_MAX = 10_000_000    # same as the Gradio input maximum
+MCMC_VRAM_USABLE_FRACTION = 0.85  # leave headroom for fragmentation
+MCMC_VRAM_RESERVED_GB = 2.5       # CUDA context, SSIM/bilateral grid, eval renders
+# Training memory per million Gaussians, in GB: parameters + gradients + Adam state
+# (59 floats each at SH degree 3, ~1 KB per Gaussian) plus rasterization buffers that
+# grow with the training image size. Conservative estimate, not a measurement.
+MCMC_GB_PER_MILLION_BASE = 1.2
+MCMC_GB_PER_MILLION_PER_MEGAPIXEL = 0.8
+
+
+def count_sfm_points(dataset_path):
+    """Number of 3D points in the COLMAP model training will start from, or 0."""
+    import struct
+    for d in (os.path.join(dataset_path, "colmap", "sparse", "0"),
+              os.path.join(dataset_path, "sparse", "0"),
+              os.path.join(dataset_path, "colmap", "sparse"),
+              os.path.join(dataset_path, "sparse")):
+        b, t = os.path.join(d, "points3D.bin"), os.path.join(d, "points3D.txt")
+        try:
+            if os.path.isfile(b) and os.path.getsize(b) >= 8:
+                with open(b, "rb") as f:
+                    return struct.unpack("<Q", f.read(8))[0]
+            if os.path.isfile(t):
+                with open(t) as f:
+                    return sum(1 for line in f if line.strip() and not line.startswith("#"))
+        except (OSError, struct.error, ValueError):
+            continue
+    return 0
+
+
+def gpu_total_memory_gb():
+    """Smallest per-GPU memory in GB from nvidia-smi (does not create a CUDA context), or 0."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=30).stdout
+        vals = [float(v) for v in out.split() if v.strip()]
+        return min(vals) / 1024.0 if vals else 0.0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def estimate_mcmc_cap(user_cap, num_points, num_images, megapixels, gpu_gb, images_on_gpu):
+    """Return (cap, explanation). user_cap is honoured as a minimum; the cap is raised to
+    MCMC_CAP_POINTS_FACTOR x the SfM points, but not past what fits in GPU memory."""
+    floor = int(num_points * MCMC_CAP_POINTS_FACTOR)
+    mem_cap = MCMC_CAP_HARD_MAX
+    mem_note = "GPU memory unknown"
+    if gpu_gb > 0:
+        image_cache_gb = num_images * megapixels * 1e6 * 3 / 1e9 if images_on_gpu else 0.0
+        per_million = MCMC_GB_PER_MILLION_BASE + MCMC_GB_PER_MILLION_PER_MEGAPIXEL * megapixels
+        budget = gpu_gb * MCMC_VRAM_USABLE_FRACTION - MCMC_VRAM_RESERVED_GB - image_cache_gb
+        mem_cap = max(0, int(budget / per_million * 1e6))
+        mem_note = (f"GPU {gpu_gb:.1f} GB fits ~{mem_cap:,} ({per_million:.1f} GB per million at "
+                    f"{megapixels:.1f} MP, {image_cache_gb:.1f} GB image cache)")
+    cap = min(max(user_cap, min(floor, mem_cap)), MCMC_CAP_HARD_MAX)
+    note = (f"MCMC Gaussian cap {cap:,} (setting {user_cap:,}; {num_points:,} SfM points x "
+            f"{MCMC_CAP_POINTS_FACTOR} = {floor:,}; {mem_note})")
+    if cap < floor:
+        note += ". Cap is below the target, so MCMC has little room to add Gaussians"
+    if gpu_gb > 0 and user_cap > mem_cap:
+        note += ". The setting is above the GPU memory estimate and may run out of memory"
+    return cap, note
+
+
+def build_transparent_sky_images(images_dir, sky_dir, out_dir):
+    """Write RGBA copies of the training images with alpha = 0 in the sky.
+
+    Files keep their original relative names (e.g. f_001.jpg) so they match the
+    COLMAP model, but hold PNG data (loaders detect the format from the content).
+    sky_dir has <stem>.png masks with 255 = sky; images without one get alpha 255.
+    Returns (number of images, fraction of sky pixels).
+    """
+    import cv2
+    import numpy as np
+    if os.path.isdir(out_dir):
+        shutil.rmtree(out_dir)
+    n, sky_px, total_px = 0, 0, 0
+    for root, _, files in os.walk(images_dir):
+        for f in files:
+            if not f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                continue
+            src = os.path.join(root, f)
+            rel = os.path.relpath(src, images_dir)
+            img = cv2.imread(src, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                continue
+            if img.ndim == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
+            elif img.shape[2] == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+            _sky_path = os.path.join(sky_dir, os.path.splitext(rel)[0] + ".png")
+            sky = cv2.imread(_sky_path, cv2.IMREAD_GRAYSCALE) if os.path.isfile(_sky_path) else None
+            if sky is not None:
+                if sky.shape != img.shape[:2]:
+                    sky = cv2.resize(sky, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
+                is_sky = sky > 127
+                img[:, :, 3] = np.where(is_sky, 0, img[:, :, 3])
+                sky_px += int(is_sky.sum())
+            total_px += img.shape[0] * img.shape[1]
+            ok, buf = cv2.imencode(".png", img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+            if not ok:
+                raise RuntimeError(f"could not encode {rel}")
+            dst = os.path.join(out_dir, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, "wb") as fh:
+                fh.write(buf.tobytes())
+            n += 1
+    return n, (sky_px / total_px if total_px else 0.0)
+
+
 def safe_extract_zip(zip_file_path, dest_path):
     """Extract a zip with zip-slip protection and Windows path separators fixed.
 
@@ -161,6 +277,80 @@ def safe_extract_zip(zip_file_path, dest_path):
                 raise ValueError(f"Zip slip detected: {info.filename}")
         zip_ref.extractall(dest_path, members=members)
     return fixed
+
+
+def run_mapper_checked(pipeline, i, db_path, config, local_debug, log):
+    """Run the COLMAP mapper component and check its result.
+
+    In LOCAL_DEBUG mode the database lives in /tmp and is lost with the container,
+    so it is copied to <dataset>/database_failed_mapper.db when the mapping fails
+    or is partial. The mapper can "succeed" with a few frames and almost no points,
+    and training then fails much later (e.g. splatfacto's k-nearest-neighbour init
+    on 2 points), so stop here with a clear error when fewer than 10% of the images
+    registered or the model has fewer than 1000 points; below 50% only warn."""
+    def _keep_db(reason):
+        if local_debug and os.path.isfile(db_path):
+            _keep = os.path.join(config['DATASET_PATH'], 'database_failed_mapper.db')
+            try:
+                shutil.copy2(db_path, _keep)
+                log.error(f"{reason}; COLMAP database kept at {_keep}")
+            except Exception as _copy_err:
+                log.warning(f"Could not keep the COLMAP database: {_copy_err}")
+
+    try:
+        pipeline.run_component(i)
+    except Exception:
+        _keep_db("Mapper failed")
+        raise
+
+    try:
+        import sqlite3 as _sql
+        import pycolmap as _pc
+        _con = _sql.connect(db_path)
+        _n_db = _con.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+        _con.close()
+        _args = pipeline.components[i].args
+        _out = next((_args[_j + 1] for _j, _a in enumerate(_args[:-1]) if _a == "--output_path"), None)
+        _best = (0, 0, None)
+        if _out and os.path.isdir(_out):
+            for _m in sorted(os.listdir(_out)):
+                _mp = os.path.join(_out, _m)
+                if os.path.isfile(os.path.join(_mp, "images.bin")):
+                    _r = _pc.Reconstruction(_mp)
+                    _best = max(_best, (_r.num_reg_images(), _r.num_points3D(), _m))
+    except Exception as _chk_err:
+        log.warning(f"Could not check the mapper result: {_chk_err}")
+        return
+    log.info(f"Mapper result: {_best[0]}/{_n_db} images registered, {_best[1]} points "
+             f"(model {_best[2]})")
+    if not _n_db:
+        return
+    _msg = f"the mapper registered only {_best[0]} of {_n_db} images with {_best[1]} points"
+    if _best[0] < 0.1 * _n_db or _best[1] < 1000:
+        # Too small to train on: stop here instead of failing inside training.
+        _keep_db(f"SfM failed: {_msg}")
+        raise RuntimeError(f"SfM failed: {_msg}")
+    if _best[0] < 0.5 * _n_db:
+        log.warning(f"Partial reconstruction: {_msg}")
+        _keep_db(f"Partial reconstruction: {_msg}")
+
+
+def read_gps_priors(script, image_dir, dataset_dir, output, log):
+    """Read EXIF GPS (or priors.csv) into gps_priors.json before any step rewrites
+    the images (OpenCV drops EXIF). Returns the parsed JSON or None."""
+    result = subprocess.run(
+        [sys.executable, script, 'read', '--images-dir', image_dir,
+         '--dataset-dir', dataset_dir, '--output', output],
+        capture_output=True, text=True
+    )
+    for line in result.stdout.splitlines():
+        log.info(line)
+    if result.returncode != 0 or not os.path.isfile(output):
+        log.warning(f"Reading GPS priors failed: {result.stderr.strip()[-1000:]}")
+        return None
+    with open(output, encoding='utf-8') as f:
+        return json.load(f)
+
 
 if __name__ == "__main__":
     ##################################
@@ -231,6 +421,16 @@ if __name__ == "__main__":
         REFINE_POSES = config.get('REFINE_POSES', 'false').lower() == 'true'
         ENHANCE_DEPTH = config.get('ENHANCE_DEPTH', 'false').lower() == 'true'
         CALIBRATE_RIG = config.get('CALIBRATE_RIG', 'false').lower() == 'true'
+        BUNDLE_ADJUST_COLMAP_MODEL = config.get('BUNDLE_ADJUST_COLMAP_MODEL', 'false').lower() == 'true'
+        # Generated training masks (masks/, white = keep): lens flare first, then sky.
+        REMOVE_LENS_FLARE = config.get('REMOVE_LENS_FLARE', 'false').lower() == 'true'
+        REMOVE_SKY = config.get('REMOVE_SKY', 'false').lower() == 'true'
+        # Video input: motion-adaptive keyframes (adaptive_video_to_images.py) instead of
+        # regular intervals. Combines with FILTER_BLURRY_IMAGES (sharpest frame per block).
+        ADAPTIVE_FRAME_EXTRACTION = config.get('ADAPTIVE_FRAME_EXTRACTION', 'false').lower() == 'true'
+        ADAPTIVE_FRAME_DENSITY = config.get('ADAPTIVE_FRAME_DENSITY', 'auto').lower()
+        if ADAPTIVE_FRAME_DENSITY not in ('auto', 'low', 'medium', 'high'):
+            ADAPTIVE_FRAME_DENSITY = 'auto'
 
         # Collision voxelization requires metric world scale to produce accurate collision geometry.
         # Force PRESERVE_SCENE_SCALE on whenever GENERATE_COLLISION is enabled.
@@ -521,19 +721,36 @@ if __name__ == "__main__":
                 colmap_zip_found = True
                 log.info(f"Found matching zip file: {zip_candidate}")
             # Check if FILENAME is a directory with reconstruction data already extracted
-            elif os.path.isdir(os.path.join(config['DATASET_PATH'], config['FILENAME'])):
+            elif config['FILENAME'].strip('/') and \
+                    os.path.isdir(os.path.join(config['DATASET_PATH'], config['FILENAME'])):
+                # Unzipped COLMAP export: same layouts as the zip (images/ + sparse/,
+                # or colmap/images + colmap/sparse, optionally inside one sub-folder).
                 dir_path = os.path.join(config['DATASET_PATH'], config['FILENAME'])
-                has_images = os.path.exists(os.path.join(dir_path, 'images'))
-                has_sparse = os.path.exists(os.path.join(dir_path, 'sparse')) or \
-                            os.path.exists(os.path.join(dir_path, 'colmap', 'sparse'))
-                if has_images and has_sparse:
+                _subs = [d for d in os.listdir(dir_path) if os.path.isdir(os.path.join(dir_path, d))]
+                _roots = [dir_path] + ([os.path.join(dir_path, _subs[0])] if len(_subs) == 1 else [])
+                if any((os.path.isdir(os.path.join(_r, 'images')) or os.path.isdir(os.path.join(_r, 'colmap', 'images')))
+                       and (os.path.isdir(os.path.join(_r, 'sparse')) or os.path.isdir(os.path.join(_r, 'colmap', 'sparse')))
+                       for _r in _roots):
                     colmap_zip_found = True
                     log.info(f"Detected pre-extracted COLMAP reconstruction directory: {config['FILENAME']}")
-            # Check if sparse/ exists directly in DATASET_PATH (already extracted)
-            elif os.path.exists(os.path.join(config['DATASET_PATH'], 'sparse')) and \
-                 os.path.exists(os.path.join(config['DATASET_PATH'], 'images')):
+                else:
+                    log.warning(f"Folder {config['FILENAME']} has no images/ + sparse/ "
+                                f"(or colmap/images + colmap/sparse); not a COLMAP model")
+            # Check if a COLMAP model exists directly in DATASET_PATH (already extracted).
+            # images/ and sparse/0/ are created empty at startup, so require real files.
+            elif any(os.path.isfile(os.path.join(config['DATASET_PATH'], 'sparse', '0', _f))
+                     for _f in ('cameras.bin', 'cameras.txt')) and \
+                    any(_fs for _r, _d, _fs in os.walk(os.path.join(config['DATASET_PATH'], 'images'))):
                 colmap_zip_found = True
                 log.info(f"Detected COLMAP reconstruction data already in dataset directory")
+            else:
+                _avail = sorted(os.listdir(config['DATASET_PATH']))
+                raise RuntimeError(
+                    pipeline.report_error(
+                        706,
+                        f"No COLMAP model found for training without reconstruction: FILENAME="
+                        f"'{config['FILENAME']}' is not a .zip or folder in {config['DATASET_PATH']} "
+                        f"(contents: {_avail})"))
     elif config['RUN_RECON'] == 'true' and config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true' and \
             config['FILENAME'].endswith('.zip'):
         # Zip contains images + COLMAP pose priors — extract and normalize before reconstruction
@@ -554,13 +771,21 @@ if __name__ == "__main__":
         log.info(f"Processing COLMAP reconstruction: {config['FILENAME']}")
         zip_path = os.path.join(config['DATASET_PATH'], config['FILENAME'])
         
-        # Handle zip file extraction
-        if config['FILENAME'].endswith('.zip') and os.path.exists(zip_path):
-            # Extract zip to temp directory
+        # Handle zip file extraction. An unzipped folder takes the same path: it is
+        # copied to temp/ (the input folder is left unchanged) and processed like the
+        # extracted zip, so the colmap/ prefix layout, masks and depths are handled.
+        _is_dir_input = os.path.isdir(zip_path) and bool(config['FILENAME'].strip('/'))
+        if (config['FILENAME'].endswith('.zip') and os.path.exists(zip_path)) or _is_dir_input:
             temp_path = os.path.join(config['DATASET_PATH'], 'temp')
-            _fixed = safe_extract_zip(zip_path, temp_path)
-            if _fixed:
-                log.warning(f"Zip used Windows '\\' path separators in {_fixed} entries; normalized to '/'")
+            if os.path.exists(temp_path):
+                shutil.rmtree(temp_path)
+            if _is_dir_input:
+                shutil.copytree(zip_path, temp_path)
+                log.info(f"Copied COLMAP folder {zip_path} to {temp_path}")
+            else:
+                _fixed = safe_extract_zip(zip_path, temp_path)
+                if _fixed:
+                    log.warning(f"Zip used Windows '\\' path separators in {_fixed} entries; normalized to '/'")
             
             # Check if extracted content is in a subdirectory
             temp_contents = os.listdir(temp_path)
@@ -605,6 +830,21 @@ if __name__ == "__main__":
                 if has_masks:
                     log.info("Masks directory detected in zip — will enable mask training")
                 
+                # Drop reconstruction folders left by an earlier run in the same dataset
+                # directory (LOCAL_DEBUG reuses workflow-input). A stale colmap/sparse/0
+                # would otherwise win over the new input's sparse/ (the move below is
+                # skipped when colmap/sparse/0 is populated), and stale images/ would
+                # block the colmap/images hoist.
+                _src_items = set(os.listdir(extract_source))
+                _stale = []
+                if 'colmap' not in _src_items and os.path.isdir(os.path.join(config['DATASET_PATH'], 'colmap')):
+                    _stale.append('colmap')
+                if 'images' not in _src_items and os.path.isdir(os.path.join(extract_source, 'colmap', 'images')):
+                    _stale.append('images')
+                for _item in _stale:
+                    shutil.rmtree(os.path.join(config['DATASET_PATH'], _item))
+                    log.warning(f"Removed {_item}/ left in {config['DATASET_PATH']} by an earlier run")
+
                 # Move contents to dataset directory
                 for item in os.listdir(extract_source):
                     src = os.path.join(extract_source, item)
@@ -789,6 +1029,16 @@ if __name__ == "__main__":
                             _filled += 1
                 if _filled:
                     log.info(f"Generated {_filled} blank masks for images without existing masks")
+
+        # The named input is missing: fail now instead of training on the empty
+        # images/ and sparse/0 placeholders created at startup.
+        elif config['FILENAME'].endswith('.zip'):
+            _avail = sorted(os.listdir(config['DATASET_PATH']))
+            raise RuntimeError(
+                pipeline.report_error(
+                    706,
+                    f"Input zip not found: {zip_path} does not exist "
+                    f"(contents of {config['DATASET_PATH']}: {_avail})"))
 
         # Ensure colmap/sparse structure exists for NerfStudio (not needed for 3DGRUT or depth loss)
         if colmap_zip_found and config['MODEL'] not in ('3dgrt', '3dgut', 'faster-gs') and not IS_GSPLAT_DEPTH:
@@ -1107,6 +1357,116 @@ if __name__ == "__main__":
         log.info("Single GPU setup, no distributed training configuration needed")
 
     ##################################
+    # GPS POSE PRIORS (detection):
+    # Images with GPS (EXIF, or a priors.csv in the zip) reconstructed with the
+    # spatial matcher and no other pose priors use COLMAP pose_prior_mapper, which
+    # keeps the camera positions close to the GPS positions (metric, ENU frame).
+    # GLOMAP/hierarchical mappers ignore GPS, so COLMAP is used for these jobs.
+    ##################################
+    GPS_PRIORS = False
+    gps_priors_json = os.path.join(config['DATASET_PATH'], "gps_priors.json")
+    gps_priors_script = os.path.join(current_dir_path, 'pre_processing', 'gps_priors.py')
+    try:
+        if config['RUN_RECON'] == 'true' and config['MATCHING_METHOD'] == 'spatial' and \
+                config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'false' and \
+                config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'false' and \
+                config['SPHERICAL_CAMERA'] != 'true' and VIDEO is False and \
+                not colmap_zip_found and not model_tar_found and os.path.exists(input_file_path):
+            _probe = subprocess.run(
+                [sys.executable, gps_priors_script, 'probe', '--input', input_file_path],
+                capture_output=True, text=True, timeout=600
+            )
+            _probe_info = None
+            for _line in _probe.stdout.splitlines():
+                if _line.startswith('GPS_PROBE '):
+                    _probe_info = json.loads(_line[len('GPS_PROBE '):])
+            if _probe_info is None:
+                log.warning(f"GPS probe produced no result: {_probe.stderr.strip()[-500:]}")
+            else:
+                log.info(f"GPS probe: {_probe_info}")
+                if _probe_info['has_priors_csv'] or (
+                        _probe_info['sampled'] and _probe_info['with_gps'] >= 0.5 * _probe_info['sampled']):
+                    GPS_PRIORS = True
+                    if config['RECON_SOFTWARE_NAME'] != 'colmap':
+                        log.info(f"GPS pose priors: using COLMAP pose_prior_mapper instead of "
+                                 f"'{config['RECON_SOFTWARE_NAME']}' (it ignores GPS)")
+                        config['RECON_SOFTWARE_NAME'] = 'colmap'
+                    if config.get('AUTO_MAPPER', 'false') == 'true':
+                        log.info("GPS pose priors: AUTO_MAPPER disabled (pose_prior_mapper is required)")
+                        config['AUTO_MAPPER'] = 'false'
+                    if config.get('AUTO_MATCHER', 'false') == 'true':
+                        log.info("GPS pose priors: AUTO_MATCHER disabled (keeping the spatial matcher)")
+                        config['AUTO_MATCHER'] = 'false'
+                    log.info("GPS pose priors enabled: spatial matcher + COLMAP pose_prior_mapper")
+                else:
+                    log.info("Spatial matching without enough GPS in the images; using the standard mapper")
+    except Exception as e:
+        log.warning(f"GPS probe failed ({e}); using the standard mapper")
+        GPS_PRIORS = False
+
+    # Masks uploaded with a plain image zip (masks/<image>.png, white = keep):
+    # route them to COLMAP feature extraction and to training.
+    # A rig_config.json (COLMAP rig layout: images/<camera>/<frame>.jpg, same frame
+    # name in every camera folder) makes COLMAP solve one pose per frame with the
+    # cameras' relative poses taken from the config (see the rig_configurator step).
+    UPLOADED_IMAGE_MASKS = False
+    RIG_CONFIG = False
+    RIG_NUM_CAMERAS = 1
+    RIG_HAS_INTRINSICS = False  # every rig camera lists camera_model_name + camera_params
+    rig_config_path = os.path.join(config['DATASET_PATH'], "rig_config.json")
+    try:
+        if config['RUN_RECON'] == 'true' and not colmap_zip_found and not model_tar_found and \
+                config['SPHERICAL_CAMERA'] != 'true' and VIDEO is False and \
+                ((input_file_path.lower().endswith('.zip') and os.path.isfile(input_file_path)) or
+                 os.path.isdir(input_file_path)):
+            # Same detection for an uploaded zip and an unzipped folder (local runs).
+            if os.path.isdir(input_file_path):
+                _entries = [os.path.relpath(os.path.join(_r, _f), input_file_path).replace('\\', '/')
+                            for _r, _, _fs in os.walk(input_file_path) for _f in _fs]
+                _zf = None
+
+                def _read_entry(_n):
+                    with open(os.path.join(input_file_path, _n), 'rb') as _fh:
+                        return _fh.read()
+            else:
+                _zf = zipfile.ZipFile(input_file_path)
+                _entries = _zf.namelist()
+                _read_entry = _zf.read
+            try:
+                for _n in _entries:
+                    _parts = _n.replace('\\', '/').split('/')
+                    if _parts[-1].lower().endswith(('.png', '.jpg', '.jpeg')) and \
+                            any(_p.lower() in ('mask', 'masks') for _p in _parts[:-1]):
+                        UPLOADED_IMAGE_MASKS = True
+                    if _parts[-1].lower() == 'rig_config.json':
+                        RIG_CONFIG = True
+                        try:
+                            _rc = json.loads(_read_entry(_n).decode('utf-8'))
+                            RIG_NUM_CAMERAS = max(1, max(len(_r.get('cameras', [])) for _r in _rc))
+                            _rig_cams = [_c for _r in _rc for _c in _r.get('cameras', [])]
+                            RIG_HAS_INTRINSICS = bool(_rig_cams) and all(
+                                _c.get('camera_model_name') and _c.get('camera_params') for _c in _rig_cams)
+                        except Exception as _rc_err:
+                            log.warning(f"Could not read rig_config.json ({_rc_err})")
+            finally:
+                if _zf is not None:
+                    _zf.close()
+            if UPLOADED_IMAGE_MASKS:
+                ZIP_HAS_MASKS = True
+                log.info("Image zip contains masks/: using them for COLMAP features and training")
+            if RIG_CONFIG:
+                if config['RECON_SOFTWARE_NAME'] not in ('colmap', 'glomap'):
+                    log.info(f"Camera rig: using COLMAP instead of '{config['RECON_SOFTWARE_NAME']}'")
+                    config['RECON_SOFTWARE_NAME'] = 'colmap'
+                if config.get('AUTO_MAPPER', 'false') == 'true':
+                    log.info("Camera rig: AUTO_MAPPER disabled")
+                    config['AUTO_MAPPER'] = 'false'
+                log.info("Image zip contains rig_config.json: camera sub-folders are kept and "
+                         "COLMAP solves one pose per rig frame")
+    except Exception as e:
+        log.warning(f"Could not inspect the zip for masks/rig config ({e})")
+
+    ##################################
     # PRE-PROCESS COMPONENT:
     # Pose Transform for Reconstruction
     #################################
@@ -1180,8 +1540,46 @@ if __name__ == "__main__":
             config['RUN_RECON'] == 'true':
             sys.exit("Error: SAM2 Background removal is only supported for video input")
         else:
+            # Video frame selection (both settings can be combined):
+            #   ADAPTIVE_FRAME_EXTRACTION  FILTER_BLURRY_IMAGES  frames
+            #   false                      false                 regular intervals (simple)
+            #   false                      true                  sharpest per regular block
+            #   true                       false                 motion-adaptive keyframes
+            #   true                       true                  sharpest frame per adaptive block
+            # MAX_NUM_IMAGES caps the count in every mode.
+            if ADAPTIVE_FRAME_EXTRACTION and config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'false' and \
+               config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'false' and config['RUN_RECON'] == 'true':
+                args = [
+                    "-i", input_file_path,
+                    "-o", image_path,
+                    "-n", str(int(config['MAX_NUM_IMAGES'])),
+                    "--density", ADAPTIVE_FRAME_DENSITY,
+                    "--work-dir", os.path.join(config['DATASET_PATH'], "adaptive_frames"),
+                    "-ll", config['LOG_VERBOSITY'].upper(),
+                    "-s", config['VIDEO_START_TIME']
+                ]
+                if config['FILTER_BLURRY_IMAGES'] == "true":
+                    args.append("--sharp")
+                video_stop_time = str(config['VIDEO_STOP_TIME']).strip() if config['VIDEO_STOP_TIME'] is not None else ""
+                if video_stop_time and video_stop_time.lower() not in ['none', 'null', '', 'nan', '-1']:
+                    try:
+                        if float(video_stop_time) > 0:
+                            args.extend(["-e", video_stop_time])
+                    except ValueError:
+                        pass
+                log.info(f"Video frames: adaptive keyframes (density {ADAPTIVE_FRAME_DENSITY}"
+                         f"{', sharpest frame per block' if config['FILTER_BLURRY_IMAGES'] == 'true' else ''})")
+                pipeline.create_component(
+                    name="VideoToImages",
+                    comp_type=ComponentType.PRE_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="pre_processing/video/adaptive_video_to_images.py",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
             # Use sharp-frame-extractor if blur filtering is enabled, otherwise use simple extraction
-            if config['FILTER_BLURRY_IMAGES'] == "true" and config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'false' and \
+            elif config['FILTER_BLURRY_IMAGES'] == "true" and config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'false' and \
                config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'false':
                 # Add 8% to max images to compensate for blur filtering reduction
                 adjusted_max_images = str(int(int(config['MAX_NUM_IMAGES']) * 1.08))
@@ -1241,6 +1639,29 @@ if __name__ == "__main__":
     except Exception as e:
         error_message = f"Issue creating video to images component: {e}"
         pipeline.report_error(720, error_message)
+
+    ##################################
+    # PRE-PROCESS COMPONENT:
+    # Remove blurry images from image inputs (zip/folder of images, pose-prior zip,
+    # COLMAP model zip). Video input is already filtered by sharp-frame-extractor.
+    # Runs right after the images are extracted, and also removes the dropped
+    # images from COLMAP models, COLMAP databases, transforms.json, masks and depth.
+    ##################################
+    try:
+        if config['FILTER_BLURRY_IMAGES'] == "true" and VIDEO is False and not model_tar_found:
+            pipeline.create_component(
+                name="Filter-Blurry-Images",
+                comp_type=ComponentType.PRE_PROCESSING,
+                comp_environ=ComponentEnvironment.PYTHON,
+                command="pre_processing/blur_filter.py",
+                args=["--dataset", config['DATASET_PATH'], "--images-dir", image_path,
+                      "--database", colmap_db_path],
+                cwd=current_dir_path,
+                requires_gpu=False
+            )
+    except Exception as e:
+        error_message = f"Issue creating blurry image filter component: {e}"
+        pipeline.report_error(721, error_message)
 
     ##################################
     # PRE-PROCESS COMPONENT:
@@ -1424,8 +1845,12 @@ if __name__ == "__main__":
     # Remove Objects
     ##################################
     try:
-        # Skip object removal if using spherical camera (handled in panorama_sfm.py)
-        if config['REMOVE_OBJECT'] == "true" and config['RUN_RECON'] == "true" and config['SPHERICAL_CAMERA'] != "true":
+        # Skip object removal if using spherical camera (handled in panorama_sfm.py).
+        # Camera-rig uploads (images/<camera>/<frame>.jpg) use remove_object_rig.py,
+        # which runs the same segmentation + remove/erase per camera folder and keeps
+        # every file's folder, name and size so the rig layout still matches.
+        if config['REMOVE_OBJECT'] == "true" and config['RUN_RECON'] == "true" and \
+                config['SPHERICAL_CAMERA'] != "true":
             bg_removal_model = None
             # OBJECT REMOVAL COMPONENT FOR HUMAN
             try:
@@ -1436,7 +1861,36 @@ if __name__ == "__main__":
                 # Fallback to string check if parsing fails
                 if "human" in config['OBJECT_REMOVAL_OBJECTS'].lower():
                     bg_removal_model = "u2net_human_seg"
-            if bg_removal_model is not None:
+            if bg_removal_model is not None and RIG_CONFIG:
+                _rig_action = "remove" if config['OBJECT_REMOVAL_ACTION'] == "remove" else "erase"
+                log.info(f"Camera rig: object removal ({_rig_action}) runs per camera folder")
+                args = [
+                    "--images-dir", image_path,
+                    "--work-dir", os.path.join(config['DATASET_PATH'], "object_removal_rig"),
+                    "--action", _rig_action,
+                    "-m", bg_removal_model,
+                    "-nt", str(pipeline.config.num_threads),
+                    "-ng", str(pipeline.config.num_gpus),
+                    "-mp", os.path.join(config['DATASET_PATH'], "stable-diffusion-xl-base-1.0"),
+                    "-pp", os.path.join(config['CODE_PATH'], "AttentiveEraser", "pipelines",
+                                        "pipeline_stable_diffusion_xl_attentive_eraser.py"),
+                    "-gpu", str(USE_GPU),
+                    "-log", config['LOG_VERBOSITY'],
+                    "-method", "SIP",
+                    # Uploaded rig masks: u2net_human_seg also picks up the rig, so
+                    # leave already-masked pixels out of the person masks.
+                    "--masks-dir", os.path.join(config['DATASET_PATH'], "masks")
+                ]
+                pipeline.create_component(
+                    name="RemoveObject-Rig",
+                    comp_type=ComponentType.PRE_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="pre_processing/segmentation/remove_object_rig.py",
+                    args=args,
+                    cwd=current_dir_path,
+                    requires_gpu=True
+                )
+            elif bg_removal_model is not None:
                 args = [
                     "-i", image_path,
                     "-o", filter_output_dir,
@@ -1492,6 +1946,68 @@ if __name__ == "__main__":
         pipeline.report_error(740, error_message)
 
     ##################################
+    # PRE_PROCESSING COMPONENTS:
+    # Mask the sky, then lens flare, so COLMAP and training ignore those pixels.
+    # Sky runs first so the flare detector only analyses the pixels that are left
+    # (bright clouds are not flare). Created after the image-editing steps (video
+    # extraction, autoscale, rotation, background/human removal) so the masks match
+    # the final images. Masks are written to masks/ (white = keep) and AND-ed with
+    # any uploaded masks.
+    ##################################
+    GENERATED_MASKS = False
+    try:
+        if (REMOVE_LENS_FLARE or REMOVE_SKY) and config['SPHERICAL_CAMERA'] == "true":
+            log.warning("REMOVE_LENS_FLARE/REMOVE_SKY are not supported with SPHERICAL_CAMERA=true "
+                        "(the panorama step writes its own cube-face masks); skipping")
+        elif REMOVE_LENS_FLARE or REMOVE_SKY:
+            _gen_masks_dir = os.path.join(config['DATASET_PATH'], "masks")
+            _mask_debug_dir = os.path.join(config['DATASET_PATH'], "mask_previews")
+            if REMOVE_SKY:
+                _sky_args = ["--images-dir", image_path, "--masks-dir", _gen_masks_dir,
+                             "--debug-dir", os.path.join(_mask_debug_dir, "sky"),
+                             "--sky-dir", os.path.join(config['DATASET_PATH'], "sky_masks"),
+                             "--nosky-masks-dir", os.path.join(config['DATASET_PATH'], "masks_no_sky")]
+                for _dn in ("depth", "depth_images"):
+                    if os.path.isdir(os.path.join(config['DATASET_PATH'], _dn)):
+                        _sky_args.extend(["--depth-dir", os.path.join(config['DATASET_PATH'], _dn)])
+                        break
+                pipeline.create_component(
+                    name="Remove-Sky",
+                    comp_type=ComponentType.PRE_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="pre_processing/sky_mask.py",
+                    args=_sky_args,
+                    cwd=current_dir_path,
+                    requires_gpu=True
+                )
+            if REMOVE_LENS_FLARE:
+                _flare_args = ["--images-dir", image_path, "--masks-dir", _gen_masks_dir,
+                               "--debug-dir", os.path.join(_mask_debug_dir, "lens_flare")]
+                if REMOVE_SKY:
+                    # The sky masks tell the detector where the sun can be (clipped
+                    # white walls are not light sources). Transparent-sky training uses
+                    # masks_no_sky/ (written by the sky step), so add the flare there too.
+                    _flare_args.extend(["--sky-dir", os.path.join(config['DATASET_PATH'], "sky_masks"),
+                                        "--also-masks-dir",
+                                        os.path.join(config['DATASET_PATH'], "masks_no_sky")])
+                pipeline.create_component(
+                    name="Remove-Lens-Flare",
+                    comp_type=ComponentType.PRE_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="pre_processing/lens_flare_mask.py",
+                    args=_flare_args,
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
+            # Downstream consumers (COLMAP mask_path, nerfstudio --masks-path, gsplat,
+            # 3DGRUT) use the same masks/ folder as uploaded masks.
+            GENERATED_MASKS = True
+            ZIP_HAS_MASKS = True
+    except Exception as e:
+        error_message = f"Issue creating lens flare / sky mask components: {e}"
+        pipeline.report_error(807, error_message)
+
+    ##################################
     # PRE_PROCESSING COMPONENT:
     # Re-estimate the multi-camera rig (e.g. iPhone + Insta360 X5) from the
     # session's images. Runs before anything reads the poses. It only changes the
@@ -1512,6 +2028,39 @@ if __name__ == "__main__":
     except Exception as e:
         error_message = f"Issue creating rig calibration component: {e}"
         pipeline.report_error(805, error_message)
+
+    ##################################
+    # PRE_PROCESSING COMPONENT:
+    # Refine the poses of an uploaded COLMAP model (e.g. ARKit poses + LiDAR) with
+    # bundle adjustment before training. Only for a COLMAP model that is trained
+    # as-is (RUN_RECON=false). Runs after Calibrate-Rig because the rig is kept
+    # fixed. Features are matched between pose neighbours to build tracks when
+    # the model has none; only the poses change (see bundle_adjust/report.json).
+    ##################################
+    try:
+        if BUNDLE_ADJUST_COLMAP_MODEL:
+            if colmap_zip_found and config['RUN_RECON'] == 'false':
+                pipeline.create_component(
+                    name="Bundle-Adjust-Colmap-Model",
+                    comp_type=ComponentType.PRE_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="pre_processing/bundle_adjust_model.py",
+                    args=["--dataset", config['DATASET_PATH']],
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
+            elif config['RUN_RECON'] == 'true' and (
+                    config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true' or
+                    config['USE_POSE_PRIOR_TRANSFORM_JSON'] == 'true'):
+                log.info("BUNDLE_ADJUST_COLMAP_MODEL=true with pose priors: COLMAP bundle_adjuster "
+                         "runs after point_triangulator")
+            else:
+                log.warning("BUNDLE_ADJUST_COLMAP_MODEL=true only applies to an uploaded COLMAP model "
+                            "with reconstruction disabled (RUN_RECON=false), or to pose priors "
+                            "with reconstruction enabled; skipping")
+    except Exception as e:
+        error_message = f"Issue creating COLMAP model bundle adjustment component: {e}"
+        pipeline.report_error(806, error_message)
 
     ##################################
     # PRE_PROCESSING COMPONENT:
@@ -1569,7 +2118,8 @@ if __name__ == "__main__":
                     "feature_extractor",
                     "--database_path", colmap_db_path,
                     "--image_path", image_path,
-                    "--ImageReader.single_camera", "1",
+                    # Rig: one camera per camera folder (images/<camera>/<frame>.jpg)
+                    "--ImageReader.single_camera_per_folder" if RIG_CONFIG else "--ImageReader.single_camera", "1",
                     "--FeatureExtraction.max_image_size", str(sift_max_image_size),
                     "--SiftExtraction.max_num_features", str(sift_max_num_features),
                     "--FeatureExtraction.use_gpu", "1"
@@ -1588,6 +2138,12 @@ if __name__ == "__main__":
                         "--SiftExtraction.estimate_affine_shape", "1"
                         #"--SiftExtraction.domain_size_pooling", "1"
                     ])
+                # Lens flare / sky masks: no SIFT features in masked pixels
+                # (COLMAP reads masks/<image name>.png).
+                if GENERATED_MASKS or UPLOADED_IMAGE_MASKS:
+                    args.extend([
+                        "--ImageReader.mask_path", os.path.join(config['DATASET_PATH'], "masks")
+                    ])
 
                 if config['LOG_VERBOSITY'] == "error":
                     args.extend([
@@ -1602,6 +2158,33 @@ if __name__ == "__main__":
                     cwd=current_dir_path,
                     requires_gpu=False
                 )
+                # Camera rig: group the images of each frame (same file name in every
+                # camera folder) into one rig frame with the cameras' relative poses
+                # (and intrinsics, if given) from rig_config.json. Must run before
+                # matching. Images are matched by the config's image_prefix values.
+                if RIG_CONFIG:
+                    pipeline.create_component(
+                        name="ColmapSfM-Rig-Configurator",
+                        comp_type=ComponentType.RECONSTRUCTION,
+                        comp_environ=ComponentEnvironment.EXECUTABLE,
+                        command="colmap",
+                        args=["rig_configurator", "--database_path", colmap_db_path,
+                              "--rig_config_path", rig_config_path],
+                        cwd=current_dir_path,
+                        requires_gpu=False
+                    )
+                # GPS priors read before the images were rewritten (EXIF lost) go into
+                # the database for the spatial matcher and pose_prior_mapper.
+                if GPS_PRIORS:
+                    pipeline.create_component(
+                        name="Write-GPS-Priors",
+                        comp_type=ComponentType.RECONSTRUCTION,
+                        comp_environ=ComponentEnvironment.PYTHON,
+                        command="pre_processing/gps_priors.py",
+                        args=["write", "--database", colmap_db_path, "--priors", gps_priors_json],
+                        cwd=current_dir_path,
+                        requires_gpu=False
+                    )
 
                 # Account for image name ordering and colmap database ordering when using pose priors
                 # Perform the pose coordinate conversions or modify existing colmap model text files
@@ -1649,6 +2232,16 @@ if __name__ == "__main__":
                         "--database_path", colmap_db_path,
                         "--SpatialMatching.ignore_z", "0"
                     ]
+                    if RIG_CONFIG:
+                        # All cameras of a rig frame share one GPS position, so the
+                        # default 50 nearest images would only reach ~50/N other
+                        # frames (about +-2 m along a drive for 6 cameras) and give
+                        # short-baseline pairs only. Keep the reach of 50 frames, and
+                        # skip same-frame pairs (zero baseline, fixed by the rig).
+                        args.extend([
+                            "--SpatialMatching.max_num_neighbors", str(50 * RIG_NUM_CAMERAS),
+                            "--FeatureMatching.skip_image_pairs_in_same_frame", "1"
+                        ])
                 elif config['MATCHING_METHOD'] == "vocab":
                     args = [
                         "vocab_tree_matcher",
@@ -1679,14 +2272,17 @@ if __name__ == "__main__":
 
                 if config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == "true" or config['USE_POSE_PRIOR_TRANSFORM_JSON'] == "true":
                     # TRIANGULATION COMPONENT
+                    # Known poses: follow the COLMAP FAQ ("Reconstruct sparse/dense model
+                    # from known camera poses"): triangulate with the poses and intrinsics
+                    # held fixed. Poses/intrinsics are only refined (bundle_adjuster below)
+                    # when BUNDLE_ADJUST_COLMAP_MODEL=true.
                     args = [
-                        #'pose_prior_mapper',
                         'point_triangulator',
                         '--database_path', colmap_db_path,
                         '--image_path', image_path,
                         '--input_path', sparse_model_path,
                         '--output_path', sparse_model_path,
-                        '--refine_intrinsics', "1",
+                        '--refine_intrinsics', "1" if BUNDLE_ADJUST_COLMAP_MODEL else "0",
                         '--Mapper.multiple_models', "0"
                     ]
                     if config['LOG_VERBOSITY'] == "error":
@@ -1702,31 +2298,50 @@ if __name__ == "__main__":
                         cwd=current_dir_path,
                         requires_gpu=False
                     )
-                    args = [
-                        'bundle_adjuster',
-                        '--input_path', sparse_model_path,
-                        '--output_path', sparse_model_path,
-                        '--BundleAdjustment.refine_principal_point', '0'
-                    ]
-                    pipeline.create_component(
-                        name="ColmapSfM-Ba",
-                        comp_type=ComponentType.RECONSTRUCTION,
-                        comp_environ=ComponentEnvironment.EXECUTABLE,
-                        command="colmap",
-                        args=args,
-                        cwd=current_dir_path,
-                        requires_gpu=False
-                    )
+                    if BUNDLE_ADJUST_COLMAP_MODEL:
+                        args = [
+                            'bundle_adjuster',
+                            '--input_path', sparse_model_path,
+                            '--output_path', sparse_model_path,
+                            '--BundleAdjustment.refine_principal_point', '0'
+                        ]
+                        pipeline.create_component(
+                            name="ColmapSfM-Ba",
+                            comp_type=ComponentType.RECONSTRUCTION,
+                            comp_environ=ComponentEnvironment.EXECUTABLE,
+                            command="colmap",
+                            args=args,
+                            cwd=current_dir_path,
+                            requires_gpu=False
+                        )
+                    else:
+                        log.info("Known poses: triangulating with fixed poses and intrinsics "
+                                 "(COLMAP FAQ); set BUNDLE_ADJUST_COLMAP_MODEL=true to refine them")
                 else:
                     # MAPPER COMPONENT
                     if config['RECON_SOFTWARE_NAME'] == "colmap" :
+                        # GPS: pose_prior_mapper (same Mapper options; the GPS std and
+                        # covariance overwrite are added at runtime from gps_priors.json,
+                        # and it falls back to mapper if the database has no priors).
                         args = [
-                            "mapper",
+                            "pose_prior_mapper" if GPS_PRIORS else "mapper",
                             "--database_path", colmap_db_path,
                             "--image_path", image_path,
                             "--output_path", sparse_path,
                             "--Mapper.multiple_models", "0"
                         ]
+                        if RIG_CONFIG:
+                            # Keep the cameras' relative poses from rig_config.json fixed
+                            # (COLMAP rig workflow for known rigs): BA moves whole frames.
+                            args.extend(["--Mapper.ba_refine_sensor_from_rig", "0"])
+                            if RIG_HAS_INTRINSICS and "--Mapper.ba_refine_focal_length" not in args:
+                                # Exact intrinsics in the rig config (rig_configurator
+                                # writes them to the database): keep them fixed.
+                                args.extend([
+                                    "--Mapper.ba_refine_focal_length", "0",
+                                    "--Mapper.ba_refine_principal_point", "0",
+                                    "--Mapper.ba_refine_extra_params", "0"
+                                ])
                         if config.get('PRESERVE_SCENE_SCALE', 'false') == 'true':
                             pass  # Scale is preserved via auto_scale_poses=False in nerfstudio dataparser
                         if config.get('ENABLE_FL_METRIC', 'false') == 'true':
@@ -1741,7 +2356,12 @@ if __name__ == "__main__":
                             args.extend([
                                 "--log_level", "1"
                             ])
-                        if int(pipeline.config.num_gpus) > 0:
+                        if RIG_CONFIG:
+                            # Rig runs use CPU bundle adjustment (COLMAP's reference rig
+                            # workflow). With GPU BA, rig reconstructions collapsed after
+                            # repeated "Unable to perform dense Cholesky factorization".
+                            log.info("Camera rig: using CPU bundle adjustment in the mapper")
+                        elif int(pipeline.config.num_gpus) > 0:
                             args.extend(["--Mapper.ba_use_gpu", "1"])
                             if len([f for f in os.listdir(image_path)
                                     if f.lower().endswith(('.png', '.jpg', '.jpeg'))]) >= 250:
@@ -2256,7 +2876,7 @@ if __name__ == "__main__":
                     requires_gpu=True
                 )
             # Single GPU gsplat
-            elif ENABLE_MULTI_GPU == "false" and not IS_FASTER_GS and \
+            elif ENABLE_MULTI_GPU == "false" and not IS_FASTER_GS and not IS_GSPLAT_DEPTH and \
                 config['MODEL'] != "3dgut" and config['MODEL'] != "3dgrt":
                 args = [
                     config['MODEL'],
@@ -3800,13 +4420,42 @@ if __name__ == "__main__":
                         elif IS_FOLDER_INPUT:
                             # Folder input - copy directly to images directory
                             log.info(f"Detected folder input: {input_file_path}")
-                            if image_path != input_file_path:
+                            _structured_folder = image_path != input_file_path and (
+                                RIG_CONFIG or UPLOADED_IMAGE_MASKS or
+                                os.path.isdir(os.path.join(input_file_path, 'images')))
+                            if _structured_folder:
+                                # Unzipped upload (images/, masks/, rig_config.json, manifest.json,
+                                # priors.csv): handle it exactly like the zip. Work on a copy so
+                                # the input folder is left unchanged.
+                                temp_path = os.path.join(config['DATASET_PATH'], 'temp')
+                                if os.path.exists(temp_path):
+                                    shutil.rmtree(temp_path)
+                                shutil.copytree(input_file_path, temp_path)
+                                if os.path.exists(image_path):
+                                    shutil.rmtree(image_path)
+                                extract_images_from_zip_temp(
+                                    temp_path, image_path, config['DATASET_PATH'], log,
+                                    keep_subfolders=RIG_CONFIG
+                                )
+                                shutil.rmtree(temp_path)
+                                if RIG_CONFIG and not os.path.isfile(rig_config_path):
+                                    log.warning("rig_config.json was not found; "
+                                                "the cameras are solved without a rig")
+                            elif image_path != input_file_path:
                                 if os.path.exists(image_path):
                                     shutil.rmtree(image_path)
                                 shutil.copytree(input_file_path, image_path)
                                 log.info(f"Copied {len(os.listdir(image_path))} files from folder to images directory")
                             else:
                                 log.info(f"Using {len(os.listdir(image_path))} files from folder (already in place)")
+                            if GPS_PRIORS:
+                                for _kf in ('manifest.json', 'priors.csv'):
+                                    _src_kf = os.path.join(input_file_path, _kf)
+                                    if os.path.isfile(_src_kf) and not os.path.exists(
+                                            os.path.join(config['DATASET_PATH'], _kf)):
+                                        shutil.copy2(_src_kf, config['DATASET_PATH'])
+                                read_gps_priors(gps_priors_script, image_path, config['DATASET_PATH'],
+                                                gps_priors_json, log)
                             if config.get('AUTOSCALE_DATASET', 'false') != 'true':
                                 validate_and_resize_images(image_path, config, log, pipeline)
                                 resize_images_to_common_dimensions(image_path)
@@ -3838,8 +4487,16 @@ if __name__ == "__main__":
                                 # No video found - only applies when run_recon == true.
                                 if config['RUN_RECON'] == 'true':
                                     extract_images_from_zip_temp(
-                                        temp_path, image_path, config['DATASET_PATH'], log
+                                        temp_path, image_path, config['DATASET_PATH'], log,
+                                        keep_subfolders=RIG_CONFIG
                                     )
+                                    if RIG_CONFIG and not os.path.isfile(rig_config_path):
+                                        log.warning("rig_config.json was not extracted; "
+                                                    "the cameras are solved without a rig")
+                                    # Before any resize/rotation rewrites the images.
+                                    if GPS_PRIORS:
+                                        read_gps_priors(gps_priors_script, image_path,
+                                                        config['DATASET_PATH'], gps_priors_json, log)
                                 else:
                                     # run_recon == false: pre-processing already done,
                                     # move contents as-is (original behaviour)
@@ -3882,16 +4539,96 @@ if __name__ == "__main__":
                     # REMOVE HUMAN SUBJECT CONDITIONAL COMPONENT
                     # Run Component
                     pipeline.run_component(i)
-                    # Rename the masked image directory to images
-                    shutil.rmtree(image_path)
-                    os.rename(mask_human_output_dir, image_path)
-                    log.info("All images successfully processed with human subject remover")
+                    # Rename the masked image directory to images, but only if it holds
+                    # every image: replacing images/ with an incomplete (e.g. empty)
+                    # output deleted the whole dataset.
+                    def _count_imgs(_d):
+                        return sum(1 for _r, _, _fs in os.walk(_d) for _f in _fs
+                                   if _f.lower().endswith(('.png', '.jpg', '.jpeg')))
+                    _n_in, _n_out = _count_imgs(image_path), _count_imgs(mask_human_output_dir)
+                    if _n_in and _n_out >= _n_in:
+                        shutil.rmtree(image_path)
+                        os.rename(mask_human_output_dir, image_path)
+                        log.info("All images successfully processed with human subject remover")
+                    else:
+                        log.warning(f"Human subject remover produced {_n_out} of {_n_in} images; "
+                                    f"keeping the original images")
                 case "ColmapSfM-Feature-Extractor":
                     # COLMAP FEATURE EXTRACTOR CONDITIONAL COMPONENT
                     log.info("Using standard COLMAP feature extraction")
-                    # If using pose prior, use the intrinsics from the txt file
-                    if config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == "true" or \
+                    # Uploaded masks: both file names, at the final image size
+                    # (resize/autoscale/rotation may have run since extraction).
+                    if UPLOADED_IMAGE_MASKS:
+                        normalize_uploaded_masks(image_path, os.path.join(config['DATASET_PATH'], 'masks'), log)
+                    # Session manifest camera (GPS jobs): exact shared intrinsics, scaled
+                    # to the current image size and kept fixed in the mapper.
+                    _gps_camera = None
+                    if GPS_PRIORS and os.path.isfile(gps_priors_json) and \
+                            config.get('ENABLE_FL_METRIC', 'false') != 'true' and \
+                            config.get('ENABLE_FL_HEURISTIC', 'false') != 'true':
+                        try:
+                            with open(gps_priors_json, encoding='utf-8') as _f:
+                                _cam = (json.load(_f) or {}).get('camera')
+                            _imgs = sorted(os.path.relpath(os.path.join(_r, f), image_path)
+                                           for _r, _, _fs in os.walk(image_path) for f in _fs
+                                           if f.lower().endswith(('.png', '.jpg', '.jpeg')))
+                            if _cam and _imgs and str(_cam.get('model', '')).upper() in ('PINHOLE', 'SIMPLE_PINHOLE'):
+                                with Image.open(os.path.join(image_path, _imgs[0])) as _img:
+                                    _w, _h = _img.size
+                                _sx = _w / float(_cam['width'])
+                                _sy = _h / float(_cam.get('height', _cam['width']))
+                                if abs(_sx - _sy) < 1e-3:
+                                    _fx = float(_cam['fx']) * _sx
+                                    _fy = float(_cam.get('fy', _cam['fx'])) * _sy
+                                    _cx = float(_cam.get('cx', _cam['width'] / 2.0)) * _sx
+                                    _cy = float(_cam.get('cy', _cam.get('height', _cam['width']) / 2.0)) * _sy
+                                    _gps_camera = ("PINHOLE", f"{_fx:.6f},{_fy:.6f},{_cx:.6f},{_cy:.6f}")
+                                    log.info(f"Manifest camera scaled to {_w}x{_h}: PINHOLE {_gps_camera[1]}")
+                                else:
+                                    log.warning(f"Manifest camera {_cam['width']}x{_cam.get('height')} does not "
+                                                f"match the image aspect ({_w}x{_h}); COLMAP estimates intrinsics")
+                        except Exception as _e:
+                            log.warning(f"Could not use the manifest camera: {_e}")
+                    # Camera rig: use the rig config's intrinsics from the start when all
+                    # cameras share one model and parameters (e.g. pinhole slices of a 360
+                    # camera). Otherwise COLMAP starts from SIMPLE_RADIAL; rig_configurator
+                    # then overwrites the cameras that list camera_model_name/camera_params.
+                    if RIG_CONFIG and os.path.isfile(rig_config_path):
+                        try:
+                            with open(rig_config_path, encoding='utf-8') as _f:
+                                _rig_cams = [_c for _r in json.load(_f) for _c in _r.get('cameras', [])]
+                            _rig_models = {(str(_c.get('camera_model_name', '')).upper(),
+                                            tuple(float(_p) for _p in _c.get('camera_params') or []))
+                                           for _c in _rig_cams}
+                            if len(_rig_models) == 1:
+                                _m, _ps = next(iter(_rig_models))
+                                if _m and _ps:
+                                    _gps_camera = (_m, ",".join(f"{_p:.6f}" for _p in _ps))
+                                    log.info(f"Camera rig: feature extraction with the rig config's "
+                                             f"camera {_m} {_gps_camera[1]}")
+                        except Exception as _e:
+                            log.warning(f"Could not read the rig config cameras: {_e}")
+                    if _gps_camera is not None:
+                        try:
+                            idx = component.args.index("--ImageReader.camera_model")
+                            component.args.pop(idx)
+                            component.args.pop(idx)
+                        except ValueError:
+                            pass
+                        component.args.extend([
+                            "--ImageReader.camera_model", _gps_camera[0],
+                            "--ImageReader.camera_params", _gps_camera[1]
+                        ])
+                        for _c in pipeline.components:
+                            if _c.name == "ColmapSfM-Mapper" and "--Mapper.ba_refine_focal_length" not in _c.args:
+                                _c.args.extend([
+                                    "--Mapper.ba_refine_focal_length", "0",
+                                    "--Mapper.ba_refine_principal_point", "0",
+                                    "--Mapper.ba_refine_extra_params", "0"
+                                ])
+                    elif config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == "true" or \
                         config['USE_POSE_PRIOR_TRANSFORM_JSON'] == "true":
+                        # Pose priors: use the intrinsics from the model files
                         # Prefer cameras.bin/txt from existing COLMAP reconstruction
                         camera_params = read_camera_params_from_file(
                             os.path.join(sparse_model_path, "cameras.txt")
@@ -4183,6 +4920,39 @@ if __name__ == "__main__":
                                 log.info(f"AUTO_MATCHER: keeping current matcher '{config['MATCHING_METHOD']}'")
                         except Exception as e:
                             log.warning(f"AUTO_MATCHER: analysis failed ({e}), keeping '{config['MATCHING_METHOD']}'")
+                case "ColmapSfM-Mapper" if component.args and component.args[0] == "pose_prior_mapper":
+                    # GPS: use pose_prior_mapper only when enough images have a prior
+                    # in the database; otherwise run the standard mapper.
+                    import sqlite3 as _sql
+                    _n_priors, _n_imgs, _gps = 0, 0, {}
+                    try:
+                        _con = _sql.connect(colmap_db_path)
+                        _n_priors = _con.execute("SELECT COUNT(*) FROM pose_priors").fetchone()[0]
+                        _n_imgs = _con.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+                        _con.close()
+                    except Exception as _e:
+                        log.warning(f"Could not count pose priors in {colmap_db_path}: {_e}")
+                    if os.path.isfile(gps_priors_json):
+                        with open(gps_priors_json, encoding='utf-8') as _f:
+                            _gps = json.load(_f) or {}
+                    if _n_imgs and _n_priors >= 0.5 * _n_imgs:
+                        _std = _gps.get('std_m') or {'x': 5.0, 'y': 5.0, 'z': 10.0}
+                        component.args.extend([
+                            "--overwrite_priors_covariance", "1",
+                            "--prior_position_std_x", str(_std['x']),
+                            "--prior_position_std_y", str(_std['y']),
+                            "--prior_position_std_z", str(_std['z']),
+                            "--use_robust_loss_on_prior_position", "1"
+                        ])
+                        log.info(f"GPS pose_prior_mapper: {_n_priors}/{_n_imgs} images have GPS priors; "
+                                 f"std (m) x={_std['x']} y={_std['y']} z={_std['z']}")
+                    else:
+                        component.args[0] = "mapper"
+                        log.warning(f"Only {_n_priors}/{_n_imgs} images have GPS priors; "
+                                    f"running the standard mapper instead of pose_prior_mapper")
+                    run_mapper_checked(pipeline, i, colmap_db_path, config, LOCAL_DEBUG, log)
+                case "ColmapSfM-Mapper":
+                    run_mapper_checked(pipeline, i, colmap_db_path, config, LOCAL_DEBUG, log)
                 case "ColmapSfM-Triangulator" | "HlocSfM-Tri":
                     import sqlite3 as _sql
                     try:
@@ -4341,6 +5111,30 @@ if __name__ == "__main__":
                         for j, arg in enumerate(component.args):
                             if arg == "--pipeline.model.color-corrected-metrics" and j+1 < len(component.args):
                                 component.args[j+1] = "False"
+                    # Transparent sky (REMOVE_SKY with splatfacto models): train the sky as
+                    # alpha = 0 instead of ignoring it. Splatfacto composites RGBA targets
+                    # with its random background, so anything rendered in the sky is
+                    # pushed to transparent and the sky is left empty in the splat.
+                    # The sky must not also be in the ignore masks (masked pixels have no
+                    # loss), so training uses masks_no_sky/ (lens flare + uploaded masks).
+                    if REMOVE_SKY and component.command == "ns-train" and "colmap" in component.args and \
+                            config['MODEL'] in ("splatfacto", "splatfacto-big", "splatfacto-mcmc"):
+                        _sky_dir = os.path.join(config['DATASET_PATH'], "sky_masks")
+                        _nosky_dir = os.path.join(config['DATASET_PATH'], "masks_no_sky")
+                        if os.path.isdir(_sky_dir):
+                            try:
+                                _n_rgba, _sky_px = build_transparent_sky_images(
+                                    image_path, _sky_dir, os.path.join(config['DATASET_PATH'], "images_rgba"))
+                                component.args.extend(["--images-path", "images_rgba"])
+                                if "--masks-path" in component.args and os.path.isdir(_nosky_dir):
+                                    component.args[component.args.index("--masks-path") + 1] = _nosky_dir
+                                log.info(f"Transparent sky: {_n_rgba} RGBA training images in images_rgba/ "
+                                         f"({_sky_px:.1%} of pixels are sky, trained as alpha=0); "
+                                         f"ignore masks without sky from {_nosky_dir}")
+                            except Exception as _sky_err:
+                                log.warning(f"Transparent sky setup failed, sky stays ignored instead: {_sky_err}")
+                        else:
+                            log.warning("REMOVE_SKY: no sky_masks/ found (sky step failed?); sky is not removed")
                     # Set the image cache to disk if there are a lot of images to prevent OOM
                     if config['MODEL'] not in ("nerfacto", "3dgrt", "3dgut", "faster-gs") and ENABLE_MULTI_GPU == "false":
                         if num_images > GPU_MAX_IMAGES:
@@ -4354,6 +5148,28 @@ if __name__ == "__main__":
                                 # Reduce dataloader workers to avoid IndexError with disk caching
                                 component.args.insert(index, "0")
                                 component.args.insert(index, "--pipeline.datamanager.dataloader-num-workers")
+                    # MCMC models: set the Gaussian cap from the data and the GPU instead of
+                    # using NUM_GAUSSIANS as is (a cap at or below the SfM point count leaves
+                    # MCMC no room to add Gaussians). NUM_GAUSSIANS is honoured as a minimum.
+                    _cap_flag = next((f for f in ("--pipeline.model.max-gs-num", "--strategy.cap-max")
+                                      if f in component.args), None)
+                    if _cap_flag and component.args.index(_cap_flag) + 1 < len(component.args):
+                        try:
+                            _ci = component.args.index(_cap_flag) + 1
+                            _user_cap = int(float(component.args[_ci]))
+                            _mp = 0.0
+                            if image_files:
+                                with Image.open(image_files[0]) as _im0:
+                                    _mp = _im0.width * _im0.height / 1e6
+                            _cap, _note = estimate_mcmc_cap(
+                                _user_cap, count_sfm_points(config['DATASET_PATH']), num_images, _mp,
+                                gpu_total_memory_gb(),
+                                images_on_gpu="--pipeline.datamanager.cache-images" not in component.args
+                                and component.command == "ns-train")
+                            component.args[_ci] = str(_cap)
+                            log.info(_note)
+                        except Exception as _cap_err:
+                            log.warning(f"MCMC cap estimate failed, using NUM_GAUSSIANS as is: {_cap_err}")
                     if ENABLE_MULTI_GPU == "false":
                         # Faster-GS reads sparse/0 (or colmap/sparse/0) directly, so skip the nerfstudio move
                         if config['MODEL'] not in ("3dgut", "3dgrt", "faster-gs") and not IS_GSPLAT_DEPTH and \
@@ -4391,6 +5207,71 @@ if __name__ == "__main__":
                                         log.error(f"cameras.bin/txt missing in {sparse_0}")
                                 else:
                                     log.warning(f"colmap/sparse/0 does not exist, contents of colmap/sparse: {os.listdir(sparse_path_out) if os.path.exists(sparse_path_out) else 'N/A'}")                              
+                                # nerfstudio opens <data>/<images-path>/<name> for every image in
+                                # the model; check them all now so a model/image mismatch fails
+                                # with the names instead of a FileNotFoundError mid-startup.
+                                if os.path.exists(sparse_0):
+                                    _img_root = os.path.join(config['DATASET_PATH'], component.args[component.args.index("--images-path") + 1]) \
+                                        if "--images-path" in component.args else image_path
+                                    try:
+                                        import pycolmap as _pc
+                                        _names = [im.name for im in _pc.Reconstruction(sparse_0).images.values()]
+                                    except Exception as _rec_err:
+                                        _names = []
+                                        log.warning(f"Could not read {sparse_0} to check image names: {_rec_err}")
+                                    _missing = [n for n in _names if not os.path.isfile(os.path.join(_img_root, n))]
+                                    if _missing:
+                                        _on_disk = sorted(os.path.relpath(os.path.join(_r, _f), _img_root)
+                                                          for _r, _d, _fs in os.walk(_img_root) for _f in _fs)
+                                        _dirs = sorted({os.path.dirname(n) or '.' for n in _names})
+                                        raise RuntimeError(pipeline.report_error(
+                                            706,
+                                            f"{len(_missing)} of {len(_names)} images in the COLMAP model {sparse_0} "
+                                            f"are not under {_img_root} (model sub-folders: {_dirs[:10]}). "
+                                            f"Missing e.g. {_missing[:5]}; on disk e.g. {_on_disk[:5]} "
+                                            f"({len(_on_disk)} files). Image names in images.bin must match "
+                                            f"the paths under images/ exactly."))
+                                    log.info(f"All {len(_names)} model images found under {_img_root}")
+                                # Splatfacto starts each Gaussian with scale log(mean distance to its 3
+                                # nearest SfM points). Four or more identical points give log(0) = -inf,
+                                # which turns those Gaussians NaN within the first steps; MCMC never prunes
+                                # them and they eventually turn the whole splat NaN (error 766). Train from
+                                # a copy of the model without exact duplicate points. For splatfacto-mcmc
+                                # also drop isolated points, which start as huge Gaussians that the MCMC
+                                # noise step throws far out of the scene. The original model is unchanged.
+                                if os.path.exists(sparse_0) and component.command == "ns-train" and \
+                                        "colmap" in component.args and "--colmap-path" not in component.args:
+                                    try:
+                                        import numpy as _np
+                                        import pycolmap as _pc
+                                        from sklearn.neighbors import NearestNeighbors as _NN
+                                        _rec = _pc.Reconstruction(sparse_0)
+                                        _ids = _np.array(list(_rec.points3D.keys()))
+                                        _xyz = _np.array([_rec.points3D[int(_i)].xyz for _i in _ids])
+                                        _keep = _np.zeros(len(_ids), dtype=bool)
+                                        if len(_ids):
+                                            _keep[_np.unique(_xyz, axis=0, return_index=True)[1]] = True
+                                        _n_dup = int((~_keep).sum())
+                                        _n_iso = 0
+                                        if config['MODEL'] == "splatfacto-mcmc" and _keep.sum() > 4:
+                                            _k = _NN(n_neighbors=4).fit(_xyz[_keep]).kneighbors(_xyz[_keep])[0][:, 1:].mean(1)
+                                            _iso = _k > 20.0 * _np.median(_k)
+                                            _n_iso = int(_iso.sum())
+                                            _keep[_np.where(_keep)[0][_iso]] = False
+                                        if _n_dup or _n_iso:
+                                            for _i in _ids[~_keep]:
+                                                _rec.delete_point3D(int(_i))
+                                            _train_model = os.path.join(sparse_path_out, "0_train")
+                                            if os.path.exists(_train_model):
+                                                shutil.rmtree(_train_model)
+                                            os.makedirs(_train_model)
+                                            _rec.write(_train_model)
+                                            component.args.extend(["--colmap-path", os.path.relpath(_train_model, config['DATASET_PATH'])])
+                                            log.info(f"Training from {_train_model}: removed {_n_dup:,} duplicate and {_n_iso:,} "
+                                                     f"isolated SfM points of {len(_ids):,} (duplicates start as log(0) scale "
+                                                     f"Gaussians, which turn NaN)")
+                                    except Exception as _dedup_err:
+                                        log.warning(f"Could not clean SfM points before training, using {sparse_0} as is: {_dedup_err}")
                         else: # 3dgrut
                             _sample_img = next(
                                 (f for f in os.listdir(image_path)
@@ -4406,11 +5287,26 @@ if __name__ == "__main__":
                         # (e.g. 'face_01/pano_011.png'). After clean_images_dir flattens subdirs,
                         # the actual files are 'face_01_pano_011.png'. Flatten images.bin to match.
                         if IS_GSPLAT_DEPTH and ENABLE_MULTI_GPU == "false":
-                            _sparse_0 = os.path.join(config['DATASET_PATH'], "colmap", "sparse", "0")
-                            if not os.path.exists(_sparse_0):
-                                _sparse_0 = os.path.join(config['DATASET_PATH'], "sparse", "0")
+                            # Prepare the model gsplat will read: it loads <data-dir>/sparse/0
+                            # when that holds a model; colmap/sparse/0 is only copied there
+                            # (below) when sparse/0 is empty. Editing the other copy left
+                            # gsplat with unflattened names (KeyError 'face_iphone/...').
+                            _root_s0 = os.path.join(config['DATASET_PATH'], "sparse", "0")
+                            _colmap_s0 = os.path.join(config['DATASET_PATH'], "colmap", "sparse", "0")
+                            _root_has_model = any(os.path.isfile(os.path.join(_root_s0, _f))
+                                                  for _f in ("cameras.bin", "cameras.txt"))
+                            _sparse_0 = _root_s0 if _root_has_model or not os.path.exists(_colmap_s0) \
+                                else _colmap_s0
+                            log.info(f"gsplat-depth: preparing COLMAP model {_sparse_0}")
                             if os.path.exists(_sparse_0):
+                                # Pose-only exports (ARKit poses + LiDAR points3D) have no
+                                # points2D/tracks, so gsplat's depth loss gets no depths.
+                                # Link each image to the points3D it sees (before the image
+                                # names are flattened, so masks still match).
+                                add_projected_observations_for_gsplat(
+                                    _sparse_0, os.path.join(config['DATASET_PATH'], 'masks'), log)
                                 flatten_images_for_gsplat(image_path, _sparse_0, log)
+                                rebuild_points3d_tracks_for_gsplat(_sparse_0, log)
                                 # Flatten masks/ to match flattened image names.
                                 # patch_gsplat.py looks up masks by imdata[k].name which is now
                                 # 'face_00_pano_001.png' after flattening, so masks must also be flat.
@@ -4655,6 +5551,12 @@ if __name__ == "__main__":
                     if not os.path.exists(config['DATASET_PATH']):
                         log.error(f"CRITICAL: Dataset missing before cleanup: {config['DATASET_PATH']}")
                         raise RuntimeError(f"Dataset disappeared before cleanup: {config['DATASET_PATH']}")
+                    # Transparent-sky RGBA copies are only needed while training/evaluating;
+                    # keep them out of model.tar.gz (sky_masks/ stays, so they can be rebuilt).
+                    _rgba_dir = os.path.join(config['DATASET_PATH'], "images_rgba")
+                    if os.path.isdir(_rgba_dir):
+                        shutil.rmtree(_rgba_dir, ignore_errors=True)
+                        log.info("Removed images_rgba/ (transparent-sky training copies) before archiving")
                     if IS_FASTER_GS:
                         # Drop the Faster-GS staging folder (symlinks or an undistorted image copy)
                         # and the video frames so model.tar.gz does not carry duplicate images.
@@ -5032,6 +5934,21 @@ if __name__ == "__main__":
                             log.info(f"Calibrate-Rig: {_rr.get('status')} - {_rr.get('reason')}")
                         except Exception:
                             pass
+                case "Bundle-Adjust-Colmap-Model":
+                    # Non-fatal: bundle_adjust_model.py keeps (or restores) the
+                    # original model whenever the refinement fails its checks.
+                    try:
+                        pipeline.run_component(i)
+                    except RuntimeError as _ba_err:
+                        log.warning(f"Bundle-Adjust-Colmap-Model failed (non-fatal, original poses kept): {_ba_err}")
+                    _ba_report = os.path.join(config['DATASET_PATH'], "bundle_adjust", "report.json")
+                    if os.path.isfile(_ba_report):
+                        try:
+                            with open(_ba_report) as _bf:
+                                _br = _json.load(_bf)
+                            log.info(f"Bundle-Adjust-Colmap-Model: {_br.get('status')} - {_br.get('reason')}")
+                        except Exception:
+                            pass
                 case "Enhance-Depth":
                     # Resolve depth dir at runtime — files may have been extracted from zip
                     _rt_depth_dir = os.path.join(config['DATASET_PATH'], "depth")
@@ -5069,6 +5986,58 @@ if __name__ == "__main__":
                         pipeline.run_component(i)
                     else:
                         log.warning("ENHANCE_DEPTH=true but no depth/, depth_images/ or depths/*.bin found, skipping")
+                case "Filter-Blurry-Images":
+                    # A zip that turned out to hold a video was already filtered by
+                    # sharp-frame-extractor in VideoToImages.
+                    if globals().get('video_found', False):
+                        log.info("Filter-Blurry-Images: input zip contained a video (already filtered), skipping")
+                    else:
+                        try:
+                            pipeline.run_component(i)
+                        except RuntimeError as _blur_err:
+                            log.warning(f"Filter-Blurry-Images failed (non-fatal, all images kept): {_blur_err}")
+                case "Remove-Lens-Flare" | "Remove-Sky":
+                    # Non-fatal: if masking fails, train without these masks rather than
+                    # losing the job. Any image left without a mask gets an all-white one,
+                    # because nerfstudio's --masks-path expects a mask for every image.
+                    try:
+                        pipeline.run_component(i)
+                    except RuntimeError as _mask_err:
+                        log.warning(f"{component.name} failed (non-fatal, continuing without it): {_mask_err}")
+                    _masks_dir = os.path.join(config['DATASET_PATH'], "masks")
+                    _filled = 0
+                    for _r, _d, _fs in os.walk(image_path):
+                        for _f in _fs:
+                            if not _f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                                continue
+                            _rel = os.path.relpath(os.path.join(_r, _f), image_path)
+                            _cands = [os.path.join(_masks_dir, _rel + ".png"),
+                                      os.path.join(_masks_dir, os.path.splitext(_rel)[0] + ".png")]
+                            if all(os.path.isfile(_c) for _c in _cands):
+                                continue
+                            with Image.open(os.path.join(_r, _f)) as _im:
+                                _blank = Image.new("L", _im.size, 255)
+                            for _c in _cands:
+                                if not os.path.isfile(_c):
+                                    os.makedirs(os.path.dirname(_c), exist_ok=True)
+                                    _blank.save(_c)
+                            _filled += 1
+                    if _filled:
+                        log.info(f"{component.name}: wrote all-white masks for {_filled} images without one")
+                case "Ply-to-Video":
+                    # ns-render interpolate follows the eval cameras by default. With fewer
+                    # than 2 eval images (small datasets) there is nothing to interpolate
+                    # between and it fails with "need at least one array to stack", so
+                    # retry along the training cameras instead.
+                    try:
+                        pipeline.run_component(i)
+                    except RuntimeError as _vid_err:
+                        if "--pose-source" in component.args:
+                            raise
+                        log.warning(f"Ply-to-Video failed on the eval camera path ({_vid_err}); "
+                                    "retrying with --pose-source train")
+                        component.args.extend(["--pose-source", "train"])
+                        pipeline.run_component(i)
                 case _: # Default case, run Component
                     pipeline.run_component(i)
                     # After autoscale runs, normalize image dimensions

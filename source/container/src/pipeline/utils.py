@@ -834,14 +834,28 @@ def cleanup_dataset(dataset_path):
             except OSError:
                 pass  # Directory not empty or permission issue
 
-def extract_images_from_zip_temp(temp_path, image_path, dataset_path, log):
+def extract_images_from_zip_temp(temp_path, image_path, dataset_path, log, keep_subfolders=False):
     """
     Walk temp_path, routing image files to image_path and mask images
     (those inside a folder named 'mask' or 'masks') to dataset_path/masks/.
-    Sub-folders are flattened; non-image files are silently ignored.
+    Sub-folders are flattened; other files are ignored, except a session
+    manifest.json / priors.csv (camera intrinsics, GPS priors), which are
+    moved to dataset_path.
+    keep_subfolders=True (COLMAP rig layout, images/<camera>/<frame>.jpg): the
+    folders below images/ and masks/ are kept, so image names match the
+    rig_config.json image_prefix values (also kept, in dataset_path).
     Only intended for run_recon == true jobs.
     """
     IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
+    KEEP_FILES = ('manifest.json', 'priors.csv', 'rig_config.json')
+
+    def _sub_dirs(parts, anchors):
+        # Folders below the last anchor folder (images/ or masks/).
+        low = [p.lower() for p in parts]
+        idx = max((i for i, p in enumerate(low) if p in anchors), default=None)
+        if idx is None:
+            return [p for p in parts if p not in ('', '.')]
+        return parts[idx + 1:]
     os.makedirs(image_path, exist_ok=True)
     masks_dest = os.path.join(dataset_path, 'masks')
     seen_names = {}
@@ -850,10 +864,21 @@ def extract_images_from_zip_temp(temp_path, image_path, dataset_path, log):
         path_parts = rel_root.replace('\\', '/').split('/')
         is_mask_folder = any(p.lower() in ('mask', 'masks') for p in path_parts)
         for fname in files:
+            if fname.lower() in KEEP_FILES and not is_mask_folder:
+                _dst = os.path.join(dataset_path, fname.lower())
+                if not os.path.exists(_dst):
+                    shutil.move(os.path.join(root, fname), _dst)
+                    log.info(f"Kept {fname} from the zip")
+                continue
             if not fname.lower().endswith(IMAGE_EXTS):
                 continue
             src = os.path.join(root, fname)
-            if is_mask_folder:
+            if keep_subfolders:
+                sub = _sub_dirs(path_parts, ('mask', 'masks') if is_mask_folder else ('images', 'image'))
+                base = masks_dest if is_mask_folder else image_path
+                dst = os.path.join(base, *sub, fname)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+            elif is_mask_folder:
                 os.makedirs(masks_dest, exist_ok=True)
                 dst = os.path.join(masks_dest, fname)
             else:
@@ -863,11 +888,57 @@ def extract_images_from_zip_temp(temp_path, image_path, dataset_path, log):
                 dst = os.path.join(os.path.dirname(dst), f"{base}_{seen_names[dst]}{ext}")
             seen_names[dst] = seen_names.get(dst, 0) + 1
             shutil.move(src, dst)
+    def _count(d):
+        return sum(len(fs) for _, _, fs in os.walk(d)) if os.path.isdir(d) else 0
     log.info(
-        f"Extracted {len(os.listdir(image_path))} images"
-        + (f" and {len(os.listdir(masks_dest))} masks" if os.path.isdir(masks_dest) else "")
-        + " from zip (sub-folders flattened, non-image files ignored)"
+        f"Extracted {_count(image_path)} images"
+        + (f" and {_count(masks_dest)} masks" if os.path.isdir(masks_dest) else "")
+        + " from zip ("
+        + ("camera sub-folders kept" if keep_subfolders else "sub-folders flattened")
+        + ", non-image files ignored)"
     )
+
+
+def normalize_uploaded_masks(image_path, masks_dir, log):
+    """Make every image's mask (white = keep) available under both names used
+    downstream, at the image's size:
+      masks/<image name>.png  (COLMAP --ImageReader.mask_path)
+      masks/<image stem>.png  (nerfstudio --masks-path, gsplat)
+    Accepts uploaded masks named <image name>.png, <stem>.png or <image name>.
+    Images without a mask get an all-white (keep everything) mask."""
+    if not os.path.isdir(masks_dir):
+        return 0, 0
+    found = filled = 0
+    for root, _, files in os.walk(image_path):
+        for fname in files:
+            if not fname.lower().endswith(('.png', '.jpg', '.jpeg')):
+                continue
+            rel = os.path.relpath(os.path.join(root, fname), image_path).replace('\\', '/')
+            stem = os.path.splitext(rel)[0]
+            with Image.open(os.path.join(root, fname)) as _im:
+                size = _im.size
+            mask = None
+            for cand in (rel + '.png', stem + '.png', rel):
+                p = os.path.join(masks_dir, cand)
+                if os.path.isfile(p):
+                    mask = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+                    if mask is not None:
+                        break
+            if mask is None:
+                mask = np.full((size[1], size[0]), 255, np.uint8)
+                filled += 1
+            else:
+                found += 1
+                if (mask.shape[1], mask.shape[0]) != size:
+                    mask = cv2.resize(mask, size, interpolation=cv2.INTER_NEAREST)
+                mask = np.where(mask > 127, 255, 0).astype(np.uint8)
+            for name in (rel + '.png', stem + '.png'):
+                out = os.path.join(masks_dir, name)
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                cv2.imwrite(out, mask)
+    log.info(f"Uploaded masks: {found} matched, {filled} images without a mask got a keep-all mask "
+             f"(written as <image>.png and <stem>.png in {masks_dir})")
+    return found, filled
 
 
 def validate_and_resize_images(image_path, config, log, pipeline):
@@ -1640,6 +1711,137 @@ def rebuild_points3d_tracks_for_gsplat(sparse_0_path, log):
                 f.write(struct.pack("<I", pt2d_idx))
 
     log.info(f"rebuild_points3d_tracks_for_gsplat: wrote {num_pts} points with track data")
+
+
+def add_projected_observations_for_gsplat(sparse_0_path, masks_dir, log, cell_px=8,
+                                          max_obs_per_image=6000, max_points=500000,
+                                          occlusion_margin=0.05, seed=0):
+    """
+    Give a pose-only COLMAP model (e.g. ARKit poses + fused LiDAR points3D, but no
+    points2D / tracks) the observations gsplat's depth loss needs.
+
+    gsplat (simple_trainer --depth-loss) supervises each image with the depths of
+    the 3D points in that image's track list. Exports without tracks therefore get
+    no depth loss at all. For every image the points3D are projected with the
+    model's pose and intrinsics, and only visible ones are kept: a z-buffer on a
+    cell_px grid keeps the nearest point per cell, and a point is dropped when a
+    neighbouring cell has a point more than occlusion_margin closer (depth edges,
+    see-through gaps). Masked pixels (masks/<image>.png or <stem>.png, black =
+    ignore) are skipped. Each kept point becomes a points2D entry linked to it.
+
+    Does nothing when the model already has observations or has no points.
+    Returns the number of observations added.
+    """
+    try:
+        import pycolmap
+    except ImportError:
+        log.warning("add_projected_observations_for_gsplat: pycolmap not available, skipping")
+        return 0
+
+    if not any(os.path.isfile(os.path.join(sparse_0_path, f)) for f in ("cameras.bin", "cameras.txt")):
+        log.warning(f"add_projected_observations_for_gsplat: no COLMAP model in {sparse_0_path}, skipping")
+        return 0
+    rec = pycolmap.Reconstruction(sparse_0_path)
+    if rec.num_points3D() == 0:
+        log.info("add_projected_observations_for_gsplat: model has no points, skipping")
+        return 0
+    if rec.compute_num_observations() > 0:
+        log.info("add_projected_observations_for_gsplat: model already has observations, skipping")
+        return 0
+
+    rng = np.random.default_rng(seed)
+    ids = np.array(sorted(rec.point3D_ids()), dtype=np.int64)
+    if len(ids) > max_points:
+        ids = np.sort(rng.choice(ids, max_points, replace=False))
+    xyz = np.array([rec.points3D[int(p)].xyz for p in ids], dtype=np.float64)
+    log.info(f"add_projected_observations_for_gsplat: projecting {len(ids)} of "
+             f"{rec.num_points3D()} points into {rec.num_images()} images "
+             f"(model has no tracks, so gsplat's depth loss would be empty)")
+
+    def _mask_for(name, w, h):
+        if not masks_dir or not os.path.isdir(masks_dir):
+            return None
+        stem = os.path.splitext(name)[0]
+        for cand in (name + ".png", stem + ".png", name):
+            p = os.path.join(masks_dir, cand)
+            if os.path.isfile(p):
+                m = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+                if m is not None:
+                    if m.shape != (h, w):
+                        m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+                    return m > 127
+        return None
+
+    total, n_images, n_empty = 0, 0, 0
+    for image_id in sorted(rec.reg_image_ids()):
+        image = rec.images[image_id]
+        cam = rec.cameras[image.camera_id]
+        cfw = image.cam_from_world() if callable(image.cam_from_world) else image.cam_from_world
+        R = np.asarray(cfw.rotation.matrix())
+        t = np.asarray(cfw.translation).reshape(3)
+        Xc = xyz @ R.T + t
+        front = np.nonzero(Xc[:, 2] > 1e-3)[0]
+        if len(front) == 0:
+            n_empty += 1
+            continue
+        uv = np.asarray(cam.img_from_cam(Xc[front]), dtype=np.float64)
+        z = Xc[front, 2]
+        w, h = int(cam.width), int(cam.height)
+        ok = np.isfinite(uv).all(axis=1) & (uv[:, 0] >= 0) & (uv[:, 0] < w) & \
+            (uv[:, 1] >= 0) & (uv[:, 1] < h)
+        sel, uv, z = front[ok], uv[ok], z[ok]
+        mask = _mask_for(image.name, w, h)
+        if mask is not None and len(sel):
+            keep = mask[uv[:, 1].astype(int), uv[:, 0].astype(int)]
+            sel, uv, z = sel[keep], uv[keep], z[keep]
+        if len(sel) == 0:
+            n_empty += 1
+            continue
+        # Z-buffer: nearest point per cell, then reject points occluded by a
+        # nearer point in a neighbouring cell.
+        gw, gh = (w + cell_px - 1) // cell_px, (h + cell_px - 1) // cell_px
+        cell = (uv[:, 1] // cell_px).astype(np.int64) * gw + (uv[:, 0] // cell_px).astype(np.int64)
+        order = np.lexsort((z, cell))
+        first = np.ones(len(order), bool)
+        first[1:] = cell[order][1:] != cell[order][:-1]
+        nearest = order[first]
+        zgrid = np.full(gh * gw, np.inf, np.float32)
+        zgrid[cell[nearest]] = z[nearest]
+        zmin = cv2.erode(zgrid.reshape(gh, gw), np.ones((3, 3), np.uint8),
+                         borderType=cv2.BORDER_CONSTANT, borderValue=float(np.inf)).reshape(-1)
+        nearest = nearest[z[nearest] <= (1.0 + occlusion_margin) * zmin[cell[nearest]]]
+        if len(nearest) > max_obs_per_image:
+            nearest = rng.choice(nearest, max_obs_per_image, replace=False)
+        if len(nearest) == 0:
+            n_empty += 1
+            continue
+        image.points2D = pycolmap.Point2DList([pycolmap.Point2D(uv[k]) for k in nearest])
+        for idx, k in enumerate(nearest):
+            rec.add_observation(int(ids[sel[k]]), pycolmap.TrackElement(image_id, idx))
+        total += len(nearest)
+        n_images += 1
+
+    if total == 0:
+        log.warning("add_projected_observations_for_gsplat: no visible points in any image; "
+                    "model left unchanged")
+        return 0
+
+    present = {f for f in ("rigs.bin", "frames.bin") if os.path.isfile(os.path.join(sparse_0_path, f))}
+    backup = os.path.join(sparse_0_path, "no_tracks_backup")
+    os.makedirs(backup, exist_ok=True)
+    for f in ("images.bin", "points3D.bin"):
+        src = os.path.join(sparse_0_path, f)
+        if os.path.isfile(src) and not os.path.isfile(os.path.join(backup, f)):
+            shutil.copy2(src, os.path.join(backup, f))
+    rec.write_binary(sparse_0_path)
+    for f in ("rigs.bin", "frames.bin"):
+        if f not in present and os.path.isfile(os.path.join(sparse_0_path, f)):
+            os.remove(os.path.join(sparse_0_path, f))
+    log.info(f"add_projected_observations_for_gsplat: added {total} observations "
+             f"({total / max(n_images, 1):.0f} per image) to {n_images} images"
+             + (f"; {n_empty} images see no points" if n_empty else "")
+             + f"; originals in {backup}")
+    return total
 
 
 def apply_camera_masks_to_images(image_path, masks_path, log):

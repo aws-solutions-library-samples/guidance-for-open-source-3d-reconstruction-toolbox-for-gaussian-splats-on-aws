@@ -128,6 +128,8 @@
           "VIDEO_START_TIME.$": "$.envVars.VIDEO_START_TIME",
           "VIDEO_STOP_TIME.$": "$.envVars.VIDEO_STOP_TIME",
           "FILTER_BLURRY_IMAGES.$": "$.envVars.FILTER_BLURRY_IMAGES",
+          "ADAPTIVE_FRAME_EXTRACTION.$": "$.envVars.ADAPTIVE_FRAME_EXTRACTION",
+          "ADAPTIVE_FRAME_DENSITY.$": "$.envVars.ADAPTIVE_FRAME_DENSITY",
           "RUN_RECON.$": "$.envVars.RUN_RECON",
           "RECON_SOFTWARE_NAME.$": "$.envVars.RECON_SOFTWARE_NAME",
           "USE_POSE_PRIOR_COLMAP_MODEL_FILES.$": "$.envVars.USE_POSE_PRIOR_COLMAP_MODEL_FILES",
@@ -155,6 +157,9 @@
           "ENHANCE_DEPTH.$": "$.envVars.ENHANCE_DEPTH",
           "REFINE_POSES.$": "$.envVars.REFINE_POSES",
           "CALIBRATE_RIG.$": "$.envVars.CALIBRATE_RIG",
+          "BUNDLE_ADJUST_COLMAP_MODEL.$": "$.envVars.BUNDLE_ADJUST_COLMAP_MODEL",
+          "REMOVE_LENS_FLARE.$": "$.envVars.REMOVE_LENS_FLARE",
+          "REMOVE_SKY.$": "$.envVars.REMOVE_SKY",
           "ENABLE_SPZ.$": "$.envVars.ENABLE_SPZ",
           "ENABLE_SOG.$": "$.envVars.ENABLE_SOG",
           "ENABLE_USDZ.$": "$.envVars.ENABLE_USDZ",
@@ -180,7 +185,6 @@
           "COLLISION_SEED_POS.$": "$.envVars.COLLISION_SEED_POS",
           "GENERATE_LOD.$": "$.envVars.GENERATE_LOD",
           "GENERATE_MESH.$": "$.envVars.GENERATE_MESH",
-          "EXTRACT_MESH_GS.$": "$.envVars.EXTRACT_MESH_GS",
           "DDB_TABLE_NAME.$": "$.stateMachine.ddbTableName",
           "AWS_DEFAULT_REGION.$": "$.stateMachine.awsRegion"
         }
