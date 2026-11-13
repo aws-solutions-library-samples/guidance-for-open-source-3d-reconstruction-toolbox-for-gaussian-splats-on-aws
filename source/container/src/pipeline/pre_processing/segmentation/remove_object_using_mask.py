@@ -24,6 +24,7 @@ import numpy as np
 import cv2
 import argparse
 import os
+import shutil
 
 def apply_binary_mask(image, mask):
     """
@@ -34,7 +35,6 @@ def apply_binary_mask(image, mask):
     Returns:
         Masked image with alpha channel (BGRA format)
     """
-    print(mask.shape[:2])
     # Convert image to BGRA if it's not already
     if image.shape[-1] == 3:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
@@ -145,34 +145,50 @@ if __name__ == "__main__":
         os.makedirs(raw_input_path, exist_ok=True)
         os.rename(orig_image_path, raw_input_path)
         orig_image_path = raw_input_path
-    orig_imgs_list = sorted([f for f in os.listdir(orig_image_path)
-                              if os.path.isfile(os.path.join(orig_image_path, f))])
-    mask_imgs_list = sorted([f for f in os.listdir(mask_image_path)
-                              if os.path.isfile(os.path.join(mask_image_path, f))])
+    os.makedirs(output_path, exist_ok=True)
+    orig_imgs_list = sorted(f for f in os.listdir(orig_image_path)
+                            if os.path.isfile(os.path.join(orig_image_path, f))
+                            and f.lower().endswith(('.jpg', '.jpeg', '.png')))
 
-    # Build stem->filename map for masks so we match by name, not by index
-    mask_by_stem = {os.path.splitext(f)[0]: f for f in mask_imgs_list}
+    def find_mask(filename):
+        # remove_background writes <stem>.png; pair by name, not by listing order.
+        for cand in (os.path.splitext(filename)[0] + ".png", filename + ".png", filename):
+            p = os.path.join(mask_image_path, cand)
+            if os.path.isfile(p):
+                return p
+        return None
 
+    def person_alpha(mask_filepath):
+        # Person mask (255 = person). remove_background writes RGBA with the person
+        # in alpha and the image in RGB, so the alpha channel must be used.
+        m = cv2.imread(mask_filepath, cv2.IMREAD_UNCHANGED)
+        if m is None:
+            return None
+        if m.ndim == 3 and m.shape[2] == 4:
+            return m[:, :, 3]
+        return m if m.ndim == 2 else cv2.cvtColor(m, cv2.COLOR_BGR2GRAY)
+
+    n_changed = 0
     try:
         for i, orig_filename in enumerate(orig_imgs_list):
-            print(f"Processing image {i+1} out of {len(orig_imgs_list)}...")
-            orig_stem = os.path.splitext(orig_filename)[0]
-            if orig_stem not in mask_by_stem:
-                print(f"WARNING: no mask found for {orig_filename}, skipping")
-                continue
             orig_filepath = os.path.join(orig_image_path, orig_filename)
-            mask_filepath = os.path.join(mask_image_path, mask_by_stem[orig_stem])
             output_filepath = os.path.join(output_path, orig_filename)
+            mask_filepath = find_mask(orig_filename)
+            alpha = person_alpha(mask_filepath) if mask_filepath else None
+            if alpha is None or not (alpha > 10).any():
+                # No person (or no mask): keep the original file (no re-encode), so
+                # the output holds every image.
+                shutil.copy2(orig_filepath, output_filepath)
+                continue
             orig_img = cv2.imread(orig_filepath, cv2.IMREAD_UNCHANGED)
-            mask_gray_img = cv2.imread(mask_filepath)
-
-            bitwise_NOT = cv2.bitwise_not(mask_gray_img) # invert mask image
-            alpha_mask = black_to_alpha(bitwise_NOT) # turn black pixels to transparent
-            gray = cv2.cvtColor(alpha_mask, cv2.COLOR_BGR2GRAY) # convert alpha mask to gray
-            ret, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU) # convert image to binary
-            binary_mask = binary_to_alpha(binary) # apply black pixels to be transparent
-            masked_img = apply_binary_mask(orig_img, binary_mask) # apply binary mask to original image
-
+            if orig_img is None or orig_img.shape[:2] != alpha.shape[:2]:
+                print(f"WARNING: {orig_filename}: unreadable or mask size mismatch; keeping the original")
+                shutil.copy2(orig_filepath, output_filepath)
+                continue
+            keep = np.where(alpha > 10, 0, 255).astype(np.uint8)
+            masked_img = apply_binary_mask(orig_img, binary_to_alpha(keep))
             cv2.imwrite(output_filepath, masked_img)
+            n_changed += 1
+        print(f"Removed people from {n_changed} of {len(orig_imgs_list)} images")
     except Exception as e:
         raise RuntimeError(f"Error removing object using mask: {e}") from e

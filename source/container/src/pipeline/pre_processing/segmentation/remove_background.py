@@ -139,15 +139,31 @@ def apply_enhanced_mask(image, mask, threshold=0.05):
     
     return Image.fromarray(result, 'RGBA')
 
+def process_person_segmentation(input_dir, output_dir):
+    """Person instance masks with Grounding DINO + SAM 2.1 (person_segmentation.py).
+    Falls back to rembg u2net_human_seg when the models cannot be loaded (e.g. no
+    access to Hugging Face)."""
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    try:
+        from person_segmentation import process_dir, PersonSegmenter  # noqa: F401
+    except Exception as e:
+        print(f"WARNING: person segmentation unavailable ({e}); using rembg u2net_human_seg")
+        return process_human_segmentation(input_dir, output_dir)
+    try:
+        return process_dir(input_dir, output_dir)
+    except (OSError, ImportError) as e:
+        # Model download/load failure: keep the job going with the old model.
+        print(f"WARNING: could not load Grounding DINO / SAM 2.1 ({e}); using rembg u2net_human_seg")
+        return process_human_segmentation(input_dir, output_dir)
+
+
 def process_human_segmentation(input_dir, output_dir):
-    """Process images using enhanced human segmentation with dual-model detection.
-    Runs u2net_human_seg + birefnet-portrait and merges masks to catch both
-    prominent and distant/small humans.
-    """
+    """Fallback human segmentation with rembg u2net_human_seg (salient-person model).
+    birefnet-portrait is no longer used: it is a portrait-matting model (poor on
+    whole bodies), ~1 GB to download and slow on ONNX Runtime."""
     try:
         from rembg import remove, new_session
         session_u2net = new_session('u2net_human_seg')
-        session_birefnet = new_session('birefnet-portrait')
     except ImportError:
         raise RuntimeError("rembg library not available. Please install with: pip install rembg")
     
@@ -175,17 +191,8 @@ def process_human_segmentation(input_dir, output_dir):
         try:
             original_image = Image.open(input_path).convert('RGB')
             
-            # Pass 1: u2net_human_seg - good for prominent humans
-            mask1, _, _ = segment_human_rembg(input_path, session_u2net)
-            
-            # Pass 2: birefnet-portrait - better for distant/small humans
-            mask2, _, _ = segment_human_rembg(input_path, session_birefnet)
-            
-            # Merge: take the maximum (union) of both masks
-            merged_mask = np.maximum(mask1, mask2)
-            
-            # Apply enhanced processing on merged mask
-            enhanced_image = apply_enhanced_mask(original_image, merged_mask)
+            mask, _, _ = segment_human_rembg(input_path, session_u2net)
+            enhanced_image = apply_enhanced_mask(original_image, mask)
             
             # Save result
             enhanced_image.save(output_path)
@@ -347,15 +354,19 @@ if __name__ == '__main__':
     print(f"Has_alpha:{has_alpha}")
     try:
         # Validate model parameter
-        allowed_models = ["u2net", "u2net_human_seg", "birefnet-portrait"]
+        # "person" (and the old name "u2net_human_seg"): Grounding DINO + SAM 2.1.
+        # "u2net_human_seg_rembg": the old rembg model only.
+        allowed_models = ["u2net", "person", "u2net_human_seg", "u2net_human_seg_rembg"]
         if model not in allowed_models:
             raise ValueError(f"Invalid model: {model}")
-        
-        # Use enhanced human segmentation for 'human' model
-        if model == "u2net_human_seg":
-            print("Using enhanced human segmentation...")
+
+        if model in ("person", "u2net_human_seg"):
+            print("Using person segmentation (Grounding DINO + SAM 2.1)...")
+            processed_count = process_person_segmentation(input_dir_path, output_dir_path)
+            print(f"Processed {processed_count} images with person segmentation")
+        elif model == "u2net_human_seg_rembg":
             processed_count = process_human_segmentation(input_dir_path, output_dir_path)
-            print(f"Processed {processed_count} images with enhanced human segmentation")
+            print(f"Processed {processed_count} images with rembg u2net_human_seg")
         else:
             # Use original backgroundremover for other models
             # Validate numeric parameters

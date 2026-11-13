@@ -410,6 +410,10 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
     - **Enable:** (boolean), whether to remove objects from images
     - **Action:** (string), whether to erase or remove the objects.
     - **Objects:** (string list), the list of objects to remove. Currently only human is supported.
+    - **How people are found:** Grounding DINO (`IDEA-Research/grounding-dino-base`) finds a box around each person and SAM 2.1 (`facebook/sam2.1-hiera-large`) segments each one, so whole bodies, groups and small or distant people are masked. Both are Apache-2.0, run on the GPU (bfloat16 on A10G/L4/L40S), are downloaded from Hugging Face on first use, and are the same models `removeSky` uses. Images without a detected person are left unchanged. If the models cannot be loaded, the job falls back to rembg `u2net_human_seg`. With `erase`, the diffusion eraser output is used only inside the (slightly grown) person mask; the rest of each image keeps its original pixels and resolution.
+    - **`remove` vs `erase`:**
+        - `remove` masks the people out. They are blacked out in the images and added to `masks/` (white = keep), grown by 1% of the short image side, so COLMAP extracts no features there and the splat trainers ignore those pixels; the other views fill the area in. Images without people get an all-white mask. The masks are combined with uploaded masks and with the `removeSky` / `removeLensFlare` masks, and overlay previews are written to `mask_previews/person/`. Not applied with `sphericalCamera.enable` true. Models that do not use masks (splatfacto-w-light, 3dgrt, nerfacto, ags-mesh) train on the black pixels, so use `erase` with those.
+        - `erase` replaces the people with AttentiveEraser inpainting and trains on the inpainted pixels (no person masks are written). Slower: one diffusion pass per image with a person.
 
     <div align="center">
     <img src="assets/images/object-removal-example.png" width=70%> 

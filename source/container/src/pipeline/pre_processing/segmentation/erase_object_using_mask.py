@@ -54,6 +54,7 @@ Optional Arguments:
 """
 
 import os
+import shutil
 import sys
 
 # Disable xformers before importing any diffusers/torch modules
@@ -120,6 +121,30 @@ def preprocess_mask(mask_path, width, height, device, dtype, save_refined=False,
             cv2.imwrite(refined_path, mask_uint8)
 
     return mask
+
+def copy_original(input_path, output_path):
+    """Keep an unchanged image as-is (no decode/re-encode; nothing to do in place)."""
+    if os.path.abspath(input_path) != os.path.abspath(output_path):
+        shutil.copy2(input_path, output_path)
+
+
+def composite_masked_region(input_path, erased_rgb, mask, output_path, grow_fraction=0.01):
+    """Paste the eraser output (full-size RGB uint8) into the original image only
+    inside the mask, grown by ~1% of the short side and feathered."""
+    orig = cv2.imread(input_path, cv2.IMREAD_UNCHANGED)
+    h, w = orig.shape[:2]
+    m = (mask.squeeze().float().cpu().numpy() > 0.5).astype(np.uint8) * 255
+    m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+    r = max(3, int(round(min(h, w) * grow_fraction)))
+    m = cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
+    a = cv2.GaussianBlur(m.astype(np.float32) / 255.0, (0, 0), sigmaX=r / 2.0)[:, :, None]
+    erased_bgr = cv2.cvtColor(erased_rgb, cv2.COLOR_RGB2BGR).astype(np.float32)
+    if orig.ndim == 2:
+        orig = cv2.cvtColor(orig, cv2.COLOR_GRAY2BGR)
+    out = orig.astype(np.float32).copy()
+    out[:, :, :3] = out[:, :, :3] * (1 - a) + erased_bgr * a
+    cv2.imwrite(output_path, np.clip(out, 0, 255).astype(orig.dtype))
+
 
 def make_redder(img, mask, increase_factor=0.4):
     img_redder = img.clone()
@@ -208,30 +233,31 @@ def process_single_image(image_file, mask_path, args, pipeline, device, dtype, r
             return
 
         width, height = 1024, 1024
-        seed = int(args.seed)
-        generator = torch.Generator('cuda').manual_seed(seed) if str(args.use_gpu).lower() == "true" else torch.Generator().manual_seed(seed)
-        source_image = preprocess_image(input_path, width, height, device, dtype)
-        
-        # Always create the refined mask
+        # Mask first: images without a person skip the image load and the eraser.
         mask = preprocess_mask(mask_path, width, height, device, dtype, save_refined=True, refined_dir=refined_mask_dir, filename=os.path.basename(mask_path))
 
         # Check if mask is black after preprocessing - skip AttentiveEraser but keep refined mask
         mask_max = torch.max(mask).item() if mask is not None else 0
         if mask_max < 0.001:
-            log.info(f"Black mask for {image_file} (filtered out after preprocessing), copying original")
-            Image.open(input_path).save(output_path)
+            log.info(f"Black mask for {image_file} (filtered out after preprocessing), keeping original")
+            copy_original(input_path, output_path)
             return
 
-        # Process with AttentiveEraser and save result directly
+        seed = int(args.seed)
+        generator = torch.Generator('cuda').manual_seed(seed) if str(args.use_gpu).lower() == "true" else torch.Generator().manual_seed(seed)
+        source_image = preprocess_image(input_path, width, height, device, dtype)
+
+        # Process with AttentiveEraser
         result_image = run_attentive_eraser(source_image, mask, args, pipeline, generator, height, width)
-        
-        # Resize back to original dimensions if needed and save
-        if orig_width != 1024 or orig_height != 1024:
-            result_pil = to_pil_image(result_image.clamp(0, 1))
+
+        # The eraser works on a 1024x1024 resize of the whole image. Only the
+        # (grown, feathered) person region is taken from its output; every other
+        # pixel stays the original at full resolution, so the rest of the image is
+        # not blurred or warped by the square resize.
+        result_pil = to_pil_image(result_image.float().clamp(0, 1).cpu())
+        if result_pil.size != (orig_width, orig_height):
             result_pil = result_pil.resize((orig_width, orig_height), Image.LANCZOS)
-            result_pil.save(output_path)
-        else:
-            save_image(result_image.clamp(0, 1), output_path)
+        composite_masked_region(input_path, np.array(result_pil.convert('RGB')), mask, output_path)
         
         # Save diff if requested
         if str(args.save_diff).lower() == "true":
@@ -367,8 +393,13 @@ if __name__ == '__main__':
         else:
             os.makedirs(args.output_dir, exist_ok=True)
 
-        # Create refined masks directory
-        refined_mask_dir = os.path.join(args.output_dir, 'refined_masks')
+        # Create refined masks directory. When erasing in place, keep it out of the
+        # image folder: COLMAP reads image folders recursively and would treat the
+        # masks as images.
+        if os.path.abspath(args.output_dir) == os.path.abspath(args.input_dir):
+            refined_mask_dir = os.path.abspath(args.output_dir).rstrip('\\/') + '_refined_masks'
+        else:
+            refined_mask_dir = os.path.join(args.output_dir, 'refined_masks')
         os.makedirs(refined_mask_dir, exist_ok=True)
 
         if str(args.use_gpu).lower() == "true":
@@ -469,11 +500,9 @@ if __name__ == '__main__':
                     break
 
             if mask_path is None:
-                log.warning(f"No mask found for {image_file}, copying original")
-                # Copy original image to output
-                input_path = os.path.join(args.input_dir, image_file)
-                output_path = os.path.join(args.output_dir, image_file)
-                Image.open(input_path).save(output_path)
+                log.warning(f"No mask found for {image_file}, keeping original")
+                copy_original(os.path.join(args.input_dir, image_file),
+                              os.path.join(args.output_dir, image_file))
                 continue
 
             # Add all valid mask pairs - black mask detection happens during processing

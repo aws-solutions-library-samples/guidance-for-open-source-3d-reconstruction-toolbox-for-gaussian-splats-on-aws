@@ -71,7 +71,7 @@ def person_mask(seg_path, min_area_fraction, min_blob_px, keep=None):
     """Binary person mask (uint8, 255 = person) from a remove_background output,
     or None when no person blob is large enough (same test as panorama_sfm.py).
     keep: optional bool mask of pixels to consider (False = already masked, e.g. an
-    uploaded rig mask). u2net_human_seg also segments large dark foreground objects
+    uploaded rig mask). The segmenter can also pick up large foreground objects
     such as the rig, so those pixels are removed before the size test; otherwise
     every frame would count as containing a person."""
     seg = cv2.imread(seg_path, cv2.IMREAD_UNCHANGED)
@@ -124,7 +124,8 @@ def main():
     parser.add_argument('--images-dir', required=True, help='images/ folder with camera sub-folders')
     parser.add_argument('--work-dir', required=True, help='Folder for intermediate files')
     parser.add_argument('--action', choices=['remove', 'erase'], default='remove')
-    parser.add_argument('-m', '--model', default='u2net_human_seg', help='remove_background.py model')
+    parser.add_argument('-m', '--model', default='person',
+                        help='remove_background.py model (person = Grounding DINO + SAM 2.1)')
     parser.add_argument('-nt', '--num_threads', default='1')
     parser.add_argument('-ng', '--num_gpus', default='0')
     parser.add_argument('-mp', '--model_path', default='stable-diffusion-xl-base-1.0',

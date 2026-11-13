@@ -665,7 +665,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--object_action", default="erase", choices=["erase", "remove"],
     )
-    parser.add_argument("-m", "--model", default="u2net_human_seg")
+    parser.add_argument("-m", "--model", default="person")
     parser.add_argument("-nt", "--num_threads", type=int, default=32)
     parser.add_argument("-ng", "--num_gpus", type=int, default=1)
     parser.add_argument("-gpu", "--use_gpu", default="true")

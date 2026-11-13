@@ -677,7 +677,7 @@ RUN mkdir -p ${CODE_PATH}/reconstruction ${CODE_PATH}/training ${CODE_PATH}/sphe
     ${CODE_PATH}/post_processing ${CODE_PATH}/sam
 # Copy application source — grouped to minimize layers
 # Cache-bust: increment when pipeline source files change
-ARG PIPELINE_CACHE_BUST=46
+ARG PIPELINE_CACHE_BUST=47
 COPY ./src/entrypoint.sh ./src/main.py ./src/config.json ./src/pipeline/pipeline.py ./src/pipeline/utils.py ${CODE_PATH}/
 COPY ./src/pipeline/reconstruction/extract_poses_imgs.py \
      ./src/pipeline/reconstruction/process_pose_transforms.py \
@@ -696,6 +696,8 @@ COPY ./src/pipeline/pre_processing/segmentation/remove_object_using_mask.py \
      ./src/pipeline/pre_processing/segmentation/remove_background.py \
      ./src/pipeline/pre_processing/segmentation/erase_object_using_mask.py \
      ./src/pipeline/pre_processing/segmentation/remove_object_rig.py \
+     ./src/pipeline/pre_processing/segmentation/person_segmentation.py \
+     ./src/pipeline/pre_processing/segmentation/write_person_masks.py \
      ${CODE_PATH}/pre_processing/segmentation/
 COPY ./src/pipeline/pre_processing/segmentation/remove_background_sam2.py ${CODE_PATH}/sam/
 COPY ./src/pipeline/pre_processing/video/simple_video_to_images.py \
@@ -744,8 +746,22 @@ COPY ./src/pipeline/post_processing/rotate_splat.py \
      ./src/pipeline/post_processing/mesh_extraction_refine.py \
      ./src/pipeline/post_processing/mesh_extraction_regularize.py \
      ./src/pipeline/post_processing/mesh_extraction_utils.py \
+     ./src/pipeline/post_processing/splat_transform_safe_exit.mjs \
      ${CODE_PATH}/post_processing/
 RUN chmod +x ${CODE_PATH}/entrypoint.sh ${CODE_PATH}/training/run_gsplat_trainer.sh
+
+# splat-transform calls process.exit() with its WebGPU device still alive, and Dawn
+# intermittently segfaults (exit 139) tearing it down after the output is written.
+# This wrapper (first on PATH, ahead of npm's /usr/bin link) preloads a hook that
+# destroys the device before exit. Every pipeline call uses plain "splat-transform".
+RUN ST_CLI="$(npm root -g)/@playcanvas/splat-transform/bin/cli.mjs" \
+    && test -f "${ST_CLI}" \
+    && rm -f /usr/local/bin/splat-transform \
+    && printf '#!/bin/sh\nexec node --import %s %s "$@"\n' \
+       "${CODE_PATH}/post_processing/splat_transform_safe_exit.mjs" "${ST_CLI}" \
+       > /usr/local/bin/splat-transform \
+    && chmod +x /usr/local/bin/splat-transform \
+    && splat-transform --version
 
 # Verify installed versions match expected versions
 RUN echo "=== VERSION VERIFICATION ===" \

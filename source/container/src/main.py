@@ -1811,14 +1811,8 @@ if __name__ == "__main__":
                 log.info(f"Spherical: excluding cubemap faces: {exclude_str}")
 
             if config['REMOVE_OBJECT'] == "true":
-                bg_removal_model = "u2net_human_seg"
-                try:
-                    objects_list = ast.literal_eval(config['OBJECT_REMOVAL_OBJECTS'])
-                    if "human" in [obj.lower() for obj in objects_list]:
-                        bg_removal_model = "u2net_human_seg"
-                except (ValueError, SyntaxError):
-                    if "human" in config['OBJECT_REMOVAL_OBJECTS'].lower():
-                        bg_removal_model = "u2net_human_seg"
+                # "person": Grounding DINO + SAM 2.1 (person_segmentation.py)
+                bg_removal_model = "person"
                 args.extend(["--remove_object",
                              "--object_action", config['OBJECT_REMOVAL_ACTION'],
                              "-m", bg_removal_model,
@@ -1844,6 +1838,7 @@ if __name__ == "__main__":
     # PRE-PROCESS COMPONENT:
     # Remove Objects
     ##################################
+    PERSON_MASKS = False  # True when the removed people are written to masks/
     try:
         # Skip object removal if using spherical camera (handled in panorama_sfm.py).
         # Camera-rig uploads (images/<camera>/<frame>.jpg) use remove_object_rig.py,
@@ -1856,11 +1851,12 @@ if __name__ == "__main__":
             try:
                 objects_list = ast.literal_eval(config['OBJECT_REMOVAL_OBJECTS'])
                 if "human" in [obj.lower() for obj in objects_list]:
-                    bg_removal_model = "u2net_human_seg"
+                    # Grounding DINO + SAM 2.1 person masks (person_segmentation.py)
+                    bg_removal_model = "person"
             except (ValueError, SyntaxError):
                 # Fallback to string check if parsing fails
                 if "human" in config['OBJECT_REMOVAL_OBJECTS'].lower():
-                    bg_removal_model = "u2net_human_seg"
+                    bg_removal_model = "person"
             if bg_removal_model is not None and RIG_CONFIG:
                 _rig_action = "remove" if config['OBJECT_REMOVAL_ACTION'] == "remove" else "erase"
                 log.info(f"Camera rig: object removal ({_rig_action}) runs per camera folder")
@@ -1877,8 +1873,8 @@ if __name__ == "__main__":
                     "-gpu", str(USE_GPU),
                     "-log", config['LOG_VERBOSITY'],
                     "-method", "SIP",
-                    # Uploaded rig masks: u2net_human_seg also picks up the rig, so
-                    # leave already-masked pixels out of the person masks.
+                    # Uploaded rig masks: the detector must not see the rig (it can be
+                    # segmented as a person), so already-masked pixels are left out.
                     "--masks-dir", os.path.join(config['DATASET_PATH'], "masks")
                 ]
                 pipeline.create_component(
@@ -1890,6 +1886,8 @@ if __name__ == "__main__":
                     cwd=current_dir_path,
                     requires_gpu=True
                 )
+                # Masks of the frames that were changed: <camera>/<stem>.png, white = person
+                _person_dir = os.path.join(config['DATASET_PATH'], "object_removal_rig", "person_masks")
             elif bg_removal_model is not None:
                 args = [
                     "-i", image_path,
@@ -1941,6 +1939,28 @@ if __name__ == "__main__":
                         cwd=current_dir_path,
                         requires_gpu=True
                     )
+                # remove_background output: <stem>.png RGBA, alpha = person
+                _person_dir = filter_output_dir
+            if bg_removal_model is not None and config['OBJECT_REMOVAL_ACTION'] == "remove":
+                # OBJECT_REMOVAL_ACTION=remove masks the people out: they are added to
+                # the training masks (masks/, white = keep), so COLMAP extracts no
+                # features there and the trainers ignore those pixels. With "erase" the
+                # inpainted pixels are trained on, so no masks are written. Runs before
+                # the sky / lens flare steps, which AND their masks with these.
+                pipeline.create_component(
+                    name="Person-Masks",
+                    comp_type=ComponentType.PRE_PROCESSING,
+                    comp_environ=ComponentEnvironment.PYTHON,
+                    command="pre_processing/segmentation/write_person_masks.py",
+                    args=["--images-dir", image_path,
+                          "--person-dir", _person_dir,
+                          "--masks-dir", os.path.join(config['DATASET_PATH'], "masks"),
+                          "--debug-dir", os.path.join(config['DATASET_PATH'], "mask_previews", "person")],
+                    cwd=current_dir_path,
+                    requires_gpu=False
+                )
+                PERSON_MASKS = True
+                ZIP_HAS_MASKS = True
     except Exception as e:
         error_message = f"Issue creating human subject removal component: {e}"
         pipeline.report_error(740, error_message)
@@ -1954,7 +1974,7 @@ if __name__ == "__main__":
     # the final images. Masks are written to masks/ (white = keep) and AND-ed with
     # any uploaded masks.
     ##################################
-    GENERATED_MASKS = False
+    GENERATED_MASKS = PERSON_MASKS  # person masks from object removal (above)
     try:
         if (REMOVE_LENS_FLARE or REMOVE_SKY) and config['SPHERICAL_CAMERA'] == "true":
             log.warning("REMOVE_LENS_FLARE/REMOVE_SKY are not supported with SPHERICAL_CAMERA=true "
