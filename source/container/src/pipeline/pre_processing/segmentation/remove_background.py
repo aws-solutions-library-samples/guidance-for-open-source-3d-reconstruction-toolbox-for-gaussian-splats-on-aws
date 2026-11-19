@@ -29,6 +29,11 @@ import subprocess
 import shutil
 import numpy as np
 from PIL import Image
+try:
+    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+    from image_formats import IMAGE_EXTS
 
 def copy_images_to_temp(original_dir, temp_dir):
     """
@@ -42,7 +47,7 @@ def copy_images_to_temp(original_dir, temp_dir):
         int: Number of images copied
     """
     # Define supported image extensions
-    image_extensions = ('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')
+    image_extensions = IMAGE_EXTS
     
     # Create temp directory if it doesn't exist
     os.makedirs(temp_dir, exist_ok=True)
@@ -175,7 +180,7 @@ def process_human_segmentation(input_dir, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     
     # Get image files
-    image_extensions = ('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')
+    image_extensions = IMAGE_EXTS
     image_files = [
         f for f in os.listdir(input_dir)
         if os.path.isfile(os.path.join(input_dir, f))
@@ -295,9 +300,7 @@ if __name__ == '__main__':
     # Get a list of all image file names
     files = [f for f in os.listdir(input_dir_path) \
             if (os.path.isfile(os.path.join(input_dir_path, f))) and \
-                (str((os.path.splitext(f)[1]).lower() == ".jpg" or \
-                    str(os.path.splitext(f)[1]).lower() == ".png") or \
-                        str((os.path.splitext(f)[1]).lower() == ".jpeg"))]
+                os.path.splitext(f)[1].lower() in IMAGE_EXTS]
     if len(files) == 0:
         print(f"Input data directory {input_dir_path} does not contain any images.")
         
@@ -312,9 +315,7 @@ if __name__ == '__main__':
                 # Refresh the files list
                 files = [f for f in os.listdir(input_dir_path) \
                         if (os.path.isfile(os.path.join(input_dir_path, f))) and \
-                            (str((os.path.splitext(f)[1]).lower() == ".jpg" or \
-                                str(os.path.splitext(f)[1]).lower() == ".png") or \
-                                    str((os.path.splitext(f)[1]).lower() == ".jpeg"))]
+                            os.path.splitext(f)[1].lower() in IMAGE_EXTS]
                 files = sorted(files)
             else:
                 print("No images found in original directory either.")

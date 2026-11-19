@@ -179,6 +179,10 @@ def lambda_handler(event, context):
         str(_post.get("generateMesh", "true")).lower() == "true"
         or str(_post.get("extractMeshGs", "false")).lower() == "true"
     ).lower()
+    # model.tar.gz contents: full (default), slim (what resume/refine needs), none
+    archive_mode = str(_post.get("archiveMode", "full")).strip().lower()
+    if archive_mode not in ("full", "slim", "none"):
+        archive_mode = "full"
 
     # Pre-training COLMAP model steps live under reconstruction.posePriors (where
     # Gradio and generate_splat.py write them). calibrateRig is also accepted
@@ -317,7 +321,8 @@ def lambda_handler(event, context):
                     "collisionSceneType": str(json_content["postProcessing"].get("collisionSceneType", "outdoor")),
                     "collisionSeedPos": str(json_content["postProcessing"].get("collisionSeedPos", "0,0,0")),
                     "generateLod": str(json_content["postProcessing"].get("generateLod", "false")),
-                    "generateMesh": generate_mesh
+                    "generateMesh": generate_mesh,
+                    "archiveMode": archive_mode
                 }
 
                 try:
@@ -422,6 +427,7 @@ def lambda_handler(event, context):
                     "COLLISION_SEED_POS": str(json_content["postProcessing"].get("collisionSeedPos", "0,0,0")),
                     "GENERATE_LOD": str(json_content["postProcessing"].get("generateLod", "false")),
                     "GENERATE_MESH": generate_mesh,
+                    "ARCHIVE_MODE": archive_mode,
                     "DDB_TABLE_NAME": os.environ.get("DDB_TABLE_NAME", ""),
                     "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-east-1"))
                 },

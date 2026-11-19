@@ -33,7 +33,7 @@ This guidance will:
 
 - create the infrastructure required to create a Gaussian splat from a video or set of images
 - create the mechanism to run the code and perform 3D reconstruction
-- enable a user to create a 3D Gaussian splat using open source tools and AWS by uploading a video (.mp4 or .mov) or images (.png or .jpg) and metadata (.json) into S3
+- enable a user to create a 3D Gaussian splat using open source tools and AWS by uploading a video (.mp4 or .mov) or images (.png, .jpg or lossless .webp) and metadata (.json) into S3
 - provide a 3D viewer for viewing the photo-realistic effects and performant nature of Gaussian splats
 
 ### Architecture Diagram
@@ -105,7 +105,7 @@ Current features and open source libraries include:
 | Post Processing  | Export Gaussian Splat and Metadata                           | [Splat-Transform](https://github.com/playcanvas/splat-transform) [(MIT)](https://github.com/playcanvas/splat-transform#MIT-1-ov-file), [spz](https://github.com/nianticlabs/spz/tree/main) [(MIT)](https://github.com/nianticlabs/spz/tree/main#MIT-1-ov-file) | Yes | Supports outputs .ply, .spz, .sog, .usdz (beta), .mp4(splat render), .jpg(thumbnail), metrics(psnr, lpips, ssim)                                                                               |
 | Post Processing  | Transform/Rotate all generated objects from native to viewer | [Splat-Transform](https://github.com/playcanvas/splat-transform) [(MIT)](https://github.com/playcanvas/splat-transform#MIT-1-ov-file) | Yes | Supports Gradio interface coordinate system             |
 | Post Processing  | Generate collision voxel octree and mesh from splat          | [Splat-Transform](https://github.com/playcanvas/splat-transform) [(MIT)](https://github.com/playcanvas/splat-transform#MIT-1-ov-file) | Yes | Outputs .voxel.json/.voxel.bin (SVO) and .collision.glb; supports indoor, outdoor, object scene types |
-| Post Processing  | Generate streamed multi-LOD SOG bundle from splat            | [Splat-Transform](https://github.com/playcanvas/splat-transform) [(MIT)](https://github.com/playcanvas/splat-transform#MIT-1-ov-file) | No  | Outputs lod-meta.json with 4 decimation levels (100%, 50%, 25%, 12.5%) for progressive streaming |
+| Post Processing  | Generate streamed multi-LOD SOG bundle from splat            | [Splat-Transform](https://github.com/playcanvas/splat-transform) [(MIT)](https://github.com/playcanvas/splat-transform#MIT-1-ov-file) | No  | Outputs lod-meta.json with 4 decimation levels (100%, 50%, 25%, 12.5%) for progressive streaming, delivered as `<name>-lod.zip` |
 | Post Processing  | Crop all generated objects                                   | | Yes | Supports environments or rigid_objects to reduce noise.             |
 | Post Processing  | Extract textured mesh from Gaussian splat                    | [xatlas](https://github.com/jpcy/xatlas) [(MIT)](https://github.com/jpcy/xatlas/blob/master/LICENSE) | Yes | TSDF fusion + surface regularization + UV unwrap + camera-projection texture baking. Outputs mesh.glb for splatfacto/gsplat models when generateMesh is enabled (dn-splatter/ags-mesh use their native extractor). |
 | User Interface   | Submit jobs, view results                                    | [Gradio](https://github.com/gradio-app/gradio) [(Apache-2.0)](https://github.com/gradio-app/gradio#Apache-2.0-1-ov-file) | No |

@@ -61,6 +61,7 @@ The job metadata JSON file must follow this structure:
         "collisionSeedPos": "0,0,0",
         "generateLod": false,
         "generateMesh": true,
+        "archiveMode": "full",
         "plyCoords": "rhyu",
         "spzCoords": "rhyu",
         "sogCoords": "rhyu",

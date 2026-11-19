@@ -73,6 +73,11 @@ import torch.nn.functional as Functional
 from torchvision.utils import save_image
 from diffusers.utils import load_image
 from torchvision.transforms.functional import to_tensor, gaussian_blur, to_pil_image
+try:
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image
 
 def preprocess_image(image_path, width, height, device, dtype):
     image = to_tensor((load_image(image_path)))
@@ -143,7 +148,7 @@ def composite_masked_region(input_path, erased_rgb, mask, output_path, grow_frac
         orig = cv2.cvtColor(orig, cv2.COLOR_GRAY2BGR)
     out = orig.astype(np.float32).copy()
     out[:, :, :3] = out[:, :, :3] * (1 - a) + erased_bgr * a
-    cv2.imwrite(output_path, np.clip(out, 0, 255).astype(orig.dtype))
+    imwrite_image(output_path, np.clip(out, 0, 255).astype(orig.dtype))
 
 
 def make_redder(img, mask, increase_factor=0.4):
@@ -414,7 +419,7 @@ if __name__ == '__main__':
         if not os.path.isdir(args.mask_dir):
             raise ValueError(f"Mask directory {args.mask_dir} does not exist")
 
-        image_files = [f for f in os.listdir(args.input_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        image_files = [f for f in os.listdir(args.input_dir) if f.lower().endswith(IMAGE_EXTS)]
         if not image_files:
             raise ValueError(f"No valid image files found in {args.input_dir}")
 

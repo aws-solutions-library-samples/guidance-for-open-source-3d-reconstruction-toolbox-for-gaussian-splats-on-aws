@@ -32,8 +32,13 @@ import os
 
 import cv2
 import numpy as np
+import sys
+try:
+    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from image_formats import IMAGE_EXTS
 
-IMAGE_EXTS = (".jpg", ".jpeg", ".png")
 
 
 def list_images(images_dir):

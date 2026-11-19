@@ -31,6 +31,11 @@ import subprocess
 import sys
 
 import yaml
+try:
+    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from image_formats import IMAGE_EXTS
 
 PINHOLE_MODELS = ("PINHOLE", "SIMPLE_PINHOLE")
 METHOD_NAME = "FasterGS"
@@ -146,7 +151,7 @@ def choose_preloading_level(image_dir, num_images, image_scale):
         from PIL import Image
         sample = next(
             (os.path.join(r, f) for r, _, fs in os.walk(image_dir, followlinks=True)
-             for f in fs if f.lower().endswith((".png", ".jpg", ".jpeg"))),
+             for f in fs if f.lower().endswith(IMAGE_EXTS)),
             None,
         )
         if sample is None or not torch.cuda.is_available():

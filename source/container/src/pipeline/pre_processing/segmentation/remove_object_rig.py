@@ -49,8 +49,12 @@ import numpy as np
 # mask_io lives one folder up (pre_processing/), in the repo and in the container.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from mask_io import read_existing  # noqa: E402
+try:
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image
 
-IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
 SKIP_DIRS = {'refined_masks'}
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -198,7 +202,7 @@ def main():
                     image = image.copy()
                     image[~keep] = image[keep].mean(axis=0).astype(np.uint8)
                     n_masked += 1
-                cv2.imwrite(os.path.join(det_dir, name), image)
+                imwrite_image(os.path.join(det_dir, name), image)
             log.info("%s: %d of %d frames have an uploaded mask; masked pixels hidden from the detector",
                      rel, n_masked, len(files))
 
@@ -220,7 +224,7 @@ def main():
             cv2.imwrite(os.path.join(mask_dir, stem + '.png'), mask)
             changed.append(name)
             if args.action == 'remove':
-                cv2.imwrite(os.path.join(out_dir, name), black_out(image, mask))
+                imwrite_image(os.path.join(out_dir, name), black_out(image, mask))
         log.info("%s: %d of %d frames contain people", rel, len(changed), len(files))
 
         if args.action == 'erase' and changed:

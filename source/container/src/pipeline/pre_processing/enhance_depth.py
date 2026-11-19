@@ -23,6 +23,11 @@
 import argparse
 import os
 import sys
+try:
+    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from image_formats import IMAGE_EXTS
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +290,7 @@ def enhance_depth_dir(depth_dir: str, images_dir: str, masks_dir: str | None, de
 
         # Find matching RGB: same relative subdir + stem, any image extension
         rgb_path = None
-        for ext in (".png", ".jpg", ".jpeg"):
+        for ext in IMAGE_EXTS:
             candidate = os.path.join(images_dir, subdir, stem + ext)
             if os.path.exists(candidate):
                 rgb_path = candidate

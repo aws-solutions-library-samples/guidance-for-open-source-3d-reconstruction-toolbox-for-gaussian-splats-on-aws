@@ -51,9 +51,13 @@ import shutil
 import sys
 
 import numpy as np
+try:
+    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from image_formats import IMAGE_EXTS
 
 TAG = "[Bundle-Adjust]"
-IMAGE_EXTS = (".jpg", ".jpeg", ".png")
 
 
 def log(msg):

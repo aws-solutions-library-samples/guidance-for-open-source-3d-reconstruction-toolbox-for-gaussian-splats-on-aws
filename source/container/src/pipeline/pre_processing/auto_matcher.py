@@ -47,6 +47,11 @@ import statistics
 import sys
 
 import cv2
+try:
+    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from image_formats import IMAGE_EXTS
 
 # Sampling
 SAMPLE_PAIRS = 30                 # pairs per stride level
@@ -63,7 +68,7 @@ VOCAB_IMAGE_THRESH = 1000         # image count above which vocab is preferred
 
 
 def get_image_files(image_dir):
-    exts = ('.png', '.jpg', '.jpeg')
+    exts = IMAGE_EXTS
     return sorted([
         os.path.join(image_dir, f) for f in os.listdir(image_dir)
         if f.lower().endswith(exts) and os.path.isfile(os.path.join(image_dir, f))

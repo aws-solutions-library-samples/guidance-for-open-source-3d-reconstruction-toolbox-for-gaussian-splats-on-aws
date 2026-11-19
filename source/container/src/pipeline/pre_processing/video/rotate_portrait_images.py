@@ -26,6 +26,12 @@ import cv2
 import argparse
 import subprocess
 import json
+import sys
+try:
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image
 
 def check_and_rotate_portrait(image_dir: str, dataset_path: str) -> None:
     """Check if video was portrait using rotation metadata and rotate extracted frames if needed"""
@@ -90,7 +96,7 @@ def check_and_rotate_portrait(image_dir: str, dataset_path: str) -> None:
     if is_portrait:
         print(f"[DEBUG] Portrait video detected, rotating extracted images")
         
-        images = sorted([f for f in os.listdir(image_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+        images = sorted([f for f in os.listdir(image_dir) if f.lower().endswith(IMAGE_EXTS)])
         print(f"[DEBUG] Found {len(images)} images to rotate")
         
         if not images:
@@ -102,7 +108,7 @@ def check_and_rotate_portrait(image_dir: str, dataset_path: str) -> None:
             img = cv2.imread(img_path)
             if img is not None:
                 rotated = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-                cv2.imwrite(img_path, rotated)
+                imwrite_image(img_path, rotated)
         
         # Write marker file
         marker = os.path.join(dataset_path, '.video_orientation')

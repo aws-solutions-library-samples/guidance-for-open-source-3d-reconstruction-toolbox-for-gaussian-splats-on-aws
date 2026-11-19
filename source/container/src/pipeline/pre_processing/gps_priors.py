@@ -47,7 +47,8 @@ import sys
 import zipfile
 
 TAG = "[GPS-Priors]"
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
+# image_formats.IMAGE_EXTS plus TIFF (GPS EXIF can also come from TIFF uploads)
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff")
 GPS_IFD = 0x8825
 DEFAULT_STD_M = {"x": 5.0, "y": 5.0, "z": 10.0}
 

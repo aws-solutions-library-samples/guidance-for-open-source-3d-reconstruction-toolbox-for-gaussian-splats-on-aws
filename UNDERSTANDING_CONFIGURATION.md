@@ -116,7 +116,7 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
 - **General**
     - **Workflow input:**
         - Video (.mov or .mp4)
-        - Archive (.zip) of images (.png or .jpeg)
+        - Archive (.zip) of images (.png, .jpg/.jpeg, or lossless .webp; masks stay .png, e.g. `000000.webp.png`)
         - Archive (.zip) of pose priors and images (transforms.json, colmap model files)
         - Archive (.tar.gz) of previous dataset and checkpoint (for resume training)
     - **Workflow output:**
@@ -359,12 +359,18 @@ Each deployment, CDK and Terraform, have their own deployment configuration whic
         - Default: `"outdoor"`
     - **Collision seed position:** (string), `"x,y,z"` world-space point used as the seed for `--filter-cluster` and voxel fill/carve passes. Should be a known point inside the scene (e.g. a walkable floor position). If the default `"0,0,0"` is outside or inside solid geometry, adjust to a point clearly inside the open space.
         - Default: `"0,0,0"`
-    - **Generate LOD:** (boolean), whether to generate a streamed multi-LOD SOG bundle (`lod-meta.json`) from the splat. Produces 4 decimation levels (100%, 50%, 25%, 12.5%) that PlayCanvas viewers can stream progressively based on camera distance.
+    - **Generate LOD:** (boolean), whether to generate a streamed multi-LOD SOG bundle (`lod-meta.json`) from the splat. Produces 4 decimation levels (100%, 50%, 25%, 12.5%) that PlayCanvas viewers can stream progressively based on camera distance. The bundle (`lod-meta.json` plus its chunk folders) is delivered as `<name>-lod.zip` in the job output; local debug runs copy it to `workflow-output/<UUID>/`.
         - Valid values: `"true"`, `"false"`
         - Default: `"false"`
     - **Generate mesh:** (boolean), whether to extract a surface mesh from the trained model. The extractor depends on the model: `dn-splatter`, `dn-splatter-big`, and `ags-mesh` use their native TSDF extractor; other Gaussian splat models (splatfacto variants, gsplat) use TSDF fusion with surface regularization, xatlas UV unwrapping, and camera-projection texture baking. Both write `mesh.glb`, uploaded to S3 as `<name>.mesh.glb`. Not supported for `nerfacto`, `3dgrt`, `3dgut`, or `faster-gs`. A failed mesh extraction does not fail the job. The former `extractMeshGs` setting is accepted as an alias for this setting.
         - Valid values: `"true"`, `"false"`
         - Default: `"true"`
+    - **Archive mode:** (string, `archiveMode`), what goes into `output/model.tar.gz`, the dataset archive that refine/resume-training jobs start from. Applies to cloud (SageMaker, Batch) and local debug runs (`ARCHIVE_MODE` environment variable).
+        - `full`: the whole dataset folder.
+        - `slim`: only what resume training and export-only jobs read: images, masks, depths, the COLMAP model, `transforms.json`, rig/GPS files, model checkpoints and configs (gsplat: latest checkpoint only), and eval metrics. Leaves out pipeline work folders, COLMAP databases, copies of the upload, and outputs uploaded on their own (`.ply`, `.sog`, `.mp4`, LOD/collision zips, mesh).
+        - `none`: no archive (SageMaker still writes a small `model.tar.gz` holding the eval metrics). The job cannot be refined or resumed.
+        - Valid values: `"full"`, `"slim"`, `"none"`
+        - Default: `"full"`
     - **Ply Coordinates:** (string), the coordinate system to transform the .ply to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
     - **Spz Coordinates:** (string), the coordinate system to transform the .spz to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)
     - **Sog Coordinates:** (string), the coordinate system to transform the .sog to. Options include rhyu (right-hand, y-up, playcanvas), lhyu (left-hand, y-up, babylon.js), rhzu (right-hand, z-up, blender), and lhzu (left-hand, z-up, unreal)

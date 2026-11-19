@@ -185,6 +185,7 @@
           "COLLISION_SEED_POS.$": "$.envVars.COLLISION_SEED_POS",
           "GENERATE_LOD.$": "$.envVars.GENERATE_LOD",
           "GENERATE_MESH.$": "$.envVars.GENERATE_MESH",
+          "ARCHIVE_MODE.$": "$.envVars.ARCHIVE_MODE",
           "DDB_TABLE_NAME.$": "$.stateMachine.ddbTableName",
           "AWS_DEFAULT_REGION.$": "$.stateMachine.awsRegion"
         }

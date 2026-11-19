@@ -102,6 +102,7 @@ import threading as _threading
 from pathlib import Path
 from PIL import Image
 from pipeline import Pipeline, Status, ComponentEnvironment, ComponentType, Component
+from image_formats import IMAGE_EXTS
 from utils import (
     read_camera_params_from_file, validate_input_media,
     load_config, obj_to_glb, count_up_to, untar_gz, process_images,
@@ -115,8 +116,24 @@ from utils import (
     send_task_success, send_task_failure, send_task_heartbeat,
     flatten_images_for_gsplat, add_projected_observations_for_gsplat,
     remove_fully_masked_images_for_gsplat,
-    rebuild_points3d_tracks_for_gsplat
+    rebuild_points3d_tracks_for_gsplat,
+    ARCHIVE_MODES, archive_slim_exclusions, path_size
 )
+
+
+def remove_paths(paths):
+    """Delete files/folders (used for ARCHIVE_MODE=slim on SageMaker, which tars
+    /opt/ml/model itself). Returns the bytes freed."""
+    freed = 0
+    for p in paths:
+        if not os.path.lexists(p):
+            continue
+        freed += path_size(p) if not os.path.islink(p) else 0
+        if os.path.isdir(p) and not os.path.islink(p):
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            os.remove(p)
+    return freed
 
 
 def world_frame_dataparser_args(config, user_supplied_model=False):
@@ -140,6 +157,52 @@ def world_frame_dataparser_args(config, user_supplied_model=False):
               f"(--orientation-method none --center-method none)")
         return ["--orientation-method", "none", "--center-method", "none"]
     return []
+
+
+# nerfstudio's splatfacto configs are tuned for 30k steps, and ns-train's
+# --max-num-iterations changes none of the step-based schedules. Without scaling, extra
+# steps past 30k train with the position learning rate already at its floor (its decay
+# ends at 30k) and, for vanilla splatfacto, with densification long finished (15k).
+SPLATFACTO_REF_STEPS = 30000
+SPLATFACTO_REF_STOP_SPLIT = 15000       # vanilla/big: densify (split/clone/prune) until here
+SPLATFACTO_MCMC_REF_STOP_SPLIT = 25000  # upstream splatfacto-mcmc: relocate/add until here
+SPLATFACTO_REF_RESET_ALPHA_EVERY = 30   # in refine_every (100-step) units, i.e. every 3k steps
+
+
+def splatfacto_schedule_args(model, max_steps):
+    """Return (ns-train args, summary) that stretch splatfacto's 30k-step schedule to
+    max_steps, so longer runs spend the same share of steps on densification (coarse
+    training) and on the final refine-only phase.
+
+    Scale r = max_steps / 30000, never below 1: runs of 30k steps or fewer keep the
+    nerfstudio defaults. Scaled with r:
+      - stop-split-at: 15000 (vanilla/big) or 25000 (mcmc). The final 50% / 17% of
+        steps refine the existing Gaussians without adding new ones.
+      - reset-alpha-every (vanilla/big): same number of opacity resets in the
+        densification window.
+      - means, camera-opt and bilateral-grid learning-rate decay: decay over the whole run.
+    The resolution (full size from 6k) and SH-degree (degree 3 from 3k) ramp-ups stay as
+    they are: they are warm-up only.
+    """
+    r = max(1.0, max_steps / SPLATFACTO_REF_STEPS)
+    lr_decay_steps = int(round(SPLATFACTO_REF_STEPS * r))
+    args = []
+    if model == "splatfacto-mcmc":
+        stop_split_at = int(round(SPLATFACTO_MCMC_REF_STOP_SPLIT * r))
+        summary = (f"relocate/add Gaussians until step {stop_split_at:,}"
+                   + (" (whole run)" if stop_split_at >= max_steps else ""))
+    else:
+        stop_split_at = int(round(SPLATFACTO_REF_STOP_SPLIT * r))
+        reset_alpha_every = int(round(SPLATFACTO_REF_RESET_ALPHA_EVERY * r))
+        args.extend(["--pipeline.model.reset-alpha-every", str(reset_alpha_every)])
+        summary = (f"densify until step {stop_split_at:,}, "
+                   f"opacity reset every {reset_alpha_every * 100:,} steps")
+    args.extend(["--pipeline.model.stop-split-at", str(stop_split_at)])
+    for group in ("means", "camera-opt", "bilateral-grid"):
+        args.extend([f"--optimizers.{group}.scheduler.max-steps", str(lr_decay_steps)])
+    summary = (f"{model} schedule for {max_steps:,} steps (x{r:.2f} of 30k): {summary}, "
+               f"learning rates decay until step {lr_decay_steps:,}")
+    return args, summary
 
 
 # MCMC Gaussian cap estimate (splatfacto-mcmc, gsplat-depth-mcmc, multi-GPU gsplat mcmc).
@@ -225,7 +288,7 @@ def build_transparent_sky_images(images_dir, sky_dir, out_dir):
     n, sky_px, total_px = 0, 0, 0
     for root, _, files in os.walk(images_dir):
         for f in files:
-            if not f.lower().endswith(('.png', '.jpg', '.jpeg')):
+            if not f.lower().endswith(IMAGE_EXTS):
                 continue
             src = os.path.join(root, f)
             rel = os.path.relpath(src, images_dir)
@@ -279,6 +342,91 @@ def safe_extract_zip(zip_file_path, dest_path):
     return fixed
 
 
+# COLMAP 4.1 Caspar GPU bundle adjustment (-DCASPAR_ENABLED=ON in the Dockerfile).
+# In 4.1.1 its camera adapters cover only PINHOLE and SIMPLE_RADIAL: images with any
+# other model are SKIPPED by the solver (left unoptimized, only a warning), so Caspar
+# must only be selected when every camera in the database uses one of these.
+CASPAR_CAMERA_MODEL_IDS = {1: "PINHOLE", 2: "SIMPLE_RADIAL"}
+COLMAP_CAMERA_MODEL_NAMES = {0: "SIMPLE_PINHOLE", 1: "PINHOLE", 2: "SIMPLE_RADIAL", 3: "RADIAL",
+                             4: "OPENCV", 5: "OPENCV_FISHEYE", 6: "FULL_OPENCV", 7: "FOV",
+                             8: "SIMPLE_RADIAL_FISHEYE", 9: "RADIAL_FISHEYE", 10: "THIN_PRISM_FISHEYE"}
+_CASPAR_BUILT = None
+
+
+def colmap_has_caspar():
+    """True if the colmap binary was built with Caspar (its options only exist then)."""
+    global _CASPAR_BUILT
+    if _CASPAR_BUILT is None:
+        try:
+            out = subprocess.run(["colmap", "bundle_adjuster", "-h"], capture_output=True,
+                                 text=True, timeout=60)
+            _CASPAR_BUILT = "BundleAdjustmentCaspar" in (out.stdout + out.stderr)
+        except (OSError, subprocess.SubprocessError):
+            _CASPAR_BUILT = False
+    return _CASPAR_BUILT
+
+
+def _arg_value(args, flag, default):
+    return args[args.index(flag) + 1] if flag in args and args.index(flag) + 1 < len(args) else default
+
+
+def select_mapper_ba_backend(args, db_path, num_gpus, log):
+    """Set --Mapper.ba_global_backend CASPAR on a `colmap mapper` command when the GPU
+    solver can handle the whole problem, else leave COLMAP's Ceres default. Runs right
+    before the mapper, so it sees the cameras actually written to the database (rig
+    configs, GPS and metric focal-length overrides change the camera model at runtime).
+
+    Local BA (a few images after each registration) stays on Ceres: it is small and
+    Caspar's speedup is for medium to large problems. COLMAP_BA_BACKEND=ceres|caspar
+    (environment) forces the choice for testing; caspar still skips unsafe cases."""
+    for flag in ("--Mapper.ba_global_backend", "--Mapper.ba_local_backend"):
+        while flag in args:
+            j = args.index(flag)
+            del args[j:j + 2]
+    forced = os.environ.get("COLMAP_BA_BACKEND", "auto").strip().lower()
+
+    def _ceres(reason):
+        log.info(f"Mapper bundle adjustment: Ceres ({reason})")
+
+    if not args or args[0] != "mapper":
+        return _ceres(f"Caspar is only enabled for the standard mapper, not "
+                      f"{args[0] if args else 'this command'}")
+    if forced == "ceres":
+        return _ceres("COLMAP_BA_BACKEND=ceres")
+    if int(num_gpus) <= 0:
+        return _ceres("no GPU")
+    if not colmap_has_caspar():
+        return _ceres("colmap was built without CASPAR_ENABLED")
+    # Caspar merges focal length and extra params into one block and throws if only one
+    # of them is refined.
+    if _arg_value(args, "--Mapper.ba_refine_focal_length", "1") != \
+            _arg_value(args, "--Mapper.ba_refine_extra_params", "1"):
+        return _ceres("focal length and extra params refined differently")
+    try:
+        import sqlite3 as _sql
+        con = _sql.connect(db_path)
+        models = {r[0] for r in con.execute("SELECT DISTINCT model FROM cameras")}
+        try:
+            n_rig_sensors = con.execute("SELECT COUNT(*) FROM rig_sensors").fetchone()[0]
+        except _sql.Error:
+            n_rig_sensors = 0
+        con.close()
+    except Exception as e:
+        return _ceres(f"could not read cameras from the database: {e}")
+    unsupported = sorted(COLMAP_CAMERA_MODEL_NAMES.get(m, str(m)) for m in models
+                         if m not in CASPAR_CAMERA_MODEL_IDS)
+    if not models or unsupported:
+        return _ceres(f"camera model(s) {unsupported or 'none'} not supported by Caspar "
+                      f"(PINHOLE/SIMPLE_RADIAL only)")
+    # Caspar cannot refine sensor_from_rig: rigs need it fixed.
+    if n_rig_sensors > 0 and _arg_value(args, "--Mapper.ba_refine_sensor_from_rig", "1") != "0":
+        return _ceres("camera rig with sensor_from_rig refinement on")
+    args.extend(["--Mapper.ba_global_backend", "CASPAR"])
+    model_names = ", ".join(CASPAR_CAMERA_MODEL_IDS[m] for m in sorted(models))
+    log.info(f"Mapper bundle adjustment: Caspar GPU for global BA, Ceres for local BA "
+             f"(cameras: {model_names}{', rig' if n_rig_sensors else ''})")
+
+
 def run_mapper_checked(pipeline, i, db_path, config, local_debug, log):
     """Run the COLMAP mapper component and check its result.
 
@@ -296,6 +444,12 @@ def run_mapper_checked(pipeline, i, db_path, config, local_debug, log):
                 log.error(f"{reason}; COLMAP database kept at {_keep}")
             except Exception as _copy_err:
                 log.warning(f"Could not keep the COLMAP database: {_copy_err}")
+
+    try:
+        select_mapper_ba_backend(pipeline.components[i].args, db_path,
+                                 pipeline.config.num_gpus, log)
+    except Exception as e:
+        log.warning(f"Could not select the mapper BA backend, using COLMAP defaults: {e}")
 
     try:
         pipeline.run_component(i)
@@ -414,6 +568,12 @@ if __name__ == "__main__":
         IS_GSPLAT_DEPTH = config['MODEL'] in ('gsplat-depth', 'gsplat-depth-mcmc')
         GENERATE_COLLISION = config.get('GENERATE_COLLISION', 'false').lower() == 'true'
         GENERATE_LOD = config.get('GENERATE_LOD', 'false').lower() == 'true'
+        # model.tar.gz (dataset + checkpoints, input for resume/refine jobs):
+        # full = everything, slim = what resume/export needs, none = no archive
+        ARCHIVE_MODE = str(config.get('ARCHIVE_MODE', 'full') or 'full').strip().lower()
+        if ARCHIVE_MODE not in ARCHIVE_MODES:
+            print(f"Unknown ARCHIVE_MODE '{ARCHIVE_MODE}', using 'full' (valid: {', '.join(ARCHIVE_MODES)})")
+            ARCHIVE_MODE = 'full'
         # Single mesh switch: dn-splatter/ags-mesh models use their native extractor,
         # other splat models use the Gaussian-splat TSDF extractor (see Extract-Mesh).
         GENERATE_MESH = config.get('GENERATE_MESH', 'true').lower() == 'true'
@@ -902,7 +1062,7 @@ if __name__ == "__main__":
                     for _root, _dirs, _files in os.walk(image_path):
                         _rel = os.path.relpath(_root, image_path)
                         for _img_file in _files:
-                            if not _img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                            if not _img_file.lower().endswith(IMAGE_EXTS):
                                 continue
                             _mask_rel = os.path.join(_rel, _img_file) if _rel != '.' else _img_file
                             _mask_target = os.path.join(masks_dir, os.path.splitext(_mask_rel)[0] + '.png')
@@ -949,7 +1109,7 @@ if __name__ == "__main__":
                 _transforms_path = os.path.join(config['DATASET_PATH'], 'transforms.json')
                 if os.path.isfile(_transforms_path):
                     _img_files = [f for f in os.listdir(image_path)
-                                  if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                                  if f.lower().endswith(IMAGE_EXTS)]
                     if _img_files:
                         with Image.open(os.path.join(image_path, _img_files[0])) as _img:
                             _actual_w, _actual_h = _img.size
@@ -1017,7 +1177,7 @@ if __name__ == "__main__":
                 for _root, _dirs, _files in os.walk(image_path):
                     _rel = os.path.relpath(_root, image_path)
                     for _img_file in _files:
-                        if not _img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        if not _img_file.lower().endswith(IMAGE_EXTS):
                             continue
                         _mask_rel = os.path.join(_rel, _img_file) if _rel != '.' else _img_file
                         _mask_target = os.path.join(masks_dir, os.path.splitext(_mask_rel)[0] + '.png')
@@ -1083,7 +1243,7 @@ if __name__ == "__main__":
             _img_dir = os.path.join(config['DATASET_PATH'], 'images')
             _colmap_img_dir = os.path.join(config['DATASET_PATH'], 'colmap', 'images')
             _img_empty = not os.path.isdir(_img_dir) or not any(
-                _f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                _f.lower().endswith(IMAGE_EXTS)
                 for _r, _d, _fs in os.walk(_img_dir)
                 for _f in _fs
             )
@@ -1094,7 +1254,7 @@ if __name__ == "__main__":
                 _copied = sum(
                     1 for _ in os.walk(_img_dir)
                     for _f in _[2]
-                    if _f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                    if _f.lower().endswith(IMAGE_EXTS)
                 )
                 log.info(f"Copied {_copied} images from colmap/images/ to images/")
             # If transforms.json is missing but transforms-in.json exists, use it
@@ -1784,7 +1944,7 @@ if __name__ == "__main__":
             # Compute SIFT feature count scaled to input image resolution
             REF_MAX_IMAGE_SIZE = 3200
             REF_MAX_NUM_FEATURES = 8192
-            sample_images = [f for f in os.listdir(image_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+            sample_images = [f for f in os.listdir(image_path) if f.lower().endswith(IMAGE_EXTS)]
             _max_dim = REF_MAX_IMAGE_SIZE
             if sample_images:
                 with Image.open(os.path.join(image_path, sample_images[0])) as _img:
@@ -2121,7 +2281,7 @@ if __name__ == "__main__":
                 REF_MAX_IMAGE_SIZE = 3200
                 REF_MAX_NUM_FEATURES = 8192
                 sample_images = [f for f in os.listdir(image_path)
-                                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                                 if f.lower().endswith(IMAGE_EXTS)]
                 if sample_images:
                     with Image.open(os.path.join(image_path, sample_images[0])) as img:
                         sift_max_image_size = max(img.width, img.height)
@@ -2383,9 +2543,8 @@ if __name__ == "__main__":
                             log.info("Camera rig: using CPU bundle adjustment in the mapper")
                         elif int(pipeline.config.num_gpus) > 0:
                             args.extend(["--Mapper.ba_use_gpu", "1"])
-                            if len([f for f in os.listdir(image_path)
-                                    if f.lower().endswith(('.png', '.jpg', '.jpeg'))]) >= 250:
-                                args.extend(["--Mapper.ba_global_backend", "CASPAR"])
+                        # Caspar GPU global BA is chosen at run time from the database
+                        # cameras (select_mapper_ba_backend), for rigs too.
                         pipeline.create_component(
                             name="ColmapSfM-Mapper",
                             comp_type=ComponentType.RECONSTRUCTION,
@@ -2957,10 +3116,11 @@ if __name__ == "__main__":
                     ])
                         if config['MODEL'] == "splatfacto-mcmc":
                             num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
-                            args.extend([
-                                "--pipeline.model.max-gs-num", str(num_gaussians),
-                                "--pipeline.model.stop-split-at", str(int(config['MAX_STEPS'])),
-                            ])
+                            args.extend(["--pipeline.model.max-gs-num", str(num_gaussians)])
+                        _sched_args, _sched_summary = splatfacto_schedule_args(
+                            config['MODEL'], int(config['MAX_STEPS']))
+                        args.extend(_sched_args)
+                        log.info(f"Splatfacto {_sched_summary}")
                         if isp_mode == "bilagrid":
                             args.extend(["--pipeline.model.use-bilateral-grid", "True"])
                         elif isp_mode == "ppisp":
@@ -4197,9 +4357,12 @@ if __name__ == "__main__":
     ##################################
     try:
         if GENERATE_LOD and config['MODEL'] != "nerfacto":
+            base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()
             args = [
                 "-i", orig_ply_path,
                 "--output-dir", lod_dir,
+                # generate_lod.py zips the bundle itself (lod-meta.json + listed chunks)
+                "--zip", os.path.join(output_path, f"{base_name}-lod.zip"),
             ]
             pipeline.create_component(
                 name="Generate-LOD",
@@ -4564,7 +4727,7 @@ if __name__ == "__main__":
                     # output deleted the whole dataset.
                     def _count_imgs(_d):
                         return sum(1 for _r, _, _fs in os.walk(_d) for _f in _fs
-                                   if _f.lower().endswith(('.png', '.jpg', '.jpeg')))
+                                   if _f.lower().endswith(IMAGE_EXTS))
                     _n_in, _n_out = _count_imgs(image_path), _count_imgs(mask_human_output_dir)
                     if _n_in and _n_out >= _n_in:
                         shutil.rmtree(image_path)
@@ -4591,7 +4754,7 @@ if __name__ == "__main__":
                                 _cam = (json.load(_f) or {}).get('camera')
                             _imgs = sorted(os.path.relpath(os.path.join(_r, f), image_path)
                                            for _r, _, _fs in os.walk(image_path) for f in _fs
-                                           if f.lower().endswith(('.png', '.jpg', '.jpeg')))
+                                           if f.lower().endswith(IMAGE_EXTS))
                             if _cam and _imgs and str(_cam.get('model', '')).upper() in ('PINHOLE', 'SIMPLE_PINHOLE'):
                                 with Image.open(os.path.join(image_path, _imgs[0])) as _img:
                                     _w, _h = _img.size
@@ -4701,7 +4864,7 @@ if __name__ == "__main__":
                         # the actual image on disk after pre-processing.
                         try:
                             img_files = [f for f in os.listdir(image_path)
-                                         if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                                         if f.lower().endswith(IMAGE_EXTS)]
                             if img_files:
                                 with Image.open(os.path.join(image_path, img_files[0])) as _img:
                                     _w, _h = _img.size
@@ -4727,7 +4890,7 @@ if __name__ == "__main__":
                         # Apply focal length heuristic: f = multiplier * max(width, height)
                         try:
                             img_files = [f for f in os.listdir(image_path)
-                                         if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                                         if f.lower().endswith(IMAGE_EXTS)]
                             if img_files:
                                 with Image.open(os.path.join(image_path, img_files[0])) as _img:
                                     _w, _h = _img.size
@@ -4752,7 +4915,7 @@ if __name__ == "__main__":
                     # AUTO_MAPPER: override mapper components based on actual image count
                     if config.get('AUTO_MAPPER', 'false') == 'true' and config['RUN_RECON'] == 'true':
                         num_imgs = len([f for f in os.listdir(image_path)
-                                        if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+                                        if f.lower().endswith(IMAGE_EXTS)])
                         if num_imgs < 600:
                             target_mapper = 'glomap'
                         elif num_imgs <= 5000:
@@ -4819,8 +4982,6 @@ if __name__ == "__main__":
                                     mapper_args.extend(['--log_level', '1'])
                                 if int(pipeline.config.num_gpus) > 0:
                                     mapper_args.extend(['--Mapper.ba_use_gpu', '1'])
-                                    if num_imgs >= 250:
-                                        mapper_args.extend(['--Mapper.ba_global_backend', 'CASPAR'])
                                 new_components.append(Component(
                                     name='ColmapSfM-Mapper',
                                     comp_type=ComponentType.RECONSTRUCTION,
@@ -5114,7 +5275,7 @@ if __name__ == "__main__":
                     image_files = [
                         os.path.join(root, f)
                         for root, _, files in os.walk(image_path)
-                        for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                        for f in files if f.lower().endswith(IMAGE_EXTS)
                     ]
                     num_images = len(image_files)
                     log.info(f"Train runtime: {num_images} images under {image_path}")
@@ -5296,7 +5457,7 @@ if __name__ == "__main__":
                             _sample_img = next(
                                 (f for f in os.listdir(image_path)
                                  if os.path.isfile(os.path.join(image_path, f))
-                                 and f.lower().endswith(('.png', '.jpg', '.jpeg'))),
+                                 and f.lower().endswith(IMAGE_EXTS)),
                                 None
                             )
                             if _sample_img and has_alpha_channel(os.path.join(image_path, _sample_img)):
@@ -5374,6 +5535,11 @@ if __name__ == "__main__":
                                 _skip_rig = config['MODEL'] != '3dgut'
                                 _skipped = []
                                 for _sf in os.listdir(_cs0):
+                                    # Model files only: colmap/sparse/0 can also hold
+                                    # folders, e.g. no_tracks_backup/ written by
+                                    # add_projected_observations_for_gsplat above.
+                                    if not os.path.isfile(os.path.join(_cs0, _sf)):
+                                        continue
                                     if _skip_rig and _sf in ('rigs.bin', 'frames.bin',
                                                              'rigs.txt', 'frames.txt'):
                                         _skipped.append(_sf)
@@ -5400,7 +5566,7 @@ if __name__ == "__main__":
                                 _mrel = os.path.relpath(_mr, image_path)
                                 for _img_f in _mf:
                                     if not _img_f.lower().endswith(
-                                        ('.png', '.jpg', '.jpeg')
+                                        IMAGE_EXTS
                                     ):
                                         continue
                                     _stem = os.path.splitext(_img_f)[0]
@@ -5593,14 +5759,35 @@ if __name__ == "__main__":
                     if not os.path.exists(config['DATASET_PATH']):
                         log.error(f"CRITICAL: Dataset missing after cleanup: {config['DATASET_PATH']}")
                         raise RuntimeError(f"Dataset disappeared after cleanup: {config['DATASET_PATH']}")
+
+                    def _archive_exclusions():
+                        # ARCHIVE_MODE=slim: what resume/export jobs don't need (see utils)
+                        if ARCHIVE_MODE != 'slim':
+                            return []
+                        _ex = archive_slim_exclusions(config['DATASET_PATH'], config['FILENAME'])
+                        _bytes = sum(path_size(p) for p in _ex if os.path.lexists(p))
+                        _top = sorted({os.path.relpath(p, config['DATASET_PATH']).split(os.sep)[0]
+                                       if not p.startswith(os.path.join(config['DATASET_PATH'], 'exports'))
+                                       else os.path.relpath(p, config['DATASET_PATH']) for p in _ex})
+                        log.info(f"ARCHIVE_MODE=slim: leaving {len(_ex)} items ({_bytes / 1e9:.2f} GB) "
+                                 f"out of model.tar.gz: {', '.join(_top[:25])}{' ...' if len(_top) > 25 else ''}")
+                        return _ex
+
+                    if ARCHIVE_MODE == 'none':
+                        log.info("ARCHIVE_MODE=none: no model.tar.gz is saved, so this job "
+                                 "cannot be refined or resumed later")
+                    _archive_excl = _archive_exclusions()
                     if LOCAL_DEBUG:
-                        # Create tarball for local debug mode
-                        log.info(f"Creating tarball for local debug mode...")
-                        local_tar_path = os.path.join(config['S3_OUTPUT'], config['UUID'], 'output', 'model.tar.gz')
-                        log.info(f"Tarball path: {local_tar_path}")
-                        os.makedirs(os.path.dirname(local_tar_path), exist_ok=True)
-                        create_tarball(config['DATASET_PATH'], local_tar_path, "dataset")
-                        log.info(f"Created model.tar.gz archive for local debug: {local_tar_path}")
+                        if ARCHIVE_MODE != 'none':
+                            local_tar_path = os.path.join(config['S3_OUTPUT'], config['UUID'], 'output', 'model.tar.gz')
+                            log.info(f"Creating model.tar.gz ({ARCHIVE_MODE}) for local debug: {local_tar_path}")
+                            os.makedirs(os.path.dirname(local_tar_path), exist_ok=True)
+                            # Exclude only: in local debug the dataset folder is workflow-input,
+                            # which holds the user's own upload, so nothing is deleted.
+                            create_tarball(config['DATASET_PATH'], local_tar_path, "dataset",
+                                           exclude=_archive_excl)
+                            log.info(f"Created model.tar.gz archive for local debug: {local_tar_path} "
+                                     f"({os.path.getsize(local_tar_path) / 1e9:.2f} GB)")
                         # Copy metrics.json if it exists
                         if os.path.exists(EVAL_METRIC_PATH):
                             metrics_dest = os.path.join(config['S3_OUTPUT'], config['UUID'], 'eval', 'metrics.json')
@@ -5615,12 +5802,22 @@ if __name__ == "__main__":
                             shutil.copy2(EVAL_METRIC_PATH, metrics_dest)
                             log.info(f"Copied metrics.json into dataset for archive: {metrics_dest}")
                         if not IS_BATCH:
-                            log.info(f"Moving dataset to where SageMaker expects it...")
-                            shutil.move(config['DATASET_PATH'], OUTPUT_DATASET_PATH)
+                            # SageMaker tars /opt/ml/model into model.tar.gz itself, so slim
+                            # removes the left-out paths (the container is discarded) and none
+                            # leaves only the eval metrics already written under /opt/ml/model.
+                            if ARCHIVE_MODE == 'none':
+                                log.info("Not moving the dataset to /opt/ml/model (ARCHIVE_MODE=none); "
+                                         "SageMaker's model.tar.gz will hold only eval metrics")
+                            else:
+                                if _archive_excl:
+                                    _freed = remove_paths(_archive_excl)
+                                    log.info(f"Removed {_freed / 1e9:.2f} GB before SageMaker archiving")
+                                log.info(f"Moving dataset to where SageMaker expects it...")
+                                shutil.move(config['DATASET_PATH'], OUTPUT_DATASET_PATH)
                     
                     log.info(f"Successful pipeline result generation located at "
                             f"{config['S3_OUTPUT']}/{str(os.path.splitext(config['FILENAME'])[0]).lower()}.*")
-                    if IS_BATCH and not LOCAL_DEBUG:
+                    if IS_BATCH and not LOCAL_DEBUG and ARCHIVE_MODE != 'none':
                         # S3 ARCHIVE UPLOAD COMPONENT
                         # Copy nerfstudio_models and config.yml to dataset directory for archive
                         if config['RUN_TRAIN'] == "true" and ENABLE_MULTI_GPU != "true":
@@ -5654,14 +5851,12 @@ if __name__ == "__main__":
                             log.info(f"Copied metrics.json into dataset for Batch archive: {metrics_dest}")
                         cleanup_dataset(dataset_source)
                         # For Batch, create archive with dataset/train structure
-                        create_tarball(dataset_source, OUTPUT_TAR_PATH, "dataset/train")
-                        log.info(f"Created model.tar.gz archive from {dataset_source} with dataset/train structure")
-                        if not LOCAL_DEBUG:
-                            os.makedirs(os.path.dirname(OUTPUT_TAR_PATH), exist_ok=True)
-                            pipeline.run_component(i)
-                            log.info(f"Uploaded model.tar.gz to {config['S3_OUTPUT']}/{config['UUID']}/output/model.tar.gz")
-                        # Upload archive to S3
-                        os.makedirs(os.path.dirname(OUTPUT_TAR_PATH), exist_ok=True)
+                        # (exclusions recomputed: checkpoints were copied in above)
+                        create_tarball(dataset_source, OUTPUT_TAR_PATH, "dataset/train",
+                                       exclude=_archive_exclusions())
+                        log.info(f"Created model.tar.gz ({ARCHIVE_MODE}) from {dataset_source} with dataset/train "
+                                 f"structure ({os.path.getsize(OUTPUT_TAR_PATH) / 1e9:.2f} GB)")
+                        # Upload archive to S3 (once; this used to run the upload twice)
                         pipeline.run_component(i)
                         log.info(f"Uploaded model.tar.gz to {config['S3_OUTPUT']}/{config['UUID']}/output/model.tar.gz")
                 case "FasterGS-Render-Images":
@@ -5840,34 +6035,51 @@ if __name__ == "__main__":
                     # Zip all collision files into a single archive before uploading
                     base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()
                     collision_zip_path = os.path.join(output_path, f"{base_name}-collision.zip")
+                    _collision_files = [f"splat{_ext}" for _ext in (".voxel.json", ".voxel.bin", ".collision.glb")
+                                        if os.path.exists(os.path.join(output_path, f"splat{_ext}"))]
+                    if not _collision_files:
+                        log.warning("Skipping S3-Export-Collision: Generate-Collision wrote no files")
+                        i += 1
+                        continue
                     try:
                         import zipfile as _zipfile
                         with _zipfile.ZipFile(collision_zip_path, 'w', _zipfile.ZIP_DEFLATED) as _zf:
-                            for _ext in [".voxel.json", ".voxel.bin", ".collision.glb"]:
-                                _src = os.path.join(output_path, f"splat{_ext}")
-                                if os.path.exists(_src):
-                                    _zf.write(_src, arcname=f"splat{_ext}")
+                            for _name in _collision_files:
+                                _zf.write(os.path.join(output_path, _name), arcname=_name)
                         log.info(f"Created collision zip: {collision_zip_path} ({os.path.getsize(collision_zip_path)} bytes)")
                     except Exception as _e:
                         log.warning(f"Could not create collision zip: {_e}")
-                    pipeline.run_component(i)
+                    if LOCAL_DEBUG:
+                        copy_to_local_output(collision_zip_path, config, f"{base_name}-collision.zip", log)
+                    else:
+                        pipeline.run_component(i)
                 case "S3-Export-LOD":
-                    # Zip all LOD files into a single archive before uploading
+                    # generate_lod.py --zip writes <name>-lod.zip next to the other exports.
+                    # Rebuild it here only if it is missing (e.g. an older generate_lod.py).
                     base_name = str(os.path.splitext(config['FILENAME'])[0]).lower()
                     lod_zip_path = os.path.join(output_path, f"{base_name}-lod.zip")
-                    try:
-                        import zipfile as _zipfile
-                        with _zipfile.ZipFile(lod_zip_path, 'w', _zipfile.ZIP_DEFLATED) as _zf:
-                            if os.path.isdir(lod_dir):
-                                for _root, _dirs, _files in os.walk(lod_dir):
-                                    for _fname in _files:
-                                        _src = os.path.join(_root, _fname)
-                                        _arcname = os.path.relpath(_src, lod_dir)
-                                        _zf.write(_src, arcname=_arcname)
-                        log.info(f"Created LOD zip: {lod_zip_path} ({os.path.getsize(lod_zip_path)} bytes)")
-                    except Exception as _e:
-                        log.warning(f"Could not create LOD zip: {_e}")
-                    pipeline.run_component(i)
+                    _lod_meta = os.path.join(lod_dir, "lod-meta.json")
+                    if not os.path.isfile(_lod_meta):
+                        log.warning(f"Skipping S3-Export-LOD: no LOD bundle ({_lod_meta} not found; "
+                                    f"Generate-LOD failed or was skipped)")
+                        i += 1
+                        continue
+                    if not os.path.isfile(lod_zip_path) or \
+                            os.path.getmtime(lod_zip_path) < os.path.getmtime(_lod_meta):
+                        try:
+                            sys.path.insert(0, os.path.join(current_dir_path, "post_processing"))
+                            from generate_lod import zip_bundle as _zip_lod_bundle
+                            _n = _zip_lod_bundle(lod_dir, lod_zip_path)
+                            log.info(f"Created LOD zip: {lod_zip_path} ({_n} files)")
+                        except Exception as _e:
+                            log.warning(f"Could not create LOD zip, skipping upload: {_e}")
+                            i += 1
+                            continue
+                    log.info(f"LOD zip: {lod_zip_path} ({os.path.getsize(lod_zip_path):,} bytes)")
+                    if LOCAL_DEBUG:
+                        copy_to_local_output(lod_zip_path, config, f"{base_name}-lod.zip", log)
+                    else:
+                        pipeline.run_component(i)
                 case "Clean-Point-Cloud":
                     # splat-transform --filter-floaters default voxel size is 0.05m.
                     # For large scenes this creates too many voxels and SIGSEGV from
@@ -6028,7 +6240,7 @@ if __name__ == "__main__":
                     _filled = 0
                     for _r, _d, _fs in os.walk(image_path):
                         for _f in _fs:
-                            if not _f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                            if not _f.lower().endswith(IMAGE_EXTS):
                                 continue
                             _rel = os.path.relpath(os.path.join(_r, _f), image_path)
                             _cands = [os.path.join(_masks_dir, _rel + ".png"),
@@ -6111,7 +6323,7 @@ if __name__ == "__main__":
         log.info(f"Mapper: {config['RECON_SOFTWARE_NAME']}  |  Matcher: {matcher_info}  |  Model: {config['MODEL']}")
         # Dataset summary: image count, resolution, autogroup prefix
         try:
-            summary_imgs = [f for f in os.listdir(image_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+            summary_imgs = [f for f in os.listdir(image_path) if f.lower().endswith(IMAGE_EXTS)]
             summary_res = 'N/A'
             if summary_imgs:
                 _s = Image.open(os.path.join(image_path, summary_imgs[0]))

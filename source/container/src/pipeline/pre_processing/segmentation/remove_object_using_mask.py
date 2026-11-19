@@ -25,6 +25,12 @@ import cv2
 import argparse
 import os
 import shutil
+import sys
+try:
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image
 
 def apply_binary_mask(image, mask):
     """
@@ -148,7 +154,7 @@ if __name__ == "__main__":
     os.makedirs(output_path, exist_ok=True)
     orig_imgs_list = sorted(f for f in os.listdir(orig_image_path)
                             if os.path.isfile(os.path.join(orig_image_path, f))
-                            and f.lower().endswith(('.jpg', '.jpeg', '.png')))
+                            and f.lower().endswith(IMAGE_EXTS))
 
     def find_mask(filename):
         # remove_background writes <stem>.png; pair by name, not by listing order.
@@ -187,7 +193,7 @@ if __name__ == "__main__":
                 continue
             keep = np.where(alpha > 10, 0, 255).astype(np.uint8)
             masked_img = apply_binary_mask(orig_img, binary_to_alpha(keep))
-            cv2.imwrite(output_filepath, masked_img)
+            imwrite_image(output_filepath, masked_img)
             n_changed += 1
         print(f"Removed people from {n_changed} of {len(orig_imgs_list)} images")
     except Exception as e:

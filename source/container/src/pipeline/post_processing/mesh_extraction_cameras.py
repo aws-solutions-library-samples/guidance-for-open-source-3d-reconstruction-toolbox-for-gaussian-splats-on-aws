@@ -141,7 +141,7 @@ def load_cameras_from_transforms(
         img_path = str(image_dir_path / file_path)
 
         if not os.path.isfile(img_path):
-            for ext in [".jpg", ".jpeg", ".png", ".JPG", ".PNG"]:
+            for ext in [".jpg", ".jpeg", ".png", ".webp", ".JPG", ".PNG", ".WEBP"]:
                 candidate = img_path + ext
                 if os.path.isfile(candidate):
                     img_path = candidate

@@ -36,6 +36,7 @@ import torch
 import boto3
 from botocore.exceptions import ClientError
 from decimal import Decimal
+from image_formats import IMAGE_EXTS, imwrite as imwrite_image, pil_save_kwargs
 
 def reverse_file_order(directory_path):
     """
@@ -124,7 +125,7 @@ def rotate_single_image(image_path_angle):
         rotated_img = cv2.warpAffine(img, rotation_matrix, (new_width, new_height))
 
         # Save with same filename
-        success = cv2.imwrite(image_path, rotated_img)
+        success = imwrite_image(image_path, rotated_img)
         if success:
             return f"Rotated: {os.path.basename(image_path)}"
         else:
@@ -149,7 +150,7 @@ def rotate_images(path, angle):
     elif os.path.isdir(path):
         # Directory
         print(f"Rotating images in: {path} by {angle} degrees")
-        image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif']
+        image_extensions = ['*' + e for e in IMAGE_EXTS] + ['*.bmp', '*.tiff', '*.tif']
         image_files = []
         for ext in image_extensions:
             image_files.extend(glob.glob(os.path.join(path, ext)))
@@ -216,7 +217,7 @@ def resize_to_4k(image_path, spherical_camera=False):
         resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
         
         # Save the resized image back to the same path
-        cv2.imwrite(image_path, resized)
+        imwrite_image(image_path, resized)
         return resized
     
     # Return original image if no resize needed
@@ -236,7 +237,7 @@ def resize_images_to_common_dimensions(image_dir):
     Returns:
         tuple: (target_width, target_height) used, or None if no images found
     """
-    extensions = ('.png', '.jpg', '.jpeg')
+    extensions = IMAGE_EXTS
     image_files = [f for f in os.listdir(image_dir)
                    if f.lower().endswith(extensions) and os.path.isfile(os.path.join(image_dir, f))]
 
@@ -289,7 +290,7 @@ def resize_images_to_common_dimensions(image_dir):
             y_start = (h - crop_h) // 2
             img = img[y_start:y_start + crop_h, :]
         img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
-        cv2.imwrite(filepath, img)
+        imwrite_image(filepath, img)
         resized_count += 1
 
     print(f"Resized {resized_count}/{len(image_files)} images to {target_w}x{target_h}")
@@ -651,7 +652,7 @@ def process_images(input_dir, output_dir=None, preserve_alpha=False):
     os.makedirs(output_dir, exist_ok=True)
     
     # Get all image files in the input directory
-    image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(IMAGE_EXTS)]
     
     for image_file in tqdm_func(image_files, desc="Processing images"):
         input_path = os.path.join(input_dir, image_file)
@@ -664,7 +665,9 @@ def process_images(input_dir, output_dir=None, preserve_alpha=False):
             # Extract alpha channel for mask
             alpha = img.split()[3]
             
-            if preserve_alpha:
+            if preserve_alpha and image_file.lower().endswith('.webp'):
+                pass  # WebP already keeps the alpha channel: leave the file as it is
+            elif preserve_alpha:
                 # Keep RGBA format - save as PNG to support transparency
                 base_name = os.path.splitext(image_file)[0]
                 output_rgba_path = os.path.join(input_dir, f"{base_name}.png")
@@ -676,7 +679,7 @@ def process_images(input_dir, output_dir=None, preserve_alpha=False):
                 # Convert to RGB
                 rgb = img.convert('RGB')
                 output_rgb_path = os.path.join(input_dir, image_file)
-                rgb.save(output_rgb_path)
+                rgb.save(output_rgb_path, **pil_save_kwargs(output_rgb_path))
             
             # Save alpha as mask
             # COLMAP expects mask filename to be original filename + .png extension
@@ -748,7 +751,7 @@ def select_largest_colmap_model(sparse_path):
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 
-def create_tarball(source_path, output_path, arcname=None):
+def create_tarball(source_path, output_path, arcname=None, exclude=None):
     """
     Create a compressed tarball archive from a file or directory.
     
@@ -756,12 +759,88 @@ def create_tarball(source_path, output_path, arcname=None):
         source_path (str): Path to the file or directory to archive
         output_path (str): Path where the archive should be created
         arcname (str): Name to use for the archive entry (defaults to basename of source_path)
+        exclude (iterable): Absolute paths (files or folders) under source_path to leave out
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     if arcname is None:
         arcname = os.path.basename(source_path)
+    excluded = {os.path.normpath(p) for p in (exclude or ())}
+    root = os.path.normpath(source_path)
+
+    def _filter(info):
+        # Map the archive name back to the source path; skipping a folder skips its contents.
+        rel = os.path.relpath(info.name, arcname) if info.name != arcname else "."
+        src = os.path.normpath(os.path.join(root, rel))
+        return None if src in excluded else info
+
     with tarfile.open(output_path, "w:gz", dereference=True) as tar:
-        tar.add(source_path, arcname=arcname, recursive=True)
+        tar.add(source_path, arcname=arcname, recursive=True, filter=_filter if excluded else None)
+
+
+ARCHIVE_MODES = ("full", "slim", "none")
+# ARCHIVE_MODE=slim leaves these out of model.tar.gz. Resume training and export-only
+# jobs never read them: pipeline work folders, copies of the upload, and outputs that
+# are uploaded on their own (.ply, .sog, .mp4, LOD and collision zips, mesh).
+ARCHIVE_SLIM_DIRS = ("temp", "filtered_images", "masked_bg_images", "masked_human_images",
+                     "object_removal_rig", "mask_previews", "adaptive_frames", "_undistorted",
+                     "images_rgba", "faster_gs_input", "stable-diffusion-xl-base-1.0")
+ARCHIVE_UPLOAD_EXTS = (".zip", ".tar.gz", ".tgz", ".mov", ".mp4")
+EXPORT_DELIVERABLE_EXTS = (".ply", ".sog", ".spz", ".usdz", ".mp4", ".glb", ".zip",
+                           ".voxel.json", ".voxel.bin", ".png", ".jpg")
+EXPORT_DELIVERABLE_DIRS = ("lod", "textured", "videos", "renders", "ply")
+
+
+def archive_slim_exclusions(dataset_path, input_name=""):
+    """Absolute paths that ARCHIVE_MODE=slim leaves out of model.tar.gz.
+
+    Kept: images/, masks/, depths, the COLMAP model (colmap/, sparse/), transforms.json,
+    rig/GPS files, model checkpoints and configs (nerfstudio_models/, config.yml,
+    3dgrut_models/, faster_gs_models/, exports/ckpts/ with only the latest step) and
+    eval/, so resume training and export-only jobs still work.
+    """
+    dataset_path = os.path.normpath(dataset_path)
+    out = []
+    input_name = (input_name or "").strip("/")
+    for name in os.listdir(dataset_path):
+        p = os.path.join(dataset_path, name)
+        if name in ARCHIVE_SLIM_DIRS:
+            out.append(p)
+        elif input_name and name == input_name:
+            out.append(p)  # the uploaded zip/folder/video: already in S3 (or workflow-input)
+        elif os.path.isfile(p) and name.lower().endswith(ARCHIVE_UPLOAD_EXTS):
+            out.append(p)  # uploads and earlier model.tar.gz files (refine jobs)
+    # COLMAP databases (features/matches) are only needed to reconstruct again
+    for r, ds, fs in os.walk(dataset_path):
+        ds[:] = [d for d in ds if os.path.join(r, d) not in out]
+        out.extend(os.path.join(r, f) for f in fs if f.endswith(".db"))
+    exports = os.path.join(dataset_path, "exports")
+    if os.path.isdir(exports):
+        for name in os.listdir(exports):
+            p = os.path.join(exports, name)
+            if os.path.isdir(p) and name in EXPORT_DELIVERABLE_DIRS:
+                out.append(p)
+            elif os.path.isfile(p) and name.lower().endswith(EXPORT_DELIVERABLE_EXTS):
+                out.append(p)
+        # gsplat writes a checkpoint at several steps (ckpt_<step>_rank<r>.pt);
+        # resume and eval use the latest one only
+        ckpts = os.path.join(exports, "ckpts")
+        if os.path.isdir(ckpts):
+            steps = {}
+            for f in os.listdir(ckpts):
+                parts = f.split("_")
+                if f.endswith(".pt") and len(parts) >= 2 and parts[1].isdigit():
+                    steps.setdefault(int(parts[1]), []).append(os.path.join(ckpts, f))
+            for step in sorted(steps)[:-1]:
+                out.extend(steps[step])
+    return out
+
+
+def path_size(path):
+    """Size in bytes of a file, or of a folder's files (not following symlinks)."""
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    return sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(path) for f in fs
+               if not os.path.islink(os.path.join(r, f)))
 
 def remove_cubemap_faces(erp_images_dir, remove_face_list):
     """
@@ -787,7 +866,7 @@ def remove_cubemap_faces(erp_images_dir, remove_face_list):
         return
         
     for filename in os.listdir(erp_images_dir):
-        if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+        if filename.lower().endswith(IMAGE_EXTS):
             img_path = os.path.join(erp_images_dir, filename)
             img = imread(img_path, pilmode='RGBA')
             dims = img.shape
@@ -812,7 +891,7 @@ def remove_cubemap_faces(erp_images_dir, remove_face_list):
             erp_img = py360convert.c2e(cubemap=cube_dice, h=dims[0], w=dims[1], cube_format='list')
             
             # Overwrite original
-            Image.fromarray(erp_img.astype(np.uint8)).save(img_path)
+            Image.fromarray(erp_img.astype(np.uint8)).save(img_path, **pil_save_kwargs(img_path))
 
 # Clean up dataset before moving to output location
 def cleanup_dataset(dataset_path):
@@ -846,7 +925,6 @@ def extract_images_from_zip_temp(temp_path, image_path, dataset_path, log, keep_
     rig_config.json image_prefix values (also kept, in dataset_path).
     Only intended for run_recon == true jobs.
     """
-    IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
     KEEP_FILES = ('manifest.json', 'priors.csv', 'rig_config.json')
 
     def _sub_dirs(parts, anchors):
@@ -911,7 +989,7 @@ def normalize_uploaded_masks(image_path, masks_dir, log):
     found = filled = 0
     for root, _, files in os.walk(image_path):
         for fname in files:
-            if not fname.lower().endswith(('.png', '.jpg', '.jpeg')):
+            if not fname.lower().endswith(IMAGE_EXTS):
                 continue
             rel = os.path.relpath(os.path.join(root, fname), image_path).replace('\\', '/')
             stem = os.path.splitext(rel)[0]
@@ -951,7 +1029,6 @@ def validate_and_resize_images(image_path, config, log, pipeline):
         log: Logger instance
         pipeline: Pipeline instance for error reporting
     """
-    IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
     all_files = os.listdir(image_path)
     filenames = [f for f in all_files if os.path.splitext(f)[1].lower() in IMAGE_EXTS]
     if filenames:
@@ -1894,7 +1971,7 @@ def apply_camera_masks_to_images(image_path, masks_path, log):
     # Apply masks to images - match by camera name prefix
     image_files = [f for f in os.listdir(image_path)
                    if os.path.isfile(os.path.join(image_path, f))
-                   and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                   and f.lower().endswith(IMAGE_EXTS)]
 
     applied = 0
     for img_file in image_files:
@@ -1923,7 +2000,7 @@ def apply_camera_masks_to_images(image_path, masks_path, log):
         # Apply mask: zero out pixels where mask=0
         mask_3ch = mask[:, :, np.newaxis] if img.ndim == 3 else mask
         img_masked = (img * (mask_3ch / 255)).astype(img.dtype)
-        cv2.imwrite(img_path, img_masked)
+        imwrite_image(img_path, img_masked)
         applied += 1
 
     log.info(f"apply_camera_masks_to_images: applied masks to {applied}/{len(image_files)} images")

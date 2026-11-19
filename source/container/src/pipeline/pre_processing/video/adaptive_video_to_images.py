@@ -54,6 +54,12 @@ import numpy as np
 
 log = logging.getLogger("adaptive_video_to_images")
 SCORE_LONG_SIDE = 1280  # sharpness is ranked at this size (faster, same ranking)
+# frame-extractor v0.2.0-rc.3 heap overflow: its convertToBgr() gives libswscale an
+# unpadded cv::Mat (row = width*3 bytes), and swscale's SIMD output writes past the end
+# of the last row (valgrind: 8-byte write 2 bytes past the block, BenchMelb.mov 1434 px
+# wide). glibc then aborts with "malloc(): corrupted top size" at a random keyframe.
+# Widths that are a multiple of 32 ran clean, so the extractor gets such a copy.
+EXTRACTOR_WIDTH_ALIGN = 32
 
 
 # --------------------------------------------------------------------------
@@ -119,6 +125,55 @@ def scaled_profile(profile, threshold, out_path):
                 line = f"{indent}main_threshold_analysis_px: {threshold:.3f}\n"
             f.write(line)
     return out_path
+
+
+def extractor_video(video, work_dir, total_frames):
+    """Video for the frame-extractor CLI: the input itself when its coded width is a
+    multiple of EXTRACTOR_WIDTH_ALIGN, else a copy scaled to the next aligned width
+    (same frames, same order, height unchanged) so the CLI cannot overflow its buffer.
+    Keyframe numbers are frame indices, so they apply to the original video unchanged.
+    Falls back to the input if the copy cannot be made or has a different frame count."""
+    try:
+        probe = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width", "-of", "csv=p=0", video],
+            capture_output=True, text=True, timeout=60)
+        coded_width = int(probe.stdout.strip().splitlines()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
+        log.warning(f"Could not read the video width ({e}); running the extractor on the input")
+        return video
+    if coded_width % EXTRACTOR_WIDTH_ALIGN == 0:
+        return video
+
+    out = os.path.join(work_dir, "extractor_input.mp4")
+    # ffmpeg applies the display rotation, so the copy's coded width is the scaled
+    # display width; iw is the display width after autorotation.
+    vf = (f"scale=ceil(iw/{EXTRACTOR_WIDTH_ALIGN})*{EXTRACTOR_WIDTH_ALIGN}:"
+          f"ceil(ih/2)*2:flags=bicubic,setsar=1")
+    cmd = ["ffmpeg", "-v", "error", "-y", "-i", video, "-map", "0:v:0", "-vf", vf,
+           "-fps_mode", "passthrough", "-c:v", "libx264", "-preset", "veryfast",
+           "-crf", "12", "-pix_fmt", "yuv420p", "-an", out]
+    log.info(f"Coded width {coded_width} px is not a multiple of {EXTRACTOR_WIDTH_ALIGN} "
+             f"(frame-extractor buffer overflow); making a width-aligned copy for keyframe detection")
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)  # nosemgrep: dangerous-subprocess-use-audit
+    except OSError as e:
+        log.warning(f"ffmpeg unavailable ({e}); running the extractor on the input")
+        return video
+    if res.returncode != 0 or not os.path.isfile(out):
+        log.warning(f"Width-aligned copy failed (exit {res.returncode}): {res.stderr.strip()[-300:]}; "
+                    f"running the extractor on the input")
+        return video
+    cap = cv2.VideoCapture(out)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    cap.release()
+    if n != total_frames:
+        log.warning(f"Width-aligned copy has {n} frames, the input {total_frames}; "
+                    f"keyframe numbers would not match, so the extractor runs on the input")
+        return video
+    log.info(f"Keyframe detection runs on {out} ({w} px wide, {n} frames)")
+    return out
 
 
 def auto_keyframes(binary, profile, video, work_dir, start_frame, max_frames, target):
@@ -245,13 +300,15 @@ def main():
 
     profile = os.path.join(args.profiles_dir, f"{'medium' if args.density == 'auto' else args.density}.yaml")
     max_frames = last - first + 1 if last < total - 1 else None
+    # Keyframe detection only; output frames are still read from the original video.
+    detect_video = extractor_video(video, work_dir, total)
     if not os.path.isfile(profile):
         log.warning(f"Profile {profile} not found; using the extractor's built-in defaults")
-        keys = adaptive_keyframes(args.binary, "", video, work_dir, first, max_frames)
+        keys = adaptive_keyframes(args.binary, "", detect_video, work_dir, first, max_frames)
     elif args.density == "auto":
-        keys = auto_keyframes(args.binary, profile, video, work_dir, first, max_frames, args.num_frames)
+        keys = auto_keyframes(args.binary, profile, detect_video, work_dir, first, max_frames, args.num_frames)
     else:
-        keys = adaptive_keyframes(args.binary, profile, video, work_dir, first, max_frames)
+        keys = adaptive_keyframes(args.binary, profile, detect_video, work_dir, first, max_frames)
         if keys and len(keys) < 0.25 * args.num_frames:
             log.warning(f"Only {len(keys)} keyframes with the '{args.density}' profile "
                         f"(max {args.num_frames}); the camera moves little. Use density 'auto' "

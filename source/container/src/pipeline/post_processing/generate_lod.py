@@ -25,9 +25,12 @@ splat-transform, producing 4 decimation levels at 100%, 50%, 25%, and 12.5% of G
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 PLY_TYPE_SIZES = {
     "char": 1, "uchar": 1, "int8": 1, "uint8": 1,
@@ -98,6 +101,9 @@ def run_splat_transform(cmd, output_path, is_complete) -> int:
 # all levels into a single lod-meta.json streamed SOG bundle that viewers can
 # stream progressively based on camera distance and available bandwidth.
 def generate_lod(input_ply: str, output_dir: str) -> int:
+    # Clear an earlier bundle first, so a failed run cannot leave it to be exported.
+    os.makedirs(output_dir, exist_ok=True)
+    remove_old_bundle(output_dir)
     lod_files = []
     with tempfile.TemporaryDirectory() as tmp:
         prev = input_ply
@@ -115,7 +121,6 @@ def generate_lod(input_ply: str, output_dir: str) -> int:
                 prev = out
 
         # Combine all LOD levels into streamed SOG bundle
-        os.makedirs(output_dir, exist_ok=True)
         lod_meta_path = os.path.join(output_dir, "lod-meta.json")
         cmd = ["splat-transform"]
         for path, level in lod_files:
@@ -125,13 +130,60 @@ def generate_lod(input_ply: str, output_dir: str) -> int:
         return run_splat_transform(cmd, lod_meta_path, lod_meta_is_complete)
 
 
+# splat-transform writes one folder per chunk, named <level>_<index> (e.g. 0_0/meta.json).
+CHUNK_DIR_RE = re.compile(r"^\d+_\d+$")
+
+
+# Removes lod-meta.json and chunk folders from an earlier run, so a smaller bundle
+# written into the same folder (LOCAL_DEBUG reuses workflow-input) has no stale chunks.
+def remove_old_bundle(output_dir: str) -> None:
+    for name in os.listdir(output_dir):
+        path = os.path.join(output_dir, name)
+        if name == "lod-meta.json" and os.path.isfile(path):
+            os.remove(path)
+        elif CHUNK_DIR_RE.match(name) and os.path.isdir(path):
+            shutil.rmtree(path)
+
+
+# Zips lod-meta.json and every chunk folder it lists, with paths relative to the
+# bundle folder ('/' separators), so the zip extracts to a ready-to-serve bundle.
+# Returns the number of files written.
+def zip_bundle(output_dir: str, zip_path: str) -> int:
+    lod_meta_path = os.path.join(output_dir, "lod-meta.json")
+    with open(lod_meta_path) as f:
+        meta = json.load(f)
+    chunk_dirs = sorted({os.path.dirname(p.replace("\\", "/")) for p in meta.get("filenames", [])})
+    files = [lod_meta_path]
+    for d in chunk_dirs:
+        chunk_path = os.path.join(output_dir, d)
+        if not os.path.isdir(chunk_path):
+            raise FileNotFoundError(f"lod-meta.json lists chunk folder {d}/, which does not exist")
+        for root, _, names in os.walk(chunk_path):
+            files.extend(os.path.join(root, n) for n in sorted(names))
+    os.makedirs(os.path.dirname(os.path.abspath(zip_path)), exist_ok=True)
+    tmp_zip = zip_path + ".tmp"
+    with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in files:
+            zf.write(path, arcname=os.path.relpath(path, output_dir).replace(os.sep, "/"))
+    os.replace(tmp_zip, zip_path)
+    return len(files)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate streamed LOD SOG bundle from a Gaussian splat PLY")
     parser.add_argument("-i", "--input", required=True, help="Input PLY file (full-resolution, LOD 0)")
     parser.add_argument("-o", "--output-dir", required=True, help="Output directory for lod-meta.json and SOG chunks")
+    parser.add_argument("--zip", dest="zip_path", default=None,
+                        help="Also write the bundle (lod-meta.json + chunk folders) to this .zip")
     args = parser.parse_args()
 
-    sys.exit(generate_lod(args.input, args.output_dir))
+    if args.zip_path and os.path.exists(args.zip_path):
+        os.remove(args.zip_path)
+    rc = generate_lod(args.input, args.output_dir)
+    if rc == 0 and args.zip_path:
+        n = zip_bundle(args.output_dir, args.zip_path)
+        print(f"Wrote {args.zip_path} ({n} files, {os.path.getsize(args.zip_path):,} bytes)")
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

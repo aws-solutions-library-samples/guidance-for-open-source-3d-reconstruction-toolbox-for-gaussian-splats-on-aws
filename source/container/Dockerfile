@@ -191,6 +191,8 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get clean && apt-get update -y && apt-get
     libjpeg-dev \
     libpng-dev \
     libraw-dev \
+    # WebP for OpenImageIO (COLMAP reads images through it); checked after the OIIO build
+    libwebp-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Use base image Python 3.12 and PyTorch 2.12.1+cu132 directly (already in dist-packages)
@@ -363,9 +365,15 @@ RUN wget https://github.com/AcademySoftwareFoundation/OpenImageIO/archive/refs/t
        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
        -DCMAKE_PREFIX_PATH=/usr/local \
        -DOIIO_BUILD_TESTS=OFF -DOIIO_BUILD_TOOLS=OFF -DUSE_PYTHON=OFF -DINSTALL_DOCS=OFF \
+       -DUSE_WEBP=ON \
     && ninja -C ${CODE_PATH}/OpenImageIO-${OPENIMAGEIO_VERSION}/build -j${NINJA_JOBS} install \
     && rm -rf ${CODE_PATH}/OpenImageIO-${OPENIMAGEIO_VERSION} && ldconfig \
-    && find /usr/local/lib/cmake -name 'OpenImageIOConfig.cmake'
+    && find /usr/local/lib/cmake -name 'OpenImageIOConfig.cmake' \
+    # .webp uploads: fail the build if OIIO came out without its WebP plugin (embedded
+    # in libOpenImageIO), since COLMAP would then skip every .webp image.
+    && (ldd /usr/local/lib/libOpenImageIO.so* | grep -q libwebp \
+        || (echo "ERROR: OpenImageIO was built without WebP support" && exit 1)) \
+    && echo "OpenImageIO: WebP support OK"
 
 # Install COLMAP from source
 RUN wget https://github.com/colmap/colmap/archive/refs/tags/${COLMAP_VERSION}.zip \
@@ -678,7 +686,7 @@ RUN mkdir -p ${CODE_PATH}/reconstruction ${CODE_PATH}/training ${CODE_PATH}/sphe
 # Copy application source — grouped to minimize layers
 # Cache-bust: increment when pipeline source files change
 ARG PIPELINE_CACHE_BUST=47
-COPY ./src/entrypoint.sh ./src/main.py ./src/config.json ./src/pipeline/pipeline.py ./src/pipeline/utils.py ${CODE_PATH}/
+COPY ./src/entrypoint.sh ./src/main.py ./src/config.json ./src/pipeline/pipeline.py ./src/pipeline/utils.py ./src/pipeline/image_formats.py ./src/pipeline/check_webp_support.sh ${CODE_PATH}/
 COPY ./src/pipeline/reconstruction/extract_poses_imgs.py \
      ./src/pipeline/reconstruction/process_pose_transforms.py \
      ./src/pipeline/reconstruction/update_camera_model.py \
@@ -748,7 +756,8 @@ COPY ./src/pipeline/post_processing/rotate_splat.py \
      ./src/pipeline/post_processing/mesh_extraction_utils.py \
      ./src/pipeline/post_processing/splat_transform_safe_exit.mjs \
      ${CODE_PATH}/post_processing/
-RUN chmod +x ${CODE_PATH}/entrypoint.sh ${CODE_PATH}/training/run_gsplat_trainer.sh
+RUN sed -i 's/\r$//' ${CODE_PATH}/check_webp_support.sh \
+    && chmod +x ${CODE_PATH}/entrypoint.sh ${CODE_PATH}/training/run_gsplat_trainer.sh ${CODE_PATH}/check_webp_support.sh
 
 # splat-transform calls process.exit() with its WebGPU device still alive, and Dawn
 # intermittently segfaults (exit 139) tearing it down after the output is written.

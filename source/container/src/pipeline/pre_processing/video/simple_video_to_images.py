@@ -29,6 +29,12 @@ import argparse
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import logging
+import sys
+try:
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image
 
 def extract_frame_worker(args):
     """Worker function for extracting a single frame"""
@@ -177,7 +183,7 @@ def rotate_images_in_directory(input_dir, degrees=90):
         int: Number of images successfully rotated
     """
     # Define supported image extensions
-    image_extensions = ['.jpg', '.jpeg', '.png']
+    image_extensions = IMAGE_EXTS
     
     # Counter for successfully rotated images
     success_count = 0
@@ -202,7 +208,7 @@ def rotate_images_in_directory(input_dir, degrees=90):
                 rotated_img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
                 
                 # Save the rotated image, overwriting the original
-                cv2.imwrite(input_path, rotated_img)
+                imwrite_image(input_path, rotated_img)
                 success_count += 1
                 print(f"Rotated and overwritten: {filename}")
                 

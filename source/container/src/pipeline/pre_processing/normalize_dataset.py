@@ -46,6 +46,12 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import sys
+try:
+    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from image_formats import IMAGE_EXTS
 
 
 @dataclass
@@ -157,7 +163,7 @@ def _normalize_splatking(extract_source: str, result: NormalizationResult) -> No
     # --- Determine RGB image resolution from first image ---
     images_dir = os.path.join(extract_source, "images")
     img_files = sorted(f for f in os.listdir(images_dir)
-                       if f.lower().endswith((".jpg", ".jpeg", ".png")))
+                       if f.lower().endswith(IMAGE_EXTS))
     if not img_files:
         _log(result, "  WARNING: no images found, skipping depth conversion")
         return

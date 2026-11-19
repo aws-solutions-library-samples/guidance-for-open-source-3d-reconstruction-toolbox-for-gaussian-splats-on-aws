@@ -31,6 +31,11 @@ from tqdm import tqdm
 
 import pycolmap
 from pycolmap import logging
+try:
+    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+    from image_formats import IMAGE_EXTS
 
 N = TypeVar("N", bound=int)
 NDArrayNx2 = np.ndarray[tuple[N, Literal[2]], np.dtype[np.float64]]
@@ -454,7 +459,7 @@ def run(args: argparse.Namespace) -> None:
                     shutil.rmtree(d)
                 d.mkdir(parents=True)
             for stem in valid_frames:
-                for ext in (".png", ".jpg", ".jpeg"):
+                for ext in IMAGE_EXTS:
                     src = subfolder / (stem + ext)
                     if src.exists():
                         shutil.copy2(src, tmp_images / src.name)
@@ -508,7 +513,7 @@ def run(args: argparse.Namespace) -> None:
         # Check if any camera produced valid (non-black) inpainted images
         def _has_valid_erased_images(cam_dir: Path) -> bool:
             for f in cam_dir.iterdir():
-                if f.is_file() and f.suffix.lower() in ('.png', '.jpg', '.jpeg') and f.parent.name != 'refined_masks':
+                if f.is_file() and f.suffix.lower() in IMAGE_EXTS and f.parent.name != 'refined_masks':
                     img = cv2.imread(str(f))
                     if img is not None and np.max(img) > 10:
                         return True
@@ -535,7 +540,7 @@ def run(args: argparse.Namespace) -> None:
                         continue
                     target_dir = image_dir / subfolder.name
                     for img_file in subfolder.iterdir():
-                        if not (img_file.is_file() and img_file.suffix.lower() in (".png", ".jpg", ".jpeg")):
+                        if not (img_file.is_file() and img_file.suffix.lower() in IMAGE_EXTS):
                             continue
                         img = cv2.imread(str(img_file))
                         if img is not None and np.max(img) > 10:
@@ -547,7 +552,7 @@ def run(args: argparse.Namespace) -> None:
                         continue
                     target_dir = image_dir / subfolder.name
                     for img_file in subfolder.iterdir():
-                        if not (img_file.is_file() and img_file.suffix.lower() in (".png", ".jpg", ".jpeg")):
+                        if not (img_file.is_file() and img_file.suffix.lower() in IMAGE_EXTS):
                             continue
                         if img_file.parent.name == 'refined_masks':
                             continue
@@ -561,7 +566,7 @@ def run(args: argparse.Namespace) -> None:
                     if not (subfolder.is_dir() and subfolder.name.startswith("pano_camera")):
                         continue
                     for img_file in subfolder.iterdir():
-                        if not (img_file.is_file() and img_file.suffix.lower() in (".png", ".jpg", ".jpeg")):
+                        if not (img_file.is_file() and img_file.suffix.lower() in IMAGE_EXTS):
                             continue
                         img = cv2.imread(str(img_file))
                         if img is not None and (img.shape[0] != 960 or img.shape[1] != 960):

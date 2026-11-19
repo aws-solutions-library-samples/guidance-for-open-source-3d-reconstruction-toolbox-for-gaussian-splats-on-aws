@@ -26,6 +26,11 @@ import os
 import shutil
 import sys
 from pathlib import Path
+try:
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image
 
 
 def convert_lidar_bins(data_dir):
@@ -71,7 +76,7 @@ def convert_lidar_bins(data_dir):
     image_files = sorted(
         os.path.relpath(os.path.join(r, f), images_dir)
         for r, _, fs in os.walk(images_dir) for f in fs
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        if f.lower().endswith(IMAGE_EXTS)
     )
     by_stem = {}
     for f in image_files:
@@ -171,7 +176,7 @@ def ensure_colmap_sparse_link(data_dir):
 def clean_images_dir(images_dir):
     """Flatten image subdirs, remove non-image files, and remove OpenCV-unreadable images."""
     import cv2
-    valid_extensions = {'.png', '.jpg', '.jpeg'}
+    valid_extensions = IMAGE_EXTS
     removed = 0
     flattened = 0
     invalid = 0
@@ -206,7 +211,7 @@ def clean_images_dir(images_dir):
           f"remaining={len([f for f in os.listdir(images_dir) if os.path.isfile(os.path.join(images_dir, f))])}")
 
 
-_IMAGE_EXTS = (".png", ".jpg", ".jpeg")
+_IMAGE_EXTS = IMAGE_EXTS
 
 
 def _flat_key(rel_path):
@@ -418,7 +423,7 @@ def _generate_sfm_depths_pycolmap(data_dir: str, colmap_sparse: str) -> None:
     disk_wh = {}
     if os.path.isdir(images_dir):
         for fname in os.listdir(images_dir):
-            if os.path.splitext(fname)[1].lower() in {".png", ".jpg", ".jpeg"}:
+            if os.path.splitext(fname)[1].lower() in IMAGE_EXTS:
                 wh = _image_wh(os.path.join(images_dir, fname))
                 if wh is not None:
                     disk_wh[os.path.splitext(fname)[0]] = wh
@@ -441,7 +446,7 @@ def _generate_sfm_depths_pycolmap(data_dir: str, colmap_sparse: str) -> None:
     # will have their map overwritten below.
     if os.path.isdir(images_dir):
         for fname in os.listdir(images_dir):
-            if os.path.splitext(fname)[1].lower() in {".png", ".jpg", ".jpeg"}:
+            if os.path.splitext(fname)[1].lower() in IMAGE_EXTS:
                 stem = os.path.splitext(fname)[0]
                 zero_path = os.path.join(sfm_depths_dir, stem + ".npy")
                 if not os.path.exists(zero_path):
@@ -731,7 +736,7 @@ def main():
     if os.path.exists(images_dir):
         import cv2 as _cv2
         _img_files = [f for f in os.listdir(images_dir)
-                      if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                      if f.lower().endswith(IMAGE_EXTS)
                       and os.path.isfile(os.path.join(images_dir, f))]
         if _img_files:
             _dims = set()
@@ -752,7 +757,7 @@ def main():
                     _h, _w = _img.shape[:2]
                     if _w != _target_w or _h != _target_h:
                         _img = _crop_resize(_img, _target_w, _target_h, _cv2.INTER_AREA)
-                        _cv2.imwrite(_fp, _img)
+                        imwrite_image(_fp, _img)
                         _resized[os.path.splitext(_f)[0]] = (_w, _h)
                 print(f"Normalized {len(_resized)}/{len(_img_files)} images to {_target_w}x{_target_h}")
                 # transforms.json, masks and depth maps still describe the uncropped images.
@@ -762,7 +767,7 @@ def main():
                 _masks_dir = os.path.join(data_dir, "masks")
                 if os.path.isdir(_masks_dir):
                     _mask_files = [f for f in os.listdir(_masks_dir)
-                                   if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                                   if f.lower().endswith(IMAGE_EXTS)
                                    and os.path.isfile(os.path.join(_masks_dir, f))]
                     _mask_resized = 0
                     for _mf in _mask_files:
@@ -785,7 +790,7 @@ def main():
                 _masks_dir = os.path.join(data_dir, "masks")
                 if os.path.isdir(_masks_dir):
                     _mask_files = [f for f in os.listdir(_masks_dir)
-                                   if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                                   if f.lower().endswith(IMAGE_EXTS)
                                    and os.path.isfile(os.path.join(_masks_dir, f))]
                     _mask_resized = 0
                     for _mf in _mask_files:
@@ -834,21 +839,21 @@ def main():
     # If images/ is empty, search for images in common alternative locations
     # (e.g. colmap/images/ when the zip was a COLMAP reconstruction export)
     if not os.path.isdir(images_dir) or not any(
-        f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        f.lower().endswith(IMAGE_EXTS)
         for f in os.listdir(images_dir)
         if os.path.isfile(os.path.join(images_dir, f))
     ):
         for alt in ['colmap/images', 'colmap/images/images']:
             alt_path = os.path.join(data_dir, alt)
             if os.path.isdir(alt_path) and any(
-                f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                f.lower().endswith(IMAGE_EXTS)
                 for f in os.listdir(alt_path)
                 if os.path.isfile(os.path.join(alt_path, f))
             ):
                 print(f"images/ is empty, copying images from {alt_path}")
                 os.makedirs(images_dir, exist_ok=True)
                 for f in os.listdir(alt_path):
-                    if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    if f.lower().endswith(IMAGE_EXTS):
                         shutil.copy2(os.path.join(alt_path, f), os.path.join(images_dir, f))
                 break
 
@@ -1289,7 +1294,7 @@ def main():
                 if not mono_already_done:
                     _img_dir = os.path.join(data_dir, "images")
                     if os.path.isdir(_img_dir) and any(
-                        f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                        f.lower().endswith(IMAGE_EXTS)
                         for f in os.listdir(_img_dir)
                     ):
                         depth_aligner = ColmapToAlignedMonoDepths(
@@ -1384,7 +1389,7 @@ def main():
         if os.path.isdir(_masks_dir) and os.path.isdir(images_dir):
             _sample_img = next(
                 (f for f in os.listdir(images_dir)
-                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                 if f.lower().endswith(IMAGE_EXTS)
                  and os.path.isfile(os.path.join(images_dir, f))), None
             )
             if _sample_img is not None:
@@ -1416,7 +1421,7 @@ def main():
     if os.path.isdir(_masks_dir) and os.path.isdir(images_dir):
         _img_sample = next(
             (f for f in os.listdir(images_dir)
-             if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+             if f.lower().endswith(IMAGE_EXTS)
              and os.path.isfile(os.path.join(images_dir, f))), None
         )
         if _img_sample is not None:

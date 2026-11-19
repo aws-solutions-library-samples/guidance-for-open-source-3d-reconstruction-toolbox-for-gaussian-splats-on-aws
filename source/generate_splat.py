@@ -127,6 +127,7 @@ file_contents = {
         "collisionSeedPos": "0,0,0",
         "generateLod": "false",
         "generateMesh": "true",
+        "archiveMode": "full",  # model.tar.gz: full | slim | none
         "plyCoords": "rhyu",
         "spzCoords": "rhyu",
         "sogCoords": "rhyu",

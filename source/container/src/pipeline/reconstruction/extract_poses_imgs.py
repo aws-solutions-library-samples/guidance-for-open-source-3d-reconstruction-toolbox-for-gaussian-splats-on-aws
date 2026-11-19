@@ -77,6 +77,12 @@ import zipfile
 import argparse
 from pathlib import Path
 from typing import Union
+import sys
+try:
+    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from image_formats import IMAGE_EXTS
 
 def get_image_extension(depth_path):
     """
@@ -179,7 +185,7 @@ def extract_zip(zip_path: Union[str, Path], use_transforms: str) -> bool:
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                 elif 'depth' in filename.lower():
                     target_path = depth_dir / filename
-                elif any(filename.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png']):
+                elif any(filename.lower().endswith(ext) for ext in IMAGE_EXTS):
                     target_path = images_dir / filename
                 else:
                     print(f"Skipping unknown file type: {filename}")

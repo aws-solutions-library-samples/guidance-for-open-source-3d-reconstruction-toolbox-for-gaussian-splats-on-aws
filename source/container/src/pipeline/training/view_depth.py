@@ -15,6 +15,12 @@ import os
 
 import cv2
 import numpy as np
+import sys
+try:
+    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from image_formats import IMAGE_EXTS
 
 p = argparse.ArgumentParser()
 p.add_argument("--data", default="/mnt/data/workflow-input")
@@ -30,7 +36,7 @@ mono_dir = os.path.join(args.data, "mono_depth")
 out_dir = os.path.join(args.data, "depth_preview")
 os.makedirs(out_dir, exist_ok=True)
 
-names = sorted(f for f in os.listdir(img_dir) if f.lower().endswith((".jpg", ".jpeg", ".png")))
+names = sorted(f for f in os.listdir(img_dir) if f.lower().endswith(IMAGE_EXTS))
 names = names[:: max(1, args.every)]
 
 

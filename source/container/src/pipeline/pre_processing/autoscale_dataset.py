@@ -53,6 +53,11 @@ import os
 import sys
 
 import cv2
+try:
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image
 
 # Minimum resolution floor for Gaussian splat quality
 MIN_EDGE = 1080
@@ -160,7 +165,7 @@ def cap_to_4k(width: int, height: int) -> tuple:
 
 def get_image_files(image_dir: str) -> list:
     """Return sorted list of image file paths, including subdirectories."""
-    exts = ('.png', '.jpg', '.jpeg')
+    exts = IMAGE_EXTS
     files = []
     for root, _, filenames in os.walk(image_dir):
         for f in filenames:
@@ -189,7 +194,7 @@ def resize_images(image_files: list, target_w: int, target_h: int):
         h, w = img.shape[:2]
         if w != target_w or h != target_h:
             img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
-            cv2.imwrite(fpath, img)
+            imwrite_image(fpath, img)
             resized += 1
     print(f"Resized {resized}/{len(image_files)} images to {target_w}x{target_h}")
 

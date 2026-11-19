@@ -47,6 +47,7 @@
     "COLLISION_SEED_POS": "0,0,0",
     "GENERATE_LOD": "false",
     "GENERATE_MESH": "false",
+    "ARCHIVE_MODE": "full",
     "PRESERVE_SCENE_SCALE": "false",
     "ENABLE_FL_HEURISTIC": "false",
     "FL_HEURISTIC_VALUE": "1.2",
