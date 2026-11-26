@@ -17,10 +17,10 @@ import cv2
 import numpy as np
 import sys
 try:
-    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image  # /opt/ml/code/image_formats.py (on PYTHONPATH)
 except ImportError:  # run from the repo: the module is in src/pipeline/
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    from image_formats import IMAGE_EXTS
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image
 
 p = argparse.ArgumentParser()
 p.add_argument("--data", default="/mnt/data/workflow-input")
@@ -92,6 +92,6 @@ for n in names:
         f"{lidar[lidar > 0].min():.2f}-{lidar.max():.2f} m, {100 * (lidar > 0.1).mean():.0f}% valid"
     row = np.hstack([label(rgb_s, stem), label(lidar_c, "LiDAR " + stats),
                      label(overlay, "LiDAR over RGB"), label(mono_c, "aligned mono")])
-    cv2.imwrite(os.path.join(out_dir, stem + ".jpg"), row, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    imwrite_image(os.path.join(out_dir, stem + ".jpg"), row)  # JPEG at quality 100, 4:4:4
 
 print(f"Wrote {len(names)} previews to {out_dir}")

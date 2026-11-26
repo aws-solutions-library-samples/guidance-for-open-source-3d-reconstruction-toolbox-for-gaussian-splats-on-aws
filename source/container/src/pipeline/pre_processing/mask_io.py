@@ -34,10 +34,10 @@ import cv2
 import numpy as np
 import sys
 try:
-    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image  # /opt/ml/code/image_formats.py (on PYTHONPATH)
 except ImportError:  # run from the repo: the module is in src/pipeline/
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    from image_formats import IMAGE_EXTS
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image
 
 
 
@@ -95,4 +95,4 @@ def save_preview(debug_dir, rel_image, image_bgr, removed, color):
         vis = cv2.resize(vis, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
     p = os.path.join(debug_dir, os.path.splitext(rel_image)[0] + ".jpg")
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    cv2.imwrite(p, vis)
+    imwrite_image(p, vis)  # JPEG at quality 100, 4:4:4

@@ -376,12 +376,34 @@ RUN wget https://github.com/AcademySoftwareFoundation/OpenImageIO/archive/refs/t
     && echo "OpenImageIO: WebP support OK"
 
 # Install COLMAP from source
+# ONNX Runtime (COLMAP's ALIKED/LightGlue features): COLMAP 4.1.1's CMake downloads
+# onnxruntime 1.24.4 from github.com/microsoft/onnxruntime releases, which return 404
+# since 2026-11-17 (repo removed). Use COLMAP's own mirror of the 1.32.0 C API package
+# (CUDA 13 build, checksum from the release's SHA256SUMS) and hand it to FetchContent
+# through FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME, so CMake skips the broken download.
+ARG ONNXRUNTIME_VERSION=1.32.0
+ARG ONNXRUNTIME_PKG=onnxruntime-linux-x64-gpu_cuda13-1.32.0
+ARG ONNXRUNTIME_SHA256=335f58026f622ef733e5b13ca5d023e84678194efe44f6e79d60327584d69aa6
+RUN wget -q https://github.com/colmap/colmap/releases/download/deps-onnxruntime-v${ONNXRUNTIME_VERSION}/${ONNXRUNTIME_PKG}.tgz \
+    && echo "${ONNXRUNTIME_SHA256}  ${ONNXRUNTIME_PKG}.tgz" | sha256sum -c - \
+    && mkdir -p /opt/onnxruntime \
+    && tar -xzf ${ONNXRUNTIME_PKG}.tgz -C /opt/onnxruntime --strip-components=1 \
+    && rm ${ONNXRUNTIME_PKG}.tgz \
+    && test -f /opt/onnxruntime/include/onnxruntime_cxx_api.h \
+    && test -f /opt/onnxruntime/lib/cmake/onnxruntime/onnxruntimeConfig.cmake
 RUN wget https://github.com/colmap/colmap/archive/refs/tags/${COLMAP_VERSION}.zip \
     && unzip ${COLMAP_VERSION}.zip && rm ${COLMAP_VERSION}.zip \
     && cd colmap-${COLMAP_VERSION}/ && mkdir build && cd build \
-    && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DCASPAR_ENABLED=ON -DCUDA_ENABLED=ON -DMARCH_NATIVE=OFF -DCMAKE_PREFIX_PATH=/usr/local -Dcudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/13/cmake/cudss && ninja -j${NINJA_JOBS} install \
+    && cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}" -DCASPAR_ENABLED=ON -DCUDA_ENABLED=ON -DONNX_ENABLED=ON -DFETCHCONTENT_SOURCE_DIR_ONNXRUNTIME=/opt/onnxruntime -DMARCH_NATIVE=OFF -DCMAKE_PREFIX_PATH=/usr/local -Dcudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/13/cmake/cudss && ninja -j${NINJA_JOBS} install \
+    # Fallback runtime path in case COLMAP's install step leaves libonnxruntime out of /usr/local/lib
+    && echo /opt/onnxruntime/lib > /etc/ld.so.conf.d/onnxruntime.conf && ldconfig \
+    && (! ldd "$(command -v colmap)" | grep "not found") \
+    && ldd "$(command -v colmap)" | grep -m1 libonnxruntime \
+    && colmap -h > /dev/null \
     && cd ${CODE_PATH}/colmap-${COLMAP_VERSION} \
-    && python -m pip install . \
+    # pycolmap (python/CMakeLists.txt) links the installed COLMAP; pass the same
+    # onnxruntime location in case its configure step looks for it again
+    && CMAKE_ARGS="-DFETCHCONTENT_SOURCE_DIR_ONNXRUNTIME=/opt/onnxruntime" python -m pip install . \
     && cd ${CODE_PATH}
 
 # Download vocab tree as fallback if not provided via S3 models archive
@@ -432,8 +454,18 @@ RUN pip install --no-cache-dir \
     'nerfacc==0.5.2' \
     xatlas
 
-# Install sharp-frame-extractor separately after scipy is available
-RUN pip install --no-cache-dir sharp-frame-extractor
+# Install sharp-frame-extractor without its dependencies. 2.0.0 declares numpy>=2.4
+# (and opencv-python>=4.11), so a normal install upgrades the shared env to NumPy 2
+# and a newer OpenCV wheel, which the training stack (numba, nerfstudio, gsplat,
+# 3DGRUT) can't use. Its code only uses basic numpy/cv2 calls that work on 1.26.
+# Its other deps (av, psutil, rich, rich-argparse) don't pin numpy and are installed
+# alone. The import check runs Tenengrad scoring on numpy 1.26 at build time.
+ARG SHARP_FRAME_EXTRACTOR_VERSION=2.0.0
+RUN pip install --no-cache-dir --no-deps sharp-frame-extractor==${SHARP_FRAME_EXTRACTOR_VERSION} \
+    && pip install --no-cache-dir --no-deps 'av>=14.0.1' 'psutil>=7.2.1' 'rich>=14.2.0' 'rich-argparse>=1.7.2' \
+    && sharp-frame-extractor --help > /dev/null
+# (numpy may be 2.x at this point: the nerfstudio deps above upgrade it. The final
+# NumPy pin further down restores 1.26, and the check after it scores frames on 1.x.)
 
 # Install adaptive-frame-extractor CLI (MIT, prebuilt for Ubuntu 24.04; bundles its own OpenCV/FFmpeg libs via rpath)
 # Used by ADAPTIVE_FRAME_EXTRACTION (pre_processing/video/adaptive_video_to_images.py). GUI parts are removed.
@@ -648,6 +680,14 @@ RUN pip install --no-cache-dir --no-deps diffusers && pip install --no-cache-dir
 # PyTorch 13.2 and breaks diffusers/transformers imports via torchaudio._extension CUDA version check
 RUN pip install --force-reinstall --no-cache-dir 'numpy<2.0,>=1.26.4' 'moviepy==1.0.3' 'Pillow>=9.4.0,<10.0.0' \
     && pip uninstall -y torchaudio || true
+
+# sharp-frame-extractor (installed --no-deps above; it declares numpy>=2.4) must work on
+# the NumPy 1.x the training stack needs: score frames with its Tenengrad analyzer.
+RUN python -c "import numpy as np; assert np.__version__.startswith('1.'), np.__version__; \
+from sharp_frame_extractor.analyzer.frame_analyzer_base import FrameAnalyzerTask; \
+from sharp_frame_extractor.analyzer.tenegrad_frame_analyzer import TenengradFrameAnalyzer; \
+s = TenengradFrameAnalyzer().process(FrameAnalyzerTask(0, None), np.random.randint(0, 255, (2, 64, 64, 3), np.uint8)).scores; \
+print('sharp-frame-extractor OK on numpy', np.__version__, 'scores', s)"
 
 # Aggressively remove xformers completely after ALL installations
 RUN pip uninstall -y xformers || true && \

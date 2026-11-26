@@ -205,6 +205,32 @@ def splatfacto_schedule_args(model, max_steps):
     return args, summary
 
 
+GSPLAT_REF_STEPS = 30000             # gsplat simple_trainer's default run length
+GSPLAT_REF_STOP_REFINE = 15000       # default strategy: densify (split/clone/prune) until here
+GSPLAT_MCMC_REF_STOP_REFINE = 25000  # MCMC strategy: relocate/add Gaussians until here
+
+
+def gsplat_schedule_args(strategy, max_steps):
+    """Return (simple_trainer args, summary) that run gsplat for max_steps with its
+    30k-step schedule stretched to match. simple_trainer scales max_steps, the
+    densification window (refine start/stop, refine_every), opacity resets, the
+    SH-degree ramp-up and the eval/save steps by --steps_scaler; --max_steps alone
+    only adds refine-only steps, so a long run of a large dataset (e.g. 9672
+    Rooster images) densified during its first 15k steps only.
+    Scale r = max_steps / 30000, never below 1: runs of 30k steps or fewer keep the
+    defaults. r gets half a step extra so that int(30000 * r) == max_steps."""
+    if max_steps <= GSPLAT_REF_STEPS:
+        return ["--max_steps", str(max_steps), "--steps_scaler", "1.0", "--eval_steps", str(max_steps)], ""
+    r = (max_steps + 0.5) / GSPLAT_REF_STEPS
+    stop = int((GSPLAT_MCMC_REF_STOP_REFINE if strategy == "mcmc" else GSPLAT_REF_STOP_REFINE) * r)
+    args = ["--max_steps", str(GSPLAT_REF_STEPS), "--steps_scaler", f"{r:.6f}",
+            "--eval_steps", str(GSPLAT_REF_STEPS)]
+    summary = (f"gsplat {strategy} schedule for {max_steps:,} steps (x{r:.2f} of 30k): "
+               + (f"relocate/add Gaussians until step {stop:,}" if strategy == "mcmc"
+                  else f"densify until step {stop:,}, opacity reset every {int(3000 * r):,} steps"))
+    return args, summary
+
+
 # MCMC Gaussian cap estimate (splatfacto-mcmc, gsplat-depth-mcmc, multi-GPU gsplat mcmc).
 # MCMC starts with one Gaussian per SfM point and only adds Gaussians up to the cap,
 # so the cap must leave room to grow above the point count.
@@ -237,6 +263,53 @@ def count_sfm_points(dataset_path):
         except (OSError, struct.error, ValueError):
             continue
     return 0
+
+
+def clean_sfm_points_for_training(model_dir, out_dir, drop_isolated=False, backup_dir=None):
+    """Remove exact duplicate SfM points (and, with drop_isolated, points whose mean
+    3-NN distance is > 20x the median) and write the model to out_dir.
+
+    splatfacto and gsplat's simple_trainer both start each Gaussian with scale
+    log(mean distance to its 3 nearest points): 4+ identical points give log(0) = -inf,
+    NaN Gaussians, and with MCMC (which never prunes them) an all-NaN splat. Isolated
+    points start as huge Gaussians that the MCMC noise step scatters. Nothing is
+    written when no point is removed. With out_dir == model_dir the model is rewritten
+    in place; backup_dir then receives copies of the original model files first.
+    Returns (duplicates removed, isolated removed, points before)."""
+    import numpy as _np
+    import pycolmap as _pc
+    from sklearn.neighbors import NearestNeighbors as _NN
+    rec = _pc.Reconstruction(model_dir)
+    ids = _np.array(list(rec.points3D.keys()))
+    if not len(ids):
+        return 0, 0, 0
+    xyz = _np.array([rec.points3D[int(i)].xyz for i in ids])
+    keep = _np.zeros(len(ids), dtype=bool)
+    keep[_np.unique(xyz, axis=0, return_index=True)[1]] = True
+    n_dup = int((~keep).sum())
+    n_iso = 0
+    if drop_isolated and keep.sum() > 4:
+        k = _NN(n_neighbors=4).fit(xyz[keep]).kneighbors(xyz[keep])[0][:, 1:].mean(1)
+        iso = k > 20.0 * _np.median(k)
+        n_iso = int(iso.sum())
+        keep[_np.where(keep)[0][iso]] = False
+    if not (n_dup or n_iso):
+        return 0, 0, len(ids)
+    for i in ids[~keep]:
+        rec.delete_point3D(int(i))  # also removes the point's observations from images
+    if os.path.abspath(out_dir) == os.path.abspath(model_dir):
+        if backup_dir and not os.path.exists(backup_dir):
+            os.makedirs(backup_dir)
+            for f in os.listdir(model_dir):
+                p = os.path.join(model_dir, f)
+                if os.path.isfile(p):
+                    shutil.copy2(p, backup_dir)
+    else:
+        if os.path.exists(out_dir):
+            shutil.rmtree(out_dir)
+        os.makedirs(out_dir)
+    rec.write(out_dir)
+    return n_dup, n_iso, len(ids)
 
 
 def gpu_total_memory_gb():
@@ -1145,8 +1218,22 @@ if __name__ == "__main__":
             else:
                 log.warning(f"Zip does not contain valid COLMAP reconstruction structure")
                 colmap_zip_found = False
+                _zip_items = sorted(os.listdir(extract_source)) if os.path.isdir(extract_source) else []
                 if os.path.exists(temp_path):
                     shutil.rmtree(temp_path)
+                if config['RUN_RECON'] == 'false':
+                    # Without reconstruction nothing else produces sparse/0, so training
+                    # would only fail later with "files do not exist at sparse/0".
+                    _hint = ("It looks like an image/rig upload (rig_config.json, no sparse/): "
+                             "set RUN_RECON=true (reconstruction) to build the COLMAP model."
+                             if 'rig_config.json' in _zip_items or 'priors.csv' in _zip_items
+                             else "Upload a COLMAP model (images/ + sparse/0/ with cameras, images, "
+                                  "points3D) or set RUN_RECON=true.")
+                    raise RuntimeError(
+                        pipeline.report_error(
+                            706,
+                            f"RUN_RECON=false but {config['FILENAME']} has no COLMAP model "
+                            f"(contents: {_zip_items[:10]}). {_hint}"))
         
         # Handle directory input - move contents to dataset root if in a subdirectory
         elif os.path.isdir(zip_path):
@@ -2220,14 +2307,17 @@ if __name__ == "__main__":
     try:
         if BUNDLE_ADJUST_COLMAP_MODEL:
             if colmap_zip_found and config['RUN_RECON'] == 'false':
+                # Feature extraction and matching run in the colmap tool on the GPU
+                # (it falls back to the CPU on its own).
                 pipeline.create_component(
                     name="Bundle-Adjust-Colmap-Model",
                     comp_type=ComponentType.PRE_PROCESSING,
                     comp_environ=ComponentEnvironment.PYTHON,
                     command="pre_processing/bundle_adjust_model.py",
-                    args=["--dataset", config['DATASET_PATH']],
+                    args=["--dataset", config['DATASET_PATH'],
+                          "--gpu", "on" if USE_GPU == "true" else "off"],
                     cwd=current_dir_path,
-                    requires_gpu=False
+                    requires_gpu=True
                 )
             elif config['RUN_RECON'] == 'true' and (
                     config['USE_POSE_PRIOR_COLMAP_MODEL_FILES'] == 'true' or
@@ -2864,20 +2954,21 @@ if __name__ == "__main__":
                 else:
                     model = "default"
                 log.info(f"GSplat depth-loss strategy: {model}")
+                # Runs longer than 30k steps stretch gsplat's schedule (--steps_scaler)
+                _gs_steps_args, _gs_schedule = gsplat_schedule_args(model, int(config['MAX_STEPS']))
+                if _gs_schedule:
+                    log.info(_gs_schedule)
                 args = [
                     model,
-                    "--max_steps", str(int(config['MAX_STEPS'])),
                     "--result-dir", output_path,
                     "--data_factor", "1",
-                    "--steps_scaler", "1.0",
                     "--disable_viewer",
-                    "--eval_steps", str(int(config['MAX_STEPS'])),
                     "--depth-loss",
-                    "--depth_lambda", "1e-3",
+                    "--depth_lambda", "1e-2",
                     "--data-dir", config['DATASET_PATH']
-                ]
+                ] + _gs_steps_args
                 if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
-                    args.extend(["--no-normalize-world-space", "--depth_lambda", "1e-4"])
+                    args.extend(["--no-normalize-world-space"])#, "--depth_lambda", "1e-4"])
                 if model == "mcmc":
                     num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
                     # simple_trainer's MCMC options live under Config.strategy
@@ -2886,8 +2977,12 @@ if __name__ == "__main__":
                     args.extend(["--post_processing", "ppisp", "--batch_size", "1"])
                 elif isp_mode == "bilagrid":
                     args.extend(["--post_processing", "bilateral_grid"])
-                if ENABLE_ABSGRAD:
+                # absgrad only exists on gsplat's DefaultStrategy; MCMCStrategy has no such
+                # option and simple_trainer exits with code 2 ("Unrecognized options").
+                if ENABLE_ABSGRAD and model == "default":
                     args.append("--strategy.absgrad")
+                elif ENABLE_ABSGRAD:
+                    log.info("ENABLE_ABSGRAD ignored: gsplat's MCMC strategy has no absgrad option")
                 # REFINE_POSES: gsplat's per-image pose correction (pose_opt, off by default)
                 if REFINE_POSES:
                     args.append("--pose_opt")
@@ -2982,14 +3077,14 @@ if __name__ == "__main__":
                 # EdgeAwareLogL1 is numerically stable for both sensor and mono depth.
                 # PearsonDepth can produce NaN gradients when depth variance is near zero.
                 depth_loss_type = "EdgeAwareLogL1"
-                depth_lambda = "0.2" if config['MODEL'] == "ags-mesh" else "0.3"
+                depth_lambda = "0.2" # if config['MODEL'] == "ags-mesh" else "0.3"
                 # Always use mono normals from dsine — they provide stronger supervision
                 # on planar surfaces than depth-derived normals (which are self-referencing).
                 normal_supervision = "mono"
                 # Stop densification at ~67% of training to allow a polish phase
                 stop_split_at = int(int(config['MAX_STEPS']) * 0.67)
                 log.info(f"DN-Splatter depth loss: {depth_loss_type}, normal-supervision: {normal_supervision}, stop-split-at: {stop_split_at}")
-                normal_lambda = "0.2" if config['MODEL'] == "ags-mesh" else "0.1"
+                normal_lambda = "0.1" # if config['MODEL'] == "ags-mesh" else "0.1"
                 args.extend([
                     "--pipeline.model.depth-lambda", depth_lambda,
                     "--pipeline.model.depth-loss-type", depth_loss_type,
@@ -3224,9 +3319,9 @@ if __name__ == "__main__":
                     "--data-dir", config['DATASET_PATH']
                 ]
                 if IS_GSPLAT_DEPTH:
-                    args.extend(["--depth_lambda", "1e-3"])
+                    args.extend(["--depth_lambda", "1e-2"])
                 if config.get('PRESERVE_SCENE_SCALE', 'false').lower() == 'true':
-                    args.extend(["--no-normalize-world-space", "--depth_lambda", "1e-4"])
+                    args.extend(["--no-normalize-world-space"]) #, "--depth_lambda", "1e-4"])
                 if model == "mcmc":
                     num_gaussians = int(config.get('NUM_GAUSSIANS', '1000000'))
                     # simple_trainer's MCMC options live under Config.strategy
@@ -3235,8 +3330,11 @@ if __name__ == "__main__":
                     log.info("PPISP not supported with multi-GPU gsplat (requires single GPU), skipping")
                 elif isp_mode == "bilagrid":
                     log.info("Bilateral grid not supported with multi-GPU gsplat (requires single GPU), skipping")
-                if ENABLE_ABSGRAD:
+                # absgrad only exists on gsplat's DefaultStrategy (not MCMCStrategy)
+                if ENABLE_ABSGRAD and model == "default":
                     args.append("--strategy.absgrad")
+                elif ENABLE_ABSGRAD:
+                    log.info("ENABLE_ABSGRAD ignored: gsplat's MCMC strategy has no absgrad option")
                 # REFINE_POSES: gsplat's per-image pose correction (pose_opt, off by default)
                 if REFINE_POSES:
                     args.append("--pose_opt")
@@ -5423,33 +5521,14 @@ if __name__ == "__main__":
                                 if os.path.exists(sparse_0) and component.command == "ns-train" and \
                                         "colmap" in component.args and "--colmap-path" not in component.args:
                                     try:
-                                        import numpy as _np
-                                        import pycolmap as _pc
-                                        from sklearn.neighbors import NearestNeighbors as _NN
-                                        _rec = _pc.Reconstruction(sparse_0)
-                                        _ids = _np.array(list(_rec.points3D.keys()))
-                                        _xyz = _np.array([_rec.points3D[int(_i)].xyz for _i in _ids])
-                                        _keep = _np.zeros(len(_ids), dtype=bool)
-                                        if len(_ids):
-                                            _keep[_np.unique(_xyz, axis=0, return_index=True)[1]] = True
-                                        _n_dup = int((~_keep).sum())
-                                        _n_iso = 0
-                                        if config['MODEL'] == "splatfacto-mcmc" and _keep.sum() > 4:
-                                            _k = _NN(n_neighbors=4).fit(_xyz[_keep]).kneighbors(_xyz[_keep])[0][:, 1:].mean(1)
-                                            _iso = _k > 20.0 * _np.median(_k)
-                                            _n_iso = int(_iso.sum())
-                                            _keep[_np.where(_keep)[0][_iso]] = False
+                                        _train_model = os.path.join(sparse_path_out, "0_train")
+                                        _n_dup, _n_iso, _n_all = clean_sfm_points_for_training(
+                                            sparse_0, _train_model,
+                                            drop_isolated=config['MODEL'] == "splatfacto-mcmc")
                                         if _n_dup or _n_iso:
-                                            for _i in _ids[~_keep]:
-                                                _rec.delete_point3D(int(_i))
-                                            _train_model = os.path.join(sparse_path_out, "0_train")
-                                            if os.path.exists(_train_model):
-                                                shutil.rmtree(_train_model)
-                                            os.makedirs(_train_model)
-                                            _rec.write(_train_model)
                                             component.args.extend(["--colmap-path", os.path.relpath(_train_model, config['DATASET_PATH'])])
                                             log.info(f"Training from {_train_model}: removed {_n_dup:,} duplicate and {_n_iso:,} "
-                                                     f"isolated SfM points of {len(_ids):,} (duplicates start as log(0) scale "
+                                                     f"isolated SfM points of {_n_all:,} (duplicates start as log(0) scale "
                                                      f"Gaussians, which turn NaN)")
                                     except Exception as _dedup_err:
                                         log.warning(f"Could not clean SfM points before training, using {sparse_0} as is: {_dedup_err}")
@@ -5488,6 +5567,27 @@ if __name__ == "__main__":
                                     _sparse_0, os.path.join(config['DATASET_PATH'], 'masks'), log)
                                 flatten_images_for_gsplat(image_path, _sparse_0, log)
                                 rebuild_points3d_tracks_for_gsplat(_sparse_0, log)
+                                # gsplat's simple_trainer uses the same log(mean 3-NN distance)
+                                # initial scale as splatfacto, so duplicate SfM points give
+                                # log(0) = -inf -> NaN Gaussians that MCMC never prunes (the
+                                # splatfacto-mcmc error 766 failure). gsplat always reads
+                                # <data-dir>/sparse/0, so clean this model in place; the
+                                # original points3D/images are kept in <model>_before_point_cleanup.
+                                try:
+                                    _n_dup, _n_iso, _n_all = clean_sfm_points_for_training(
+                                        _sparse_0, _sparse_0,
+                                        drop_isolated=config['MODEL'] == "gsplat-depth-mcmc",
+                                        backup_dir=_sparse_0.rstrip(os.sep) + "_before_point_cleanup")
+                                    if _n_dup or _n_iso:
+                                        log.info(f"gsplat-depth: removed {_n_dup:,} duplicate and {_n_iso:,} isolated "
+                                                 f"SfM points of {_n_all:,} from {_sparse_0} (duplicates start as "
+                                                 f"log(0) scale Gaussians, which turn NaN)")
+                                    else:
+                                        log.info(f"gsplat-depth: no duplicate SfM points in {_sparse_0} "
+                                                 f"({_n_all:,} points)")
+                                except Exception as _dedup_err:
+                                    log.warning(f"gsplat-depth: could not clean SfM points, using {_sparse_0} "
+                                                f"as is: {_dedup_err}")
                                 # Flatten masks/ to match flattened image names.
                                 # patch_gsplat.py looks up masks by imdata[k].name which is now
                                 # 'face_00_pano_001.png' after flattening, so masks must also be flat.

@@ -455,14 +455,20 @@ def main():
         if mask_dir:
             import cv2
             mask_root = os.path.join(work, "masks")
-            for c in picked:
+            # Every image of the SfM needs a mask once --ImageReader.mask_path is set:
+            # COLMAP 4 skips images without one (MASK_ERROR, not even added to the
+            # database). Staging only the 360 sensors' masks dropped every reference
+            # (iPhone) image, and the step always stopped at "only 0/N reference images
+            # registered in SfM". Images without a usable mask get an all-white one.
+            for c in [ref_cam] + picked:
                 for i in by_cam[c]:
                     mf = mask_file(mask_dir, imgs[i]["name"])
-                    if mf:
-                        m = cv2.imread(mf, cv2.IMREAD_GRAYSCALE)
-                        dst = os.path.join(mask_root, imgs[i]["name"] + ".png")
-                        os.makedirs(os.path.dirname(dst), exist_ok=True)
-                        cv2.imwrite(dst, ((m > 127) * 255).astype(np.uint8))
+                    m = cv2.imread(mf, cv2.IMREAD_GRAYSCALE) if mf else None
+                    if m is None:
+                        m = np.full((int(cams[c]["height"]), int(cams[c]["width"])), 255, np.uint8)
+                    dst = os.path.join(mask_root, imgs[i]["name"] + ".png")
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    cv2.imwrite(dst, ((m > 127) * 255).astype(np.uint8))
         groups = [(cams[ref_cam], sorted(imgs[i]["name"] for i in by_cam[ref_cam]))]
         groups += [(cams[c], sorted(imgs[i]["name"] for i in by_cam[c])) for c in picked]
         use_gpu = args.gpu == "on"

@@ -32,16 +32,26 @@ from tqdm import tqdm
 import pycolmap
 from pycolmap import logging
 try:
-    from image_formats import IMAGE_EXTS  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+    from image_formats import (IMAGE_EXTS, imwrite as imwrite_image,  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+                               pil_save_kwargs, pycolmap_can_read)
 except ImportError:  # run from the repo: the module is in src/pipeline/
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-    from image_formats import IMAGE_EXTS
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image, pil_save_kwargs, pycolmap_can_read
 
 N = TypeVar("N", bound=int)
 NDArrayNx2 = np.ndarray[tuple[N, Literal[2]], np.dtype[np.float64]]
 NDArray3x1 = np.ndarray[tuple[Literal[3], Literal[1]], np.dtype[np.float64]]
 
 VOCAB_TREE_PATH = "/opt/ml/code/vocab_tree_flickr100K_words32K.bin"
+
+
+def perspective_view_name(pano_name: str) -> str:
+    """File name of the views rendered from a panorama. pycolmap (feature
+    extraction and mapping below) cannot decode WebP, so views of a .webp
+    panorama are written as lossless PNG; other panoramas keep their extension."""
+    if pycolmap_can_read(pano_name):
+        return pano_name
+    return os.path.splitext(pano_name)[0] + ".png"
 
 
 @dataclass
@@ -311,12 +321,14 @@ class PanoProcessor:
             blur_size = max(7, int(self._camera.width * 0.01) | 1)
             mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
 
-            image_name = self.rig_config.cameras[cam_idx].image_prefix + pano_name
+            image_name = self.rig_config.cameras[cam_idx].image_prefix + perspective_view_name(pano_name)
             mask_name = f"{image_name}.png"
 
             image_path = self.output_image_dir / image_name
             image_path.parent.mkdir(exist_ok=True, parents=True)
-            PIL.Image.fromarray(image).save(image_path, exif=gpsonly_exif)
+            # Full quality: JPEG views at quality 100 / 4:4:4 (PIL's default is 75),
+            # PNG views lossless.
+            PIL.Image.fromarray(image).save(image_path, exif=gpsonly_exif, **pil_save_kwargs(image_path))
 
             mask_path = self.mask_dir / mask_name
             mask_path.parent.mkdir(exist_ok=True, parents=True)
@@ -544,7 +556,7 @@ def run(args: argparse.Namespace) -> None:
                             continue
                         img = cv2.imread(str(img_file))
                         if img is not None and np.max(img) > 10:
-                            cv2.imwrite(str(target_dir / img_file.name), img)
+                            imwrite_image(str(target_dir / img_file.name), img)
                     logging.info(f"Copied non-black removed images into {subfolder.name}")
             else:  # erase — copy erased images (skip refined_masks subdir), then resize all to match
                 for subfolder in mask_human_output_dir.iterdir():
@@ -558,7 +570,7 @@ def run(args: argparse.Namespace) -> None:
                             continue
                         img = cv2.imread(str(img_file))
                         if img is not None and np.max(img) > 10:
-                            cv2.imwrite(str(target_dir / img_file.name), img)
+                            imwrite_image(str(target_dir / img_file.name), img)
                     logging.info(f"Copied non-black erased images into {subfolder.name}")
 
                 # Resize all perspective images to 960x960 to match eraser output
@@ -571,7 +583,7 @@ def run(args: argparse.Namespace) -> None:
                         img = cv2.imread(str(img_file))
                         if img is not None and (img.shape[0] != 960 or img.shape[1] != 960):
                             img = cv2.resize(img, (960, 960), interpolation=cv2.INTER_LANCZOS4)
-                            cv2.imwrite(str(img_file), img)
+                            imwrite_image(str(img_file), img)
                     logging.info(f"Resized all images to 960x960 in {subfolder.name}")
 
             logging.info("Perspective images replaced with object-removed versions")

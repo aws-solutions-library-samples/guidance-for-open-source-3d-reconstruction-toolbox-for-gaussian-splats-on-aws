@@ -74,10 +74,10 @@ from torchvision.utils import save_image
 from diffusers.utils import load_image
 from torchvision.transforms.functional import to_tensor, gaussian_blur, to_pil_image
 try:
-    from image_formats import IMAGE_EXTS, imwrite as imwrite_image  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image, pil_save_kwargs  # /opt/ml/code/image_formats.py (on PYTHONPATH)
 except ImportError:  # run from the repo: the module is in src/pipeline/
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-    from image_formats import IMAGE_EXTS, imwrite as imwrite_image
+    from image_formats import IMAGE_EXTS, imwrite as imwrite_image, pil_save_kwargs
 
 def preprocess_image(image_path, width, height, device, dtype):
     image = to_tensor((load_image(image_path)))
@@ -362,7 +362,10 @@ def save_difference_image(input_path, final_image, output_dir, base_name, ext, o
         input_tensor = Functional.interpolate(input_tensor, (orig_height, orig_width), mode='bilinear', align_corners=False)
     diff_image = torch.abs(final_image - input_tensor)
     diff_path = os.path.join(output_dir, f"{base_name}_diff{ext}")
-    save_image(diff_image.squeeze(0), diff_path)
+    # torchvision's save_image uses PIL's defaults (JPEG quality 75, lossy WebP);
+    # same rounding, saved at full quality instead.
+    diff = diff_image.squeeze(0).mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to("cpu", torch.uint8).numpy()
+    Image.fromarray(diff).save(diff_path, **pil_save_kwargs(diff_path))
 
 def process_batch_images(batch_pairs, args, pipeline, device, dtype, refined_mask_dir, log):
     """Process images individually"""

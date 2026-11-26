@@ -28,6 +28,11 @@ import numpy as np
 import cv2
 import sys
 import logging
+try:
+    from image_formats import imwrite as imwrite_image  # /opt/ml/code/image_formats.py (on PYTHONPATH)
+except ImportError:  # run from the repo: the module is in src/pipeline/
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+    from image_formats import imwrite as imwrite_image
 
 # Import our compatibility module first to patch the cog module
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -240,7 +245,9 @@ class Predictor(BasePredictor):
                 
                 if ret:
                     frame_path = os.path.join(output_dir, f"{frame_idx:05d}.jpg")
-                    if cv2.imwrite(frame_path, frame):
+                    # SAM2's video predictor reads JPEG frames; quality 100, 4:4:4
+                    # (the output images are cut from these frames).
+                    if imwrite_image(frame_path, frame):
                         frame_idx += 1
                         extracted_frames += 1
                     else:
@@ -413,7 +420,7 @@ class Predictor(BasePredictor):
                 logging.warning(f"Failed to read frame at position {pos}")
                 continue
             frame_path = os.path.join(frames_dir, f"{frame_idx:05d}.jpg")
-            cv2.imwrite(frame_path, frame)
+            imwrite_image(frame_path, frame)  # JPEG at quality 100, 4:4:4
             frame_names.append(f"{frame_idx:05d}.jpg")
 
         cap.release()

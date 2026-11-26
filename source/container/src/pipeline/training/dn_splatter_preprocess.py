@@ -293,7 +293,7 @@ def _sync_cropped_images(data_dir, resized, dst_w, dst_h):
                 arr = cv2.imread(path, cv2.IMREAD_UNCHANGED)
                 if arr is None or arr.shape[1::-1] == (dst_w, dst_h):
                     continue
-                cv2.imwrite(path, _crop_resize(arr, dst_w, dst_h, cv2.INTER_NEAREST))
+                imwrite_image(path, _crop_resize(arr, dst_w, dst_h, cv2.INTER_NEAREST))
                 synced += 1
     if synced:
         print(f"Cropped and resized {synced} masks/depth maps to {dst_w}x{dst_h} to match their images")

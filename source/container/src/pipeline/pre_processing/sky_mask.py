@@ -47,6 +47,11 @@ Refinement at full resolution:
      --no-require-top). Sky cells enclosed by branches are added when SAM calls
      them sky and they lie within reach of accepted sky. Small sky-coloured gaps
      in textured surroundings (foliage) are added too.
+  3b. Canopy gaps (canopy_gaps(), --no-canopy turns it off; only inside trees found
+     with a second DINO + SAM pass for --canopy-prompt): small sky-coloured
+     gaps between twigs are added with SAM and the strict depth test relaxed, but
+     only where they sit in textured, darker surroundings near the sky, so
+     buildings are not affected.
   4. Optional LiDAR veto (--depth-dir): pixels with a measured depth are not sky.
   5. A small dilation so sky-coloured edge pixels are excluded too.
 
@@ -97,10 +102,11 @@ class SkySegmenter:
             self.sam_name = SAM1_MODEL
         print(f"[Sky] Models: {DINO_MODEL} + {self.sam_name} on {device}")
 
-    def __call__(self, pil_image):
+    def __call__(self, pil_image, text="sky."):
+        """(probability map, number of boxes) for the DINO text prompt."""
         torch = self.torch
         W, H = pil_image.size
-        inp = self.dino_proc(images=pil_image, text="sky.", return_tensors="pt").to(self.device)
+        inp = self.dino_proc(images=pil_image, text=text, return_tensors="pt").to(self.device)
         with torch.no_grad():
             out = self.dino(**inp)
         det = self.dino_proc.post_process_grounded_object_detection(
@@ -201,8 +207,146 @@ def _gradient(L, sigma):
     return np.hypot(cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1))
 
 
-def refine(img_bgr, prob, disp, args, depth_path=None):
-    """Full-resolution sky mask from SAM's probability and a relative disparity map."""
+def canopy_gaps(lab, L, dn, have_depth, sky, mu_s, dist_s, greenish, short, args, tree=None):
+    """Small sky gaps between twigs and leaves that the main pass leaves out.
+
+    The main pass needs SAM probability and a far depth, which a bare tree canopy
+    lacks: SAM's 256 px mask and the depth model both blur the twigs into one
+    near blob. Here those two tests are relaxed, but only for pixels that look like
+    a gap in branches:
+      - sky colour (within --canopy-color-tol of the local sky colour, not green)
+        and bright (sky is the light part, twigs the dark part),
+      - far by depth over a wider local-minimum window (--canopy-depth-win),
+      - each connected gap is small (--canopy-max-area),
+      - brighter than the non-sky pixels right around it by --canopy-min-contrast
+        (sky shows through dark branches),
+      - the non-sky pixels around it are textured (--canopy-min-texture, ~1.6% of
+        the short side), so windows and sky reflections in flat walls, roofs and
+        pale building faces don't qualify,
+      - with a blue sky (median b* < -canopy_blue_sky): the gap is clearly blue
+        (b* <= canopy_b_frac x sky b*), since walls, windows and shadows are
+        warm (b* > 0); --canopy-min-blue-shift optionally also requires it to be
+        bluer than its surroundings,
+      - within --canopy-reach of the sky found by the main pass, then within
+        --canopy-chain-reach of an accepted gap,
+      - inside a tree: `tree` is SAM's probability for the --canopy-prompt boxes
+        (default "tree."). Near the horizon the sky is often white, the same colour
+        as white cars, walls and window frames, and those also sit in textured,
+        darker surroundings; only the tree test tells them apart. With tree=None
+        (no tree detected) no gaps are added.
+    """
+    if not sky.any() or tree is None:
+        return np.zeros_like(sky)
+    if have_depth:
+        r = max(1, int(args.canopy_depth_win * short)) | 1
+        far = cv2.erode(dn, np.ones((r, r), np.uint8)) < args.depth_far
+    else:
+        far = np.ones_like(sky)
+    bright = L >= args.canopy_min_rel_l * np.percentile(L[sky], 50)
+    gap = (dist_s < args.canopy_color_tol) & ~greenish & bright & far & ~sky
+    if not gap.any():
+        return np.zeros_like(sky)
+
+    n, cc, st, _ = cv2.connectedComponentsWithStats(gap.astype(np.uint8), connectivity=8)
+    area = st[:, cv2.CC_STAT_AREA]
+    small = area <= args.canopy_max_area * short * short
+    small[0] = False
+    if not small[1:].any():
+        return np.zeros_like(sky)
+    # Ring: a few pixels around each gap, not counting other gaps or sky.
+    # Surroundings = pixels that are neither sky nor a gap (the branches, or the wall).
+    # Local means of those pixels, read back on each gap's own pixels, so packed gaps
+    # don't compete for ring pixels.
+    other = (~(gap | sky)).astype(np.float32)
+
+    def around(values, k):
+        k = max(3, k) | 1
+        s = cv2.blur(other, (k, k))
+        return cv2.blur(values * other, (k, k)) / np.maximum(s, 1e-6), s
+
+    # Contrast: the branches right next to the gap (5 px window).
+    near_l, near_cov = around(L, 5)
+    # Texture over a wider window: around a window in a flat wall this is smooth,
+    # in a canopy it crosses many twig edges.
+    tex_l, tex_cov = around(_gradient(L, 1.0), max(9, int(0.016 * short)))
+
+    def per_gap(v):
+        return np.bincount(cc.ravel(), weights=v.ravel(), minlength=n) / np.maximum(area, 1)
+
+    gap_l = per_gap(L)
+    ring_l = per_gap(near_l)
+    ring_tex = per_gap(tex_l)
+    covered = (per_gap((near_cov > 0).astype(np.float32)) > 0.5) & \
+              (per_gap((tex_cov > 0).astype(np.float32)) > 0.5)
+    ok = small & covered & (ring_tex > args.canopy_min_texture) & \
+        (gap_l - ring_l > args.canopy_min_contrast)
+    # Inside a tree crown. SAM's 256 px tree mask is coarse and may leave out gaps
+    # at the crown edge, so it is widened by --canopy-tree-grow first.
+    in_tree = cv2.resize(tree, (sky.shape[1], sky.shape[0])) > args.canopy_tree_prob
+    g = max(1, int(args.canopy_tree_grow * short))
+    if g > 1:
+        in_tree = cv2.dilate(in_tree.astype(np.uint8), _disk(g // 2)) > 0
+    ok &= per_gap(in_tree.astype(np.float32)) > 0.5
+    # Blue sky: a gap must be clearly blue and bluer than what surrounds it. Building
+    # walls, windows and shadows are warm (b* > 0) even where they are pale and
+    # near the sky colour in Lab distance. Skipped for grey/overcast skies.
+    B = lab[:, :, 2]
+    sky_b = float(np.median(B[sky]))
+    if args.canopy_blue_sky > 0 and sky_b < -args.canopy_blue_sky:
+        near_b, _ = around(B, 5)
+        gap_b = per_gap(B)
+        ring_b = per_gap(near_b)
+        ok &= gap_b <= args.canopy_b_frac * sky_b
+        if args.canopy_min_blue_shift > 0:
+            ok &= ring_b - gap_b >= args.canopy_min_blue_shift
+    ok[0] = False
+    # First hop: within --canopy-reach of the main sky. Later hops: within
+    # --canopy-chain-reach of an accepted gap, so the chain follows a canopy
+    # (gaps packed together) instead of jumping across to a building.
+    reach = max(3, int(args.canopy_reach * short))
+    chain = max(3, int(args.canopy_chain_reach * short))
+    keep = np.zeros(n, bool)
+    new = ok & (np.bincount(cc[_near(sky, reach)], minlength=n) > 0)
+    for _ in range(args.join_iters):
+        if not new.any():
+            break
+        keep |= new
+        new = ok & ~keep & (np.bincount(cc[_near(keep[cc], chain)], minlength=n) > 0)
+    return keep[cc]
+
+
+def save_stages(debug_dir, rel, img_bgr, st):
+    """Debug image: overlay of each step's pixels | SAM sky probability | depth | tree.
+
+    Overlay colours: blue = main pass, yellow = small holes, red = canopy step.
+    Depth panel: dark = far (sky), light = near.
+    """
+    H, W = img_bgr.shape[:2]
+    vis = img_bgr.copy()
+    for key, col in (("main", (255, 80, 0)), ("holes", (0, 220, 255)), ("canopy", (0, 0, 255))):
+        m = st.get(key)
+        if m is not None and m.any():
+            vis[m] = (0.4 * vis[m] + 0.6 * np.array(col)).astype(np.uint8)
+    p = cv2.resize(st["prob"], (W, H))
+    panels = [vis, cv2.cvtColor((np.clip(p, 0, 1) * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)]
+    if st.get("dn") is not None:
+        panels.append(cv2.cvtColor((np.clip(st["dn"], 0, 1) * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR))
+    if st.get("tree") is not None:
+        t = cv2.resize(st["tree"], (W, H))
+        panels.append(cv2.cvtColor((np.clip(t, 0, 1) * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR))
+    out = np.hstack(panels)
+    s = min(1.0, 2400 / out.shape[1])
+    out = cv2.resize(out, (int(out.shape[1] * s), int(out.shape[0] * s)), interpolation=cv2.INTER_AREA)
+    path = os.path.join(debug_dir, "stages", os.path.splitext(rel)[0] + ".jpg")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    cv2.imwrite(path, out, [cv2.IMWRITE_JPEG_QUALITY, 92])
+
+
+def refine(img_bgr, prob, disp, args, depth_path=None, stages=None, tree=None):
+    """Full-resolution sky mask from SAM's probability and a relative disparity map.
+
+    stages: optional dict, filled with each step's pixels for save_stages().
+    """
     H, W = img_bgr.shape[:2]
     short = min(H, W)
     none = np.zeros((H, W), bool)
@@ -311,6 +455,13 @@ def refine(img_bgr, prob, disp, args, depth_path=None):
         ok[1:] = sums[1:] / np.maximum(cnts[1:], 1) > args.hole_min_texture
         holes = ok[cc2] & holes & _near(main, reach)
     out = main | holes
+    can = none
+    if args.canopy:
+        can = canopy_gaps(lab, L, dn, disp is not None, out, mu_s, dist_s, greenish, short, args, tree)
+        out = out | can
+    if stages is not None:
+        stages.update(prob=prob, dn=dn if disp is not None else None, tree=tree,
+                      main=main, holes=holes & ~main, canopy=can & ~main & ~holes)
 
     # 4. LiDAR veto, 5. grow.
     k = max(1, int(args.grow * short))
@@ -381,6 +532,40 @@ def main():
                    help="Largest stand-alone sky-coloured gap, fraction of short_side^2")
     g.add_argument("--hole-min-texture", type=float, default=6.0,
                    help="Gaps must be surrounded by texture (foliage), not a flat surface")
+    g = ap.add_argument_group("canopy gaps (sky seen between twigs; see canopy_gaps())")
+    g.add_argument("--no-canopy", dest="canopy", action="store_false",
+                   help="Do not add small sky gaps inside branch texture")
+    g.add_argument("--canopy-color-tol", type=float, default=14.0,
+                   help="Max Lab distance of a gap from the local sky colour")
+    g.add_argument("--canopy-depth-win", type=float, default=0.03,
+                   help="Local depth-minimum window for gaps, fraction of the short side")
+    g.add_argument("--canopy-reach", type=float, default=0.15,
+                   help="Gaps must be this close to the main sky, fraction of the short side")
+    g.add_argument("--canopy-max-area", type=float, default=0.002,
+                   help="Largest gap, fraction of short_side^2 (~5,000 px at 1600 px)")
+    g.add_argument("--canopy-min-texture", type=float, default=10.0,
+                   help="Mean gradient (L, 0-255) around a gap; flat walls stay below this")
+    g.add_argument("--canopy-min-contrast", type=float, default=12.0,
+                   help="A gap must be this much brighter (L, 0-255) than the branches around it")
+    g.add_argument("--canopy-min-rel-l", type=float, default=0.75,
+                   help="Gaps must be at least this times the median lightness of the main sky")
+    g.add_argument("--canopy-blue-sky", type=float, default=0.0,
+                   help="0 = off. Otherwise the blue tests below apply when the main sky's median "
+                        "b* is below minus this (e.g. 8). Off by default: sky seen through crowns "
+                        "near the horizon is often white, and the tree test rejects buildings")
+    g.add_argument("--canopy-prompt", default="tree.",
+                   help="Grounding DINO prompt for the regions where canopy gaps may be added")
+    g.add_argument("--canopy-tree-prob", type=float, default=0.5,
+                   help="SAM probability above which a pixel counts as tree")
+    g.add_argument("--canopy-tree-grow", type=float, default=0.01,
+                   help="Widen the tree mask by this fraction of the short side (coarse SAM edges)")
+    g.add_argument("--canopy-b-frac", type=float, default=0.2,
+                   help="Blue sky: a gap's mean b* must be at most this times the sky's median b*")
+    g.add_argument("--canopy-min-blue-shift", type=float, default=0.0,
+                   help="Blue sky: a gap's b* must be this much lower than its surroundings' "
+                        "(0 = off; JPEG twig fringes are bluish, so higher values drop real gaps)")
+    g.add_argument("--canopy-chain-reach", type=float, default=0.03,
+                   help="After the first hop, gaps must be this close to an accepted gap")
     ap.add_argument("--grow", type=float, default=0.0015,
                     help="Final dilation, as a fraction of the short image side")
     ap.add_argument("--max-fraction", type=float, default=0.9,
@@ -407,7 +592,14 @@ def main():
         prob, n_boxes = seg(pil)
         if n_boxes:
             disp = depth(pil) if depth is not None else None
-            sky = refine(img, prob, disp, args, find_depth(args.depth_dir, rel))
+            tree = None
+            if args.canopy:
+                tree, n_tree = seg(pil, args.canopy_prompt)
+                tree = tree if n_tree else None
+            stages = {} if args.debug_dir else None
+            sky = refine(img, prob, disp, args, find_depth(args.depth_dir, rel), stages, tree)
+            if stages:
+                save_stages(args.debug_dir, rel, img, stages)
         else:
             sky = np.zeros(img.shape[:2], bool)
         frac = float(sky.mean())

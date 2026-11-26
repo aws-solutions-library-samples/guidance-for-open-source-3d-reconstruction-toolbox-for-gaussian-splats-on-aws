@@ -1646,13 +1646,21 @@ def remove_fully_masked_images_for_gsplat(image_path, sparse_0_path, masks_dir, 
 
     kept = []
     removed = []
+    removed_ids = set()
     for image_id, qvec, tvec, camera_id, name, num_pts, points2d_raw in records:
-        mask_file = os.path.join(masks_dir, name)
-        if os.path.isfile(mask_file):
+        # Masks are named like the image, COLMAP-style (<image>.png) or after the image
+        # stem (<stem>.png, e.g. the AtlasMobile export). Looking only for the first
+        # missed every <stem>.png mask, so fully masked 360 tiles stayed in.
+        stem = os.path.splitext(name)[0]
+        mask_file = next((p for p in (os.path.join(masks_dir, c) for c in (name, name + ".png", stem + ".png"))
+                          if os.path.isfile(p)), "")
+        if mask_file:
             with Image.open(mask_file) as mask_img:
                 mask_arr = mask_img.convert("L")
                 if not any(pixel > 127 for pixel in mask_arr.getdata()):
                     removed.append(name)
+                    if num_pts:
+                        removed_ids.add(image_id)  # has observations: drop them from the tracks
                     image_file = os.path.join(image_path, name)
                     if os.path.isfile(image_file):
                         os.remove(image_file)
@@ -1680,6 +1688,29 @@ def remove_fully_masked_images_for_gsplat(image_path, sparse_0_path, masks_dir, 
             f.write(name.encode("utf-8") + b"\x00")
             f.write(struct.pack("<Q", num_pts))
             f.write(points2d_raw)
+
+    # Drop the removed images from the point tracks, so no track points at an image
+    # that is no longer in images.bin (gsplat's parser maps every track element to an
+    # image name).
+    points3d_bin = os.path.join(sparse_0_path, "points3D.bin")
+    if removed_ids and os.path.isfile(points3d_bin):
+        with open(points3d_bin, "rb") as f:
+            data = f.read()
+        gone = np.array(sorted(removed_ids), dtype="<u4")
+        out, pos, dropped = bytearray(data[:8]), 8, 0
+        for _ in range(struct.unpack_from("<Q", data, 0)[0]):
+            head = data[pos:pos + 43]  # id, xyz, rgb, error
+            n_el = struct.unpack_from("<Q", data, pos + 43)[0]
+            els = np.frombuffer(data, dtype="<u4", count=2 * n_el, offset=pos + 51).reshape(-1, 2)
+            pos += 51 + 8 * n_el
+            keep_el = els[~np.isin(els[:, 0], gone)] if n_el else els
+            dropped += n_el - len(keep_el)
+            out += head + struct.pack("<Q", len(keep_el)) + keep_el.astype("<u4").tobytes()
+        if dropped:
+            shutil.copy2(points3d_bin, points3d_bin + ".bak_fully_masked")
+            with open(points3d_bin, "wb") as f:
+                f.write(bytes(out))
+            log.info(f"remove_fully_masked_images_for_gsplat: dropped {dropped} track elements of the removed images")
 
     log.info(
         f"remove_fully_masked_images_for_gsplat: kept {len(kept)}/{num_images} images"
